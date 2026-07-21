@@ -24,6 +24,10 @@ structured capability envelope containing contract versions, supported manifest
 versions, and enabled features; it deliberately omits storage locations,
 credentials, network endpoints, and owner information.
 
+The internal application boundary separates MCP and CLI adapters from use cases.
+It does not add a storage backend, lifecycle operation, command, or tool, and
+it is not an adapter extension contract.
+
 ## Not yet compatible
 
 The project does not yet provide a SQLite or PostgreSQL adapter, persistent
@@ -34,5 +38,6 @@ commitments will be documented when they exist.
 Earlier implementations and data stores are not a public runtime compatibility
 promise. Do not treat the legacy converter as a storage importer.
 
-See [manifest v2](manifest-v2.md), [security](security.md), and
+See [application boundary](application-boundary.md),
+[manifest v2](manifest-v2.md), [security](security.md), and
 [design evolution](design-evolution.md).

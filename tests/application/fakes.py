@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from datetime import UTC, datetime
+from uuid import UUID
+
+from aipcs_mcp.application.models import AuditEvent, MutationClaim, Service
+
+BACKEND_SENTINEL = "postgresql://secret@host/private"
+
+
+class FixedClock:
+    def __init__(self, *values: datetime):
+        self.values = list(values) or [datetime(2026, 1, 1, tzinfo=UTC)]
+        self.calls = 0
+
+    def now(self) -> datetime:
+        value = self.values[min(self.calls, len(self.values) - 1)]
+        self.calls += 1
+        return value
+
+
+class SequentialIds:
+    def __init__(self, *values: UUID):
+        self.values = list(values)
+        self.calls = 0
+
+    def new_service_id(self) -> UUID:
+        self.calls += 1
+        if self.values:
+            return self.values.pop(0)
+        return UUID(int=self.calls)
+
+
+class FakeRegistry:
+    """Durable fake state shared by fresh transaction objects."""
+
+    def __init__(self) -> None:
+        self.items: dict[UUID, Service] = {}
+        self.ledger: dict[tuple[str, str], tuple[str, Service]] = {}
+        self.events: list[AuditEvent] = []
+        self.uows: list[FakeUow] = []
+        self.commits = 0
+        self.fail_at: str | None = None
+        self.rollback_raises = False
+
+    def uow(self) -> FakeUow:
+        if self.fail_at == "uow":
+            raise RuntimeError(BACKEND_SENTINEL)
+        value = FakeUow(self)
+        self.uows.append(value)
+        return value
+
+
+class FakeUow:
+    def __init__(self, state: FakeRegistry) -> None:
+        self.state = state
+        self.items = deepcopy(state.items)
+        self.ledger = deepcopy(state.ledger)
+        self.events = deepcopy(state.events)
+        self.calls: list[str] = []
+
+    @property
+    def services(self) -> FakeUow:
+        return self
+
+    @property
+    def mutations(self) -> FakeUow:
+        return self
+
+    @property
+    def audits(self) -> FakeUow:
+        return self
+
+    def find_domain(self, principal_id: str, domain_name: str) -> Service | None:
+        self._called("find_domain")
+        found = next(
+            (
+                service
+                for service in self.items.values()
+                if service.principal_id == principal_id and service.domain_name == domain_name
+            ),
+            None,
+        )
+        return deepcopy(found)
+
+    def get(self, principal_id: str, service_id: UUID) -> Service | None:
+        self._called("get")
+        service = self.items.get(service_id)
+        if service is None or service.principal_id != principal_id:
+            return None
+        return deepcopy(service)
+
+    def list(self, principal_id: str, limit: int) -> list[Service]:
+        self._called("list")
+        scoped = [item for item in self.items.values() if item.principal_id == principal_id]
+        ordered = sorted(scoped, key=lambda item: (item.created_at, item.service_id))
+        return deepcopy(ordered[:limit])
+
+    def add(self, service: Service) -> None:
+        self._called("add")
+        self.items[service.service_id] = deepcopy(service)
+
+    def save(self, service: Service) -> None:
+        self._called("save")
+        self.items[service.service_id] = deepcopy(service)
+
+    def claim(self, principal_id: str, key: str, fingerprint: str) -> MutationClaim:
+        self._called("claim")
+        previous = self.ledger.get((principal_id, key))
+        if previous is None:
+            return MutationClaim("new")
+        if previous[0] == fingerprint:
+            return MutationClaim("replay", deepcopy(previous[1]))
+        return MutationClaim("conflict")
+
+    def complete(
+        self,
+        principal_id: str,
+        key: str,
+        fingerprint: str,
+        result: Service,
+    ) -> None:
+        self._called("complete")
+        self.ledger[(principal_id, key)] = (fingerprint, deepcopy(result))
+
+    def append(self, event: AuditEvent) -> None:
+        self._called("append")
+        self.events.append(deepcopy(event))
+
+    def commit(self) -> None:
+        self._called("commit")
+        self.state.items = deepcopy(self.items)
+        self.state.ledger = deepcopy(self.ledger)
+        self.state.events = deepcopy(self.events)
+        self.state.commits += 1
+
+    def rollback(self) -> None:
+        self.calls.append("rollback")
+        if self.state.rollback_raises:
+            raise RuntimeError(BACKEND_SENTINEL)
+
+    def _called(self, name: str) -> None:
+        self.calls.append(name)
+        if self.state.fail_at == name:
+            raise RuntimeError(BACKEND_SENTINEL)

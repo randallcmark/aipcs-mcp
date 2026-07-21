@@ -4,7 +4,7 @@ aipcs-mcp is a pre-release, self-hosted persistence foundation for AI agents.
 It is being built around stable, generic MCP primitives and an agent-designed
 relational memory schema.
 
-The current V1-03 slice provides a minimal, stateless MCP server boundary:
+The current V1-04 foundation preserves a minimal, stateless MCP server boundary:
 
 - manifest v2 validation for portable relational schemas;
 - an explicit, one-way legacy manifest-v1 library converter;
@@ -29,6 +29,8 @@ implemented in this slice.
 ## Contract documentation
 
 - [Manifest v2](docs/manifest-v2.md) describes the current schema boundary.
+- [Application boundary](docs/application-boundary.md) describes the internal
+  separation between transport, application use cases, and future adapters.
 - [Security and trust boundary](docs/security.md) describes safe inputs,
   errors, capability information, and transport restrictions.
 - [Compatibility](docs/compatibility.md) records what is and is not a public
@@ -48,6 +50,9 @@ That command is not a released install instruction. It starts a stdio MCP server
 with capability discovery only; there are no data operations yet. Listener
 transports and listener-oriented environment settings are rejected before server
 construction.
+
+The application boundary is internal construction work. It adds no storage,
+lifecycle behavior, data operation, CLI command, or MCP tool.
 
 Tests and example data in this repository are synthetic contract fixtures.
 They must not contain operational records, credentials, or personal context.
