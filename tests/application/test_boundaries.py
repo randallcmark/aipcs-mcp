@@ -35,6 +35,7 @@ FORBIDDEN_IMPORT_PARTS = frozenset(
         "cli",
         "mcp_server",
         "transport",
+        "configuration",
     }
 )
 FORBIDDEN_NAMES = frozenset(
@@ -106,11 +107,19 @@ def test_package_code_never_imports_test_fakes() -> None:
         assert not imported_parts & {"tests", "test", "fakes", "fake"}, module
 
 
-def test_cli_command_surface_remains_serve_only() -> None:
+def test_cli_command_surface_is_serve_and_config_show_validate() -> None:
     parser = build_parser()
     subparsers = next(
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
-    assert tuple(subparsers.choices) == ("serve",)
+    assert tuple(subparsers.choices) == ("serve", "config")
+
+    config_parser = subparsers.choices["config"]
+    config_subparsers = next(
+        action
+        for action in config_parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    assert tuple(config_subparsers.choices) == ("show", "validate")
 
     # The existing real stdio smoke owns the MCP tool-list assertion.

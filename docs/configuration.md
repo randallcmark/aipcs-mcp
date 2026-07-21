@@ -1,0 +1,129 @@
+# Configuration
+
+AIPCS resolves configuration once for each CLI invocation. The resolved snapshot
+is immutable and is passed to runtime wiring; application use cases do not read
+configuration files or environment variables.
+
+The configuration vocabulary describes only V1-05 behavior. It does not create
+storage, select an adapter implementation, connect to a database, or add MCP
+tools.
+
+## Commands
+
+    aipcs config show [--config PATH] [overrides]
+    aipcs config validate [--config PATH] [overrides]
+    aipcs serve [--config PATH] [overrides]
+
+`config show` prints one redacted JSON success envelope and may inspect an
+unavailable profile. `config validate` and `serve` require a runnable profile.
+Configuration commands do not construct an MCP server. `serve` emits no
+configuration report on stdout because stdout belongs to the stdio MCP protocol.
+
+The supported non-secret overrides are `--profile`, `--transport`,
+`--principal-id`, `--sqlite-data-root`, `--postgres-dsn-env`, and `--log-level`.
+When `serve` succeeds, the resolved log level is applied to stderr logging;
+configuration commands do not mutate process logging.
+
+## Precedence and file selection
+
+For every field, the winning value is:
+
+    explicit CLI option > documented AIPCS environment variable > selected TOML file > default
+
+The resolver records the winning source without retaining or reporting losing
+values. An omitted value differs from a present blank value; blank required
+values fail validation.
+
+| Field | Environment variable |
+| --- | --- |
+| Profile | `AIPCS_PROFILE` |
+| Transport | `AIPCS_TRANSPORT` |
+| Principal identity | `AIPCS_PRINCIPAL_ID` |
+| SQLite data-root descriptor | `AIPCS_SQLITE_DATA_ROOT` |
+| PostgreSQL DSN reference | `AIPCS_POSTGRES_DSN_ENV` |
+| Stderr log level | `AIPCS_LOG_LEVEL` |
+
+Only these exact names are read by the configuration resolver.
+Present-but-blank values fail validation; they do not fall through to a
+lower-precedence source.
+
+Before resolution, the stdio safety guard also rejects non-stdio values in
+`AIPCS_MCP_TRANSPORT`, plus any nonblank listener setting in `FASTMCP_HOST`,
+`FASTMCP_PORT`, `FASTMCP_MOUNT_PATH`, `FASTMCP_SSE_PATH`,
+`FASTMCP_MESSAGE_PATH`, `FASTMCP_STREAMABLE_HTTP_PATH`, `AIPCS_HOST`,
+`AIPCS_PORT`, `AIPCS_MOUNT_PATH`, `AIPCS_MCP_HOST`, `AIPCS_MCP_PORT`, or
+`AIPCS_MCP_MOUNT_PATH`. These are rejection guards, not supported settings.
+
+`--config PATH` is the only configuration-file selector. There is no environment
+selector, implicit project file, current-working-directory search, package
+directory search, or home-directory search. This makes editor and uvx stdio
+launches reproducible.
+
+## TOML document
+
+The selected file is a regular UTF-8 TOML file of at most 64 KiB with
+`config_version = 1`. Its shape allows at most 128 keys and eight levels. It
+rejects unknown keys, wrong types, malformed input, excessive structure, and
+literal credential fields. Because the operator selects the path explicitly
+and the document cannot contain supported secrets, a symlink to a regular file
+is accepted.
+
+    config_version = 1
+    profile = "stateless"
+    transport = "stdio"
+
+    [identity]
+    principal_id = "local_operator"
+
+    [logging]
+    level = "warning"
+
+The optional SQLite `data_root` descriptor must be absolute and no longer than
+4,096 characters. It is never opened or created in V1-05. PostgreSQL requires a
+`dsn_env` reference matching `^[A-Z][A-Z0-9_]{0,127}$`; its value is not read and
+connectivity is not tested. Logging level is one of `debug`, `info`, `warning`,
+or `error`.
+
+## Profiles and availability
+
+| Profile | V1-05 state | Validate or serve |
+| --- | --- | --- |
+| stateless | Available and runnable | Succeeds over stdio. |
+| sqlite | Recognised, unavailable | Returns unsupported_operation. |
+| postgresql | Recognised, unavailable | Returns unsupported_operation. |
+
+Persistent profiles require an explicit printable `principal_id` of at most 128
+characters. Stateless mode may omit
+it. This remains true when `config show` inspects an unavailable persistent
+profile. AIPCS does not derive an identity from the operating-system user, host,
+or current directory.
+
+An unavailable profile is not configured, connected, ready, or serving. It
+does not change server-info, construct a driver, or create storage.
+
+## Safe reports and failures
+
+`config show` contains only an allowlisted report: configuration version, selected
+profile, availability, non-sensitive settings, principal/storage
+configured/not-configured booleans, and field source labels. It never prints
+principal values, file names, paths, DSN-reference names, credentials, endpoints,
+raw TOML, or untrusted environment values.
+
+`config validate` succeeds only for a structurally valid runnable profile. Invalid
+configuration returns the existing `validation_failed` error envelope. Listener
+requests return `transport_not_supported`. Unavailable profiles return
+`unsupported_operation`. Failures are one public envelope on stderr and return
+exit status 2; successful config commands return one JSON success envelope on
+stdout and exit 0.
+
+There is no dotenv loading, configuration inheritance, include mechanism,
+secret-file support, remote configuration, profile plugin system, automatic
+reload, database probe, or directory creation.
+
+## Development use
+
+The checkout command below is a development smoke only, not a released install:
+
+    uvx --from . aipcs config validate
+
+See [security](security.md) and [compatibility](compatibility.md).

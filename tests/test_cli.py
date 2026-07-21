@@ -72,6 +72,7 @@ def test_stdio_configuration_constructs_server_only_after_preflight(
             calls.append(transport)
 
     monkeypatch.setattr(cli, "create_server", StubServer)
+    monkeypatch.setattr(cli, "_configure_stderr_logging", lambda _: None)
 
     assert cli.main(["serve", "--transport", "stdio"]) == 0
     assert calls == ["stdio"]

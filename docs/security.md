@@ -4,7 +4,7 @@ AIPCS treats agent-provided schema and configuration input as untrusted. The
 current public contract validates it before any future persistence boundary is
 reached.
 
-## Input and transport
+## Input, configuration, and transport
 
 - Public models reject unknown fields and enforce bounded, typed values.
 - Service identifiers must be lowercase canonical UUIDs.
@@ -12,11 +12,17 @@ reached.
   are rejected from normal input.
 - Manifest v1 is accepted only by the explicit one-way converter, never by
   normal public design input.
+- Configuration is strict TOML selected only with an explicit `--config` path.
+  It has no implicit file discovery, dotenv loading, include mechanism, or
+  literal credential field.
+- Configuration reports are allowlisted and redact principal values, file and
+  storage paths, DSN-reference names, secrets, endpoints, raw TOML, and raw
+  environment values.
 - Public v1 is stdio only. Listener-oriented transport settings are rejected
-  before any MCP server construction.
+  before configuration resolution and before any MCP server construction.
 
-No listener, remote transport, hosted service, or authentication flow is
-implemented in this slice.
+No listener, remote transport, hosted service, authentication flow, storage
+adapter, database connection, or migration is implemented in this slice.
 
 ## Safe responses
 
@@ -28,7 +34,8 @@ part of the contract.
 Capability information intentionally reports only public features: package and
 contract versions, manifest support, enabled transport, and safe operational
 status. It must not expose credentials, DSNs, filesystem locations, owner
-information, or network endpoints.
+information, or network endpoints. A recognised unavailable configuration
+profile is not advertised as a server capability.
 
 ## Test data and operational boundary
 
