@@ -1,31 +1,60 @@
 # AIPCS MCP
 
-`aipcs-mcp` is the future open-source implementation of AIPCS: a self-hosted
-persistence layer for AI agents using stable, generic MCP primitives.
+aipcs-mcp is a pre-release, self-hosted persistence foundation for AI agents.
+It is being built around stable, generic MCP primitives and an agent-designed
+relational memory schema.
 
-This repository is currently a public-v1 scaffold. Version `0.0.0.dev0` does
-not yet provide an MCP server, CLI, storage adapter, or installable workflow.
-It establishes a clean public history and hygiene boundary before implementation
-is introduced.
+The current V1-03 slice provides a minimal, stateless MCP server boundary:
 
-## Public-v1 direction
+- manifest v2 validation for portable relational schemas;
+- an explicit, one-way legacy manifest-v1 library converter;
+- stable structured errors and safe capability information;
+- an `aipcs serve` command restricted to stdio; and
+- one read-only `aipcs_server_info` MCP tool, verified through a real client.
 
-The intended v1 product is local-first and `stdio`-only. It will provide
-server-owned generic primitives, SQLite as the zero-configuration reference
-adapter, a PostgreSQL reference adapter, validated relational schemas, portable
-lifecycle operations, and an `aipcs` command when the runtime is complete.
+It does **not** yet provide persistence, a storage adapter, service or record
+lifecycle operations, export/import bundles, an administration CLI, or a
+released installation workflow.
 
-## Non-goals for public v1
+## Public v1 direction
 
-- dynamically generated domain-specific MCP tools or per-domain web services;
-- fuzzy, semantic, full-text, or cross-service retrieval;
-- public remote MCP, hosted tenancy, OAuth/DCR, or zero-knowledge hosting; and
-- automatic deletion, archival, merging, or rewriting of memory.
+Public v1 is local-first and stdio-only. The server will own a small set of
+generic primitives; schemas describe records, relationships, indexes, and
+retrieval intent rather than creating bespoke MCP tools or services.
 
-See [compatibility](docs/compatibility.md) and
-[design evolution](docs/design-evolution.md).
+SQLite will be the zero-configuration reference adapter. PostgreSQL will be a
+second reference adapter demonstrating the same storage boundary. Neither is
+implemented in this slice.
+
+## Contract documentation
+
+- [Manifest v2](docs/manifest-v2.md) describes the current schema boundary.
+- [Security and trust boundary](docs/security.md) describes safe inputs,
+  errors, capability information, and transport restrictions.
+- [Compatibility](docs/compatibility.md) records what is and is not a public
+  compatibility promise.
+- [Design evolution](docs/design-evolution.md) explains decisions retained from
+  earlier design work and concepts intentionally retired.
 
 ## Development status
 
-There is no supported installation command yet. Treat this tree as scaffolding
-until a released runtime and contributor guidance exist.
+There is no supported release installation or production deployment at this
+stage. From a checkout, the stateless server can be run as a **development smoke
+only**:
+
+    uvx --from . aipcs serve
+
+That command is not a released install instruction. It starts a stdio MCP server
+with capability discovery only; there are no data operations yet. Listener
+transports and listener-oriented environment settings are rejected before server
+construction.
+
+Tests and example data in this repository are synthetic contract fixtures.
+They must not contain operational records, credentials, or personal context.
+
+## Out of scope for public v1
+
+- dynamically generated domain-specific MCP tools or per-domain web services;
+- fuzzy, semantic, full-text, or cross-service retrieval;
+- remote MCP, hosted tenancy, OAuth/DCR, or zero-knowledge hosting; and
+- automatic deletion, archival, merging, or rewriting of memory.

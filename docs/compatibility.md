@@ -1,22 +1,38 @@
 # Compatibility and release boundary
 
-This scaffold establishes names and compatibility intent; it does not implement
-an MCP server or promise a supported installation.
+aipcs-mcp is pre-release (0.0.0.dev0). The current public surface is a stateless
+contract-validation and stdio capability server; it is not a supported release.
 
-| Layer | Identifier | Purpose |
+| Layer | Identifier | Current status |
 | --- | --- | --- |
-| Distribution | `aipcs-mcp` SemVer | Installed code and future `aipcs` command. |
-| MCP capability contract | `aipcs_mcp_contract` SemVer | Tools, errors, and lifecycle semantics. |
-| Schema manifest | `manifest_version` | Schema-document interpretation. |
-| Storage migration | Adapter revision | Physical backend layout and repair state. |
-| Export bundle | `export_format_version` | Portable data layout and import rules. |
+| Distribution | aipcs-mcp SemVer | Local development package and aipcs command; no released install. |
+| MCP capability contract | aipcs_mcp_contract SemVer | One server-info tool with versioned safe capability and error shapes. |
+| Schema manifest | manifest_version | Manifest v2 is the only normal public design input. |
+| Legacy conversion | Explicit manifest-v1 converter | One-way library conversion with provenance and warnings. |
+| Storage migration | Adapter revision | Not implemented. |
+| Export bundle | export_format_version | Not implemented. |
 
-The intended public-v1 envelope is Python 3.12+, local `stdio` transport,
-server-owned generic tools, SQLite plus PostgreSQL reference adapters, explicit
-relationship/index enforcement, additive schema evolution, and separate design
-and operational lifecycle states.
+## Current contract
 
-Fuzzy or cross-service retrieval, public remote MCP, hosted tenancy, and
-automatic memory deletion are outside public v1. Earlier private stores are not
-a public runtime compatibility promise; a future one-way importer will document
-its supported range with the implementation.
+Normal design input accepts manifest v2 only. The explicit legacy converter is
+the sole v1 entry point: it produces a v2 manifest and reports discarded fields
+and warnings. It does not write data, create storage, or promise a reversible
+round trip.
+
+The `aipcs serve` command starts over stdio only. Its sole MCP tool exposes a
+structured capability envelope containing contract versions, supported manifest
+versions, and enabled features; it deliberately omits storage locations,
+credentials, network endpoints, and owner information.
+
+## Not yet compatible
+
+The project does not yet provide a SQLite or PostgreSQL adapter, persistent
+service or record operations, schema migration engine, export bundle,
+administration CLI, or deployment interface. Their future compatibility
+commitments will be documented when they exist.
+
+Earlier implementations and data stores are not a public runtime compatibility
+promise. Do not treat the legacy converter as a storage importer.
+
+See [manifest v2](manifest-v2.md), [security](security.md), and
+[design evolution](design-evolution.md).

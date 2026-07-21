@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aipcs-mcp"
 version = "0.0.0.dev0"
-description = "Public-v1 scaffold for the AIPCS MCP persistence layer."
+description = "Contract-first MCP server for agent-defined persistent context services."
 readme = "README.md"
 requires-python = ">=3.12" # Matches the current reference implementation floor.
 authors = [{ name = "AIPCS maintainers" }]
@@ -15,11 +15,30 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 
+dependencies = [
+  "mcp>=1.27,<2",
+  "pydantic>=2.11,<3",
+]
+
+[project.scripts]
+aipcs = "aipcs_mcp.cli:main"
+
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = [
+  "pytest>=8",
+  "ruff>=0.8,<1",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501", "SIM102"]
