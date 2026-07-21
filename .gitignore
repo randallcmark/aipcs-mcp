@@ -1,0 +1,63 @@
+# Local AIPCS state and database sidecars
+.data*
+*.sqlite
+*.sqlite3
+*.db
+*.db3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Captured conversations, research payloads, exports, and private preservation material
+transcripts/
+captures/
+research/
+archives/
+private-data/
+*-transcript.*
+*-session.*
+20??-??-??-*.txt
+*preservation-manifest*
+*private-artifact*
+source-sha256.tsv
+destination-sha256.tsv
+secrets.json
+credentials.json
+
+# Private agent and local-tool overlays
+AGENTS.md
+CLAUDE.md
+.agents/
+.claude/
+.codex/
+.cursor/
+.vscode/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Python/build/editor output
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+coverage.xml
+htmlcov/
+.DS_Store

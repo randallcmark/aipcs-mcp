@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aipcs-mcp"
+version = "0.0.0.dev0"
+description = "Public-v1 scaffold for the AIPCS MCP persistence layer."
+readme = "README.md"
+requires-python = ">=3.12" # Matches the current reference implementation floor.
+authors = [{ name = "AIPCS maintainers" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
