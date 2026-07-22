@@ -799,7 +799,7 @@ def run_installed_catalog_smoke(
 
 
 def _domain_schema_smoke_program() -> str:
-    """Standalone installed V1-07B domain-schema proof with no checkout imports."""
+    """Standalone installed V1-07B/C domain-schema proof with no checkout imports."""
 
     return r'''
 import site
@@ -813,8 +813,9 @@ import aipcs_mcp.storage.sqlite.domain_schema as domain_schema_module
 import aipcs_mcp.storage.sqlite.domain_schema_layout as domain_schema_layout_module
 import aipcs_mcp.storage.sqlite.service_store as service_store_module
 import aipcs_mcp.storage.sqlite.service_store_inspection as service_store_inspection_module
+import aipcs_mcp.storage.sqlite.sql_tokens as sql_tokens_module
 from aipcs_mcp.manifest_v2 import ManifestV2
-from aipcs_mcp.relational import compile_manifest
+from aipcs_mcp.relational import classify_transition, compile_manifest
 from aipcs_mcp.storage import DomainSchemaState
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
 from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
@@ -826,6 +827,7 @@ for module in (
     domain_schema_layout_module,
     service_store_module,
     service_store_inspection_module,
+    sql_tokens_module,
 ):
     origin = Path(module.__file__).resolve()
     assert any(origin.is_relative_to(value) for value in sites), origin
@@ -842,7 +844,7 @@ managed = [
 def entity(name, attributes):
     return {"name": name, "attributes": deepcopy(managed) + attributes}
 
-document = {
+source_document = {
     "manifest_version": 2,
     "schema_version": 1,
     "entities": [
@@ -889,24 +891,76 @@ document = {
     "discovery_facets": [],
     "migration_history": [],
 }
-specification = compile_manifest(ManifestV2.model_validate(document))
+target_document = deepcopy(source_document)
+target_document["schema_version"] = 2
+target_document["migration_history"] = [{
+    "from_schema_version": 1,
+    "to_schema_version": 2,
+    "operations": ["add project summary and task"],
+}]
+target_document["entities"][1]["attributes"].append({"name": "summary", "type": "string"})
+target_document["entities"].append(entity("task", [
+    {"name": "project_id", "type": "uuid", "required": True},
+    {"name": "label", "type": "string", "required": True},
+]))
+target_document["relationships"].append({
+    "name": "task_project_fk",
+    "from": {"entity": "task", "field": "project_id"},
+    "to": {"entity": "project", "field": "id"},
+    "on_delete": "restrict",
+})
+target_document["indices"].extend([
+    {
+        "name": "project_summary_title_idx",
+        "entity": "project",
+        "fields": ["summary", "title"],
+    },
+    {
+        "name": "task_project_owner_unique_idx",
+        "entity": "task",
+        "fields": ["project_id", "owner_id"],
+        "unique": True,
+    },
+])
+source_manifest = ManifestV2.model_validate(source_document)
+target_manifest = ManifestV2.model_validate(target_document)
+source_specification = compile_manifest(source_manifest)
+target_specification = compile_manifest(target_manifest)
+transition = classify_transition(source_manifest, target_manifest)
 policy = SQLiteLocationPolicy(root)
 catalog = SQLiteServiceStoreCatalog(policy)
 locator = catalog.allocate(UUID(int=41))
 assert catalog.migrate(locator).status == "ready"
 store = SQLiteDomainSchemaStore(policy)
-assert store.inspect(locator, specification) == DomainSchemaState("unmaterialised")
-assert store.materialise(locator, specification) == DomainSchemaState("ready")
-assert store.inspect(locator, specification) == DomainSchemaState("ready")
-assert store.materialise(locator, specification) == DomainSchemaState("ready")
+assert store.inspect(locator, source_specification) == DomainSchemaState("unmaterialised")
+assert store.materialise(locator, source_specification) == DomainSchemaState("ready")
+assert store.inspect(locator, source_specification) == DomainSchemaState("ready")
 
 database = root / "service-stores" / f"{locator.namespace}.sqlite"
+with sqlite3.connect(database) as connection:
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute(
+        'INSERT INTO "account" ("id","owner_id","created_at","updated_at","created_via",'
+        '"record_version","label") VALUES (?,?,?,?,?,?,?)',
+        ("account-1", "owner", "t", "t", "smoke", 1, "Account"),
+    )
+    connection.execute(
+        'INSERT INTO "project" ("id","owner_id","created_at","updated_at","created_via",'
+        '"record_version","title","quantity","account_id") VALUES (?,?,?,?,?,?,?,?,?)',
+        ("project-1", "owner", "t", "t", "smoke", 1, "Project", 7, "account-1"),
+    )
+
+assert store.evolve(locator, transition) == DomainSchemaState("ready")
+assert store.inspect(locator, target_specification) == DomainSchemaState("ready")
+assert store.inspect(locator, source_specification) == DomainSchemaState("incompatible")
+assert store.evolve(locator, transition) == DomainSchemaState("ready")
+
 with sqlite3.connect(database) as connection:
     project = tuple(
         (row[1], row[2], row[3])
         for row in connection.execute('PRAGMA table_xinfo("project")')
     )
-    assert project[-8:] == (
+    assert project[-9:] == (
         ("title", "TEXT", 1),
         ("quantity", "INTEGER", 0),
         ("ratio", "REAL", 0),
@@ -915,7 +969,12 @@ with sqlite3.connect(database) as connection:
         ("account_id", "TEXT", 0),
         ("parent_id", "TEXT", 0),
         ("labels", "TEXT", 0),
+        ("summary", "TEXT", 0),
     )
+    assert connection.execute(
+        'SELECT "title","quantity","account_id","summary" FROM "project" WHERE "id"=?',
+        ("project-1",),
+    ).fetchone() == ("Project", 7, "account-1", None)
     foreign_keys = tuple(connection.execute('PRAGMA foreign_key_list("project")'))
     assert foreign_keys == (
         (0, 0, "project", "parent_id", "id", "RESTRICT", "RESTRICT", "NONE"),
@@ -937,12 +996,33 @@ with sqlite3.connect(database) as connection:
         if row[5]
     )
     assert unique_ordered == ("account_id", "title")
+    assert tuple(connection.execute('PRAGMA foreign_key_list("task")')) == (
+        (0, 0, "project", "project_id", "id", "RESTRICT", "RESTRICT", "NONE"),
+    )
+    assert tuple(
+        row[2]
+        for row in connection.execute('PRAGMA index_xinfo("project_summary_title_idx")')
+        if row[5]
+    ) == ("summary", "title")
+    assert tuple(
+        row[2]
+        for row in connection.execute('PRAGMA index_xinfo("task_project_owner_unique_idx")')
+        if row[5]
+    ) == ("project_id", "owner_id")
     index_flags = {
         row[1]: row[2]
         for row in connection.execute('PRAGMA index_list("project")')
     }
     assert index_flags["project_title_quantity_idx"] == 0
     assert index_flags["project_account_title_unique_idx"] == 1
+    connection.execute("PRAGMA writable_schema=ON")
+    connection.execute(
+        "UPDATE sqlite_schema SET sql=replace(sql, 'CREATE TABLE', 'CREATE\tTABLE') "
+        "WHERE type='table' AND name='project'"
+    )
+    connection.execute("PRAGMA writable_schema=OFF")
+
+assert store.inspect(locator, target_specification) == DomainSchemaState("ready")
 '''
 
 
@@ -954,7 +1034,7 @@ def run_installed_domain_schema_smoke(
     environment: Mapping[str, str],
     redaction_roots: Iterable[Path],
 ) -> None:
-    """Exercise installed V1-07B initial materialisation from an external cwd."""
+    """Exercise installed V1-07B/C private schema convergence from an external cwd."""
 
     client = workspace / f"{name}-domain-schema-smoke.py"
     client.write_text(_domain_schema_smoke_program(), encoding="utf-8")

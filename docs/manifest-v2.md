@@ -64,8 +64,10 @@ or derive a physical delta.
 In the ready SQLite lifecycle profile, a validated initial manifest is stored
 against a service seed. That is registry persistence only: it does not
 materialise a service store, create tables, or make records available. A future
-migration and lifecycle slice will define how later schema versions are
-applied.
+lifecycle slice will define how later schema versions are applied publicly. A
+private SQLite adapter may directly apply a separately supplied validated
+additive transition to an already materialised store, but it neither updates
+registry-held manifest state nor exposes public service evolution.
 
 ## Retired input
 

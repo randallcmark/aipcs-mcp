@@ -370,6 +370,10 @@ def test_embedded_domain_schema_client_exercises_the_source_contract(
     compile(program, "installed_domain_schema_smoke.py", "exec")
     assert "SQLiteDomainSchemaStore" in program
     assert 'catalog.migrate(locator).status == "ready"' in program
+    assert "classify_transition" in program
+    assert "store.evolve(locator, transition)" in program
+    assert 'source_specification) == DomainSchemaState("incompatible")' in program
+    assert "PRAGMA writable_schema=ON" in program
     assert 'ordered == ("title", "quantity")' in program
     assert "site.getsitepackages()" in program
 

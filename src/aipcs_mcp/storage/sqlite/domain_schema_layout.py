@@ -1,8 +1,8 @@
 """Canonical SQLite layout derived from one relational specification.
 
 This module is intentionally pure: it neither opens SQLite nor owns a service
-location.  The future domain-schema store uses its immutable output for both
-DDL and exact physical inspection.
+location. The private domain-schema store uses its immutable output for DDL and
+exact physical inspection.
 """
 
 from __future__ import annotations
@@ -10,11 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aipcs_mcp.relational import (
+    FieldAddition,
+    MetadataChange,
+    RelationalAdditions,
     RelationalEntity,
     RelationalField,
     RelationalIndex,
     RelationalRelationship,
     RelationalSpecification,
+    RelationalTransition,
+    _expected_additions,
 )
 from aipcs_mcp.storage.errors import StorageContractError
 
@@ -55,7 +60,7 @@ class SQLiteDomainTableLayout:
 
 @dataclass(frozen=True)
 class SQLiteDomainSchemaLayout:
-    """The complete immutable initial SQLite physical target."""
+    """The complete immutable SQLite physical target."""
 
     schema_version: int
     tables: tuple[SQLiteDomainTableLayout, ...]
@@ -81,6 +86,15 @@ class SQLiteDomainSchemaLayout:
         return self.indices + tuple(table.implicit_primary_key_index for table in self.tables)
 
 
+@dataclass(frozen=True)
+class SQLiteDomainTransitionLayout:
+    """One detached additive transition and its canonical SQLite DDL."""
+
+    current: SQLiteDomainSchemaLayout
+    target: SQLiteDomainSchemaLayout
+    ddl: tuple[str, ...]
+
+
 def build_domain_schema_layout(specification: RelationalSpecification) -> SQLiteDomainSchemaLayout:
     """Return the exact SQLite layout for one deeply revalidated specification.
 
@@ -93,17 +107,103 @@ def build_domain_schema_layout(specification: RelationalSpecification) -> SQLite
     failure: StorageContractError | None = None
     try:
         checked = _detached_specification(specification)
-        tables = tuple(_table_layout(entity, checked.relationships) for entity in checked.entities)
-        indices = tuple(_index_layout(index, checked.entities) for index in checked.indices)
-        return SQLiteDomainSchemaLayout(
-            schema_version=checked.schema_version,
-            tables=tables,
-            indices=indices,
-            ddl=tuple(table.sql for table in tables) + tuple(index.sql for index in indices),
-        )
+        return _build_checked_layout(checked)
     except Exception:
         failure = StorageContractError()
     raise failure from None
+
+
+def build_domain_transition_layout(
+    transition: RelationalTransition,
+) -> SQLiteDomainTransitionLayout:
+    """Return one deeply revalidated immutable SQLite transition plan."""
+
+    failure: StorageContractError | None = None
+    try:
+        if type(transition) is not RelationalTransition:
+            raise StorageContractError()
+        current = _detached_specification(transition.current)
+        target = _detached_specification(transition.target)
+        if target.schema_version != current.schema_version + 1:
+            raise StorageContractError()
+
+        additions = transition.additions
+        if (
+            type(additions) is not RelationalAdditions
+            or type(additions.entities) is not tuple
+            or type(additions.fields) is not tuple
+            or type(additions.relationships) is not tuple
+            or type(additions.indices) is not tuple
+            or any(type(item) is not RelationalEntity for item in additions.entities)
+            or any(type(item) is not FieldAddition for item in additions.fields)
+            or any(type(item.field) is not RelationalField for item in additions.fields)
+            or any(type(item) is not RelationalRelationship for item in additions.relationships)
+            or any(type(item) is not RelationalIndex for item in additions.indices)
+        ):
+            raise StorageContractError()
+        checked_additions = _expected_additions(current, target)
+        if additions != checked_additions:
+            raise StorageContractError()
+
+        changes = transition.metadata_changes
+        if type(changes) is not tuple or any(
+            type(change) is not MetadataChange for change in changes
+        ):
+            raise StorageContractError()
+        checked_changes = tuple(
+            MetadataChange(change.kind, change.entity, change.field) for change in changes
+        )
+        if (
+            checked_changes != changes
+            or checked_changes != tuple(sorted(checked_changes, key=_metadata_sort_key))
+            or len(set(checked_changes)) != len(checked_changes)
+            or not (
+                checked_additions.entities
+                or checked_additions.fields
+                or checked_additions.relationships
+                or checked_additions.indices
+                or checked_changes
+            )
+        ):
+            raise StorageContractError()
+
+        current_layout = _build_checked_layout(current)
+        target_layout = _build_checked_layout(target)
+        tables = {table.name: table for table in target_layout.tables}
+        indices = {index.name: index for index in target_layout.indices}
+        ddl = tuple(tables[entity.name].sql for entity in checked_additions.entities)
+        ddl += tuple(
+            f"ALTER TABLE {_quote(addition.entity)} ADD COLUMN {_field_declaration(addition.field)}"
+            for addition in checked_additions.fields
+        )
+        ddl += tuple(
+            indices[index.name].sql
+            for index in checked_additions.indices
+            if indices[index.name].sql is not None
+        )
+        return SQLiteDomainTransitionLayout(current_layout, target_layout, ddl)
+    except StorageContractError:
+        failure = StorageContractError()
+    except Exception:
+        failure = StorageContractError()
+    raise failure from None
+
+
+def _build_checked_layout(specification: RelationalSpecification) -> SQLiteDomainSchemaLayout:
+    tables = tuple(
+        _table_layout(entity, specification.relationships) for entity in specification.entities
+    )
+    indices = tuple(_index_layout(index, specification.entities) for index in specification.indices)
+    return SQLiteDomainSchemaLayout(
+        schema_version=specification.schema_version,
+        tables=tables,
+        indices=indices,
+        ddl=tuple(table.sql for table in tables) + tuple(index.sql for index in indices),
+    )
+
+
+def _metadata_sort_key(change: MetadataChange) -> tuple[str, str, str]:
+    return (change.kind, change.entity or "", change.field or "")
 
 
 def _detached_specification(value: object) -> RelationalSpecification:

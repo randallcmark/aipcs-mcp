@@ -31,7 +31,7 @@ private SQLite service-store catalog is not injected into the application and
 has no application port for materialisation or records. The private
 `DomainSchemaStore` relational-schema protocol is likewise uncomposed: it
 freezes pure inspection/materialisation/evolution signatures but has no runtime
-implementation or call path. A successfully
+composition or call path. A successfully
 acquired registry unit is always closed exactly once. `commit()` and `rollback()`
 terminate its transaction attempt; `close()` releases resources and performs
 adapter-safe cleanup of an unterminated attempt. The application preserves the
@@ -89,7 +89,7 @@ manifest but does not apply it to physical tables: a resulting service remains
 `seeded`, has no storage projection, and cannot hold records. There is no
 standalone lifecycle/admin CLI, public service-store allocation or
 materialisation, record API, export/import, PostgreSQL, remote transport, or
-adapter discovery mechanism. The packaged private catalog remains outside this
-application and public capability surface.
+adapter discovery mechanism. The packaged private catalog and domain-schema
+store remain outside this application and public capability surface.
 
 See [compatibility](compatibility.md) and [security](security.md).

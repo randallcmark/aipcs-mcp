@@ -6,8 +6,8 @@ stable generic MCP tools, and an agent-designed relational memory model.
 
 The current code establishes the manifest and trust boundaries plus a
 local-stdio SQLite registry lifecycle. It persists service seeds and initial
-manifest designs, but service-store materialisation and records remain future
-slices.
+manifest designs, but public service-store materialisation and records remain
+future slices. Private SQLite adapter seams do not alter that public boundary.
 
 | Earlier direction | Public-v1 direction |
 | --- | --- |

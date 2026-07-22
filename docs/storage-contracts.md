@@ -142,15 +142,32 @@ also `unmaterialised`; any partial disappearance remains detectable as `incompat
 registry-lifecycle composition supplies the historical context needed to treat an unexpectedly
 empty previously materialised service as a cross-store recovery case.
 
+For domain tables only, exact SQL fidelity means the same fail-closed SQLite
+lexical-token sequence with inter-token ASCII whitespace ignored. Quoted
+identifiers and literals, case, spelling, punctuation, constraints, comments,
+and every other token remain exact; malformed or unsupported SQL is
+incompatible. This accommodates SQLite's whitespace rewrite after an accepted
+`ALTER TABLE ... ADD COLUMN` without accepting a semantic rewrite. Object
+names, table and foreign-key signatures, internal objects, explicit-index SQL
+and signatures, and `foreign_key_check` remain exact.
+
 `materialise()` supports initial physical DDL only, and therefore accepts only
 `schema_version == 1`. It atomically creates the deterministic tables and
 ordered explicit indexes only from `unmaterialised`; repeat materialisation of
 the exact layout is a no-op, and an incompatible layout is preserved. SQLite
 foreign keys are named, `ON DELETE RESTRICT ON UPDATE RESTRICT`, immediate,
 and never `DEFERRABLE`; nullable foreign-key fields are the supported way to
-stage otherwise cyclic data. `evolve()` deeply revalidates the internally consistent additive
-transition value but is deliberately unavailable and performs no location I/O; Python object
-identity is not treated as a provenance seal.
+stage otherwise cyclic data. `evolve()` deeply revalidates one caller-supplied,
+adjacent additive transition, then under one exclusive transaction accepts an
+exact target as a no-op or an exact current layout as the source for canonical
+DDL. It may create new entity tables, append nullable fields to existing
+tables, and create new explicit indexes; relationships are emitted only from a
+new source table. It never rebuilds, renames, drops, copies, backfills,
+rewrites, or repairs a table. If neither current nor target is exact, the
+layout is `incompatible` and remains untouched. The target is the physical
+authority for repeat safety, including metadata-only transitions; no schema
+version, transition, or ledger is persisted. Python object identity is not a
+provenance seal.
 
 This private store is not composed by the runtime, MCP tools, CLI,
 configuration, registry lifecycle, or record surface. It provides no domain
@@ -180,6 +197,9 @@ The supported transition grammar is intentionally additive: new entities,
 nullable append-only fields, explicit new indexes, and approved application-only
 metadata changes (including typed allowed-value expansion). It rejects
 renames/removals, rebuilds, required additions, relationship retrofit on an
-existing source table, index mutation, and allowed-value narrowing. This port
-is uncomposed in the current runtime. It does not materialise a service, access
-a database, or alter the public MCP, CLI, configuration, or lifecycle surface.
+existing source table, index mutation, and allowed-value narrowing. The
+registry-held manifest is the architectural authority, but this private store
+does not read or cross-check registry state; later lifecycle composition owns
+that coordination. This port is uncomposed in the current runtime. It does not
+materialise a public service or alter the public MCP, CLI, configuration, or
+lifecycle surface.

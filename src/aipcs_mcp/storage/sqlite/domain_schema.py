@@ -1,4 +1,4 @@
-"""Private exact SQLite domain-schema materialisation; uncomposed by runtime."""
+"""Private exact SQLite domain-schema persistence; uncomposed by runtime."""
 
 from __future__ import annotations
 
@@ -7,17 +7,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from functools import wraps
 
-from aipcs_mcp.relational import (
-    FieldAddition,
-    MetadataChange,
-    RelationalAdditions,
-    RelationalEntity,
-    RelationalIndex,
-    RelationalRelationship,
-    RelationalSpecification,
-    RelationalTransition,
-    _expected_additions,
-)
+from aipcs_mcp.relational import RelationalSpecification, RelationalTransition
 from aipcs_mcp.storage.contracts import (
     DomainSchemaState,
     ServiceStoreLocator,
@@ -32,12 +22,13 @@ from . import service_store_inspection
 from .connection import connect
 from .domain_schema_layout import (
     SQLiteDomainSchemaLayout,
-    _detached_specification,
     build_domain_schema_layout,
+    build_domain_transition_layout,
 )
 from .location import AnchoredLocation, SQLiteLocationPolicy
 from .service_store_migrations import INDEX_XINFO as FOUNDATION_INDEX_XINFO
 from .service_store_migrations import RESERVED_PREFIX
+from .sql_tokens import sql_tokens_equal
 
 _FOREIGN_KEY_CHECK_BUDGET = 100_000
 
@@ -61,7 +52,7 @@ def _bounded[**P, R](method: Callable[P, R]) -> Callable[P, R]:
 
 
 class SQLiteDomainSchemaStore:
-    """Own exact initial domain DDL inside an existing ready service store."""
+    """Own exact domain DDL inside an existing ready service store."""
 
     def __init__(self, location: SQLiteLocationPolicy) -> None:
         if not isinstance(location, SQLiteLocationPolicy):
@@ -148,9 +139,69 @@ class SQLiteDomainSchemaStore:
         locator: ServiceStoreLocator,
         transition: RelationalTransition,
     ) -> DomainSchemaState:
-        _namespace(locator)
-        _validate_transition(transition)
-        raise StorageMigrationError()
+        namespace = _namespace(locator)
+        layout = build_domain_transition_layout(transition)
+
+        anchored: AnchoredLocation | None = None
+        connection: sqlite3.Connection | None = None
+        committed = False
+        try:
+            anchored = _acquire_existing(self._location, namespace)
+            connection = connect(anchored, "rw", query_only=False)
+            connection.execute("BEGIN EXCLUSIVE")
+            _require_ready_foundation(connection, namespace)
+            anchored.verify_database_identity()
+
+            if _inspect_domain(connection, layout.target).status == "ready":
+                connection.rollback()
+                anchored.verify_database_identity()
+                connection.close()
+                connection = None
+                anchored.verify_database_identity()
+                anchored.close()
+                anchored = None
+                return DomainSchemaState("ready")
+
+            if _inspect_domain(connection, layout.current).status != "ready":
+                connection.rollback()
+                anchored.verify_database_identity()
+                connection.close()
+                connection = None
+                anchored.verify_database_identity()
+                anchored.close()
+                anchored = None
+                return DomainSchemaState("incompatible")
+
+            anchored.verify_database_identity()
+            for statement in layout.ddl:
+                connection.execute(statement)
+            _require_ready_foundation(connection, namespace)
+            if _inspect_domain(connection, layout.target).status != "ready":
+                raise StorageMigrationError()
+            anchored.verify_database_identity()
+            connection.commit()
+            committed = True
+            anchored.verify_database_identity()
+            connection.close()
+            connection = None
+            anchored.verify_database_identity()
+            anchored.close()
+            anchored = None
+
+            state = _inspect_existing(self._location, namespace, layout.target)
+            if state.status != "ready":
+                raise StorageMigrationError()
+            return state
+        finally:
+            if connection is not None:
+                if not committed:
+                    with suppress(Exception):
+                        connection.rollback()
+                with suppress(Exception):
+                    connection.close()
+            if anchored is not None:
+                with suppress(Exception):
+                    anchored.close()
 
 
 def _namespace(locator: ServiceStoreLocator) -> str:
@@ -161,62 +212,6 @@ def _namespace(locator: ServiceStoreLocator) -> str:
     except Exception:
         raise StorageContractError() from None
     return checked.namespace
-
-
-def _validate_transition(value: object) -> None:
-    if type(value) is not RelationalTransition:
-        raise StorageContractError()
-    try:
-        current = _detached_specification(value.current)
-        target = _detached_specification(value.target)
-        if target.schema_version != current.schema_version + 1:
-            raise StorageContractError()
-
-        additions = value.additions
-        if (
-            type(additions) is not RelationalAdditions
-            or type(additions.entities) is not tuple
-            or type(additions.fields) is not tuple
-            or type(additions.relationships) is not tuple
-            or type(additions.indices) is not tuple
-            or any(type(item) is not RelationalEntity for item in additions.entities)
-            or any(type(item) is not FieldAddition for item in additions.fields)
-            or any(type(item) is not RelationalRelationship for item in additions.relationships)
-            or any(type(item) is not RelationalIndex for item in additions.indices)
-        ):
-            raise StorageContractError()
-        if additions != _expected_additions(current, target):
-            raise StorageContractError()
-
-        changes = value.metadata_changes
-        if type(changes) is not tuple or any(
-            type(change) is not MetadataChange for change in changes
-        ):
-            raise StorageContractError()
-        checked_changes = tuple(
-            MetadataChange(change.kind, change.entity, change.field) for change in changes
-        )
-        if (
-            checked_changes != changes
-            or checked_changes != tuple(sorted(checked_changes, key=_metadata_sort_key))
-            or len(set(checked_changes)) != len(checked_changes)
-            or not (
-                additions.entities
-                or additions.fields
-                or additions.relationships
-                or additions.indices
-                or changes
-            )
-        ):
-            raise StorageContractError()
-    except StorageContractError:
-        raise
-    except Exception:
-        raise StorageContractError() from None
-
-
-def _metadata_sort_key(change: MetadataChange) -> tuple[str, str, str]:
-    return (change.kind, change.entity or "", change.field or "")
 
 
 def _acquire_existing(location: SQLiteLocationPolicy, namespace: str) -> AnchoredLocation:
@@ -297,7 +292,7 @@ def _inspect_domain(
             if (
                 row["type"] != "table"
                 or row["tbl_name"] != table.name
-                or row["sql"] != table.sql
+                or not sql_tokens_equal(row["sql"], table.sql)
                 or tuple(map(tuple, connection.execute(f'PRAGMA table_xinfo("{table.name}")')))
                 != table.xinfo
                 or tuple(map(tuple, connection.execute(f'PRAGMA foreign_key_list("{table.name}")')))
