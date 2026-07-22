@@ -118,7 +118,9 @@ initial materialisation, and exact transition. Inspection reports only
 The specification is a pure projection of a validated manifest: schema version;
 named entities and declared-order fields; named relationships; and named,
 ordered indexes. Relationships carry the fixed v1 `restrict` update/delete
-policy and `deferred` constraint timing. It excludes descriptions, retrieval
+policy and `immediate` constraint timing. Required relationship cycles are rejected; nullable
+cycles are staged through null relationship values rather than temporarily invalid transactions.
+The specification excludes descriptions, retrieval
 metadata, facets, query patterns, and allowed values. Its exact immutable value
 is the comparison authority; the port stores no manifest, schema version,
 fingerprint, history, path, DSN, SQL, credentials, or schema ledger.

@@ -123,7 +123,7 @@ class RelationalRelationship:
     target_field: str
     on_delete: Literal["restrict"]
     on_update: Literal["restrict"] = "restrict"
-    constraint_timing: Literal["deferred"] = "deferred"
+    constraint_timing: Literal["immediate"] = "immediate"
 
     def __post_init__(self) -> None:
         if (
@@ -143,7 +143,7 @@ class RelationalRelationship:
             or type(self.on_update) is not str
             or self.on_update != "restrict"
             or type(self.constraint_timing) is not str
-            or self.constraint_timing != "deferred"
+            or self.constraint_timing != "immediate"
         ):
             raise RelationalContractError()
 

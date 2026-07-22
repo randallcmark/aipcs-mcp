@@ -65,7 +65,7 @@ def test_compile_is_detached_sorted_and_keeps_physical_order() -> None:
     assert (relationship.on_delete, relationship.on_update, relationship.constraint_timing) == (
         "restrict",
         "restrict",
-        "deferred",
+        "immediate",
     )
     source.entities[0].attributes[0].name = "mutated"
     assert specification.entities[0].fields[0].name == "id"
@@ -520,7 +520,7 @@ def test_relational_value_objects_reject_invalid_shapes_and_bounds() -> None:
             "project",
             "id",
             "restrict",
-            constraint_timing=StringSubclass("deferred"),
+            constraint_timing=StringSubclass("immediate"),
         ),
         lambda: RelationalIndex("project_title_idx", "project", (), False),
         lambda: RelationalIndex("project_title_idx", "project", ("title",) * 9, False),

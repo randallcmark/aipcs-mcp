@@ -893,7 +893,7 @@ specification = compile_manifest(source)
 assert [value.name for value in specification.entities] == ["alpha", "beta"]
 assert [value.name for value in specification.relationships] == ["alpha_beta_fk", "alpha_parent_fk", "beta_alpha_fk"]
 assert specification.indices[0].fields == ("beta_id", "parent_id")
-assert {(value.on_delete, value.on_update, value.constraint_timing) for value in specification.relationships} == {("restrict", "restrict", "deferred")}
+assert {(value.on_delete, value.on_update, value.constraint_timing) for value in specification.relationships} == {("restrict", "restrict", "immediate")}
 source.entities[0].attributes[0].name = "mutated"
 assert specification.entities[0].fields[0].name == "id"
 assert specification.entities[1].fields[0].name == "id"

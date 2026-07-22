@@ -38,6 +38,8 @@ A relationship names an agent-declared, non-primary-key UUID source field and
 targets another entity's `id`; the server-managed `id` cannot be a source.
 Each source endpoint may name only one relationship, so one UUID value never
 has ambiguous targets. The only currently accepted delete rule is `restrict`.
+Delete and update restriction is immediate in both reference adapters; public v1 does not claim a
+deferred `RESTRICT` combination that the databases implement differently.
 Required relationship edges must be acyclic (including a required self-loop),
 because a future single-record API could not create the first record in such a
 cycle. Nullable edges may break a self or multi-entity cycle, and relationships
