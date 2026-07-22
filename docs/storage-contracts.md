@@ -105,3 +105,28 @@ The reusable test-only conformance cases in `tests/storage_contracts/` assert
 registry application and service-catalog behavior without treating SQL,
 filesystem layout, connections, or drivers as portable contract details. They
 are not shipped as a storage adapter.
+
+## Private relational schema contract
+
+`DomainSchemaStore` is a private, backend-neutral protocol for a later domain
+schema adapter. It accepts an opaque `ServiceStoreLocator` and an immutable
+compiled relational specification, or a factory-built additive transition. Its
+only operations are inspection relative to a supplied specification, exact
+initial materialisation, and exact transition. Inspection reports only
+`unmaterialised`, `ready`, or `incompatible` relative to that supplied target.
+
+The specification is a pure projection of a validated manifest: schema version;
+named entities and declared-order fields; named relationships; and named,
+ordered indexes. Relationships carry the fixed v1 `restrict` update/delete
+policy and `deferred` constraint timing. It excludes descriptions, retrieval
+metadata, facets, query patterns, and allowed values. Its exact immutable value
+is the comparison authority; the port stores no manifest, schema version,
+fingerprint, history, path, DSN, SQL, credentials, or schema ledger.
+
+The supported transition grammar is intentionally additive: new entities,
+nullable append-only fields, explicit new indexes, and approved application-only
+metadata changes (including typed allowed-value expansion). It rejects
+renames/removals, rebuilds, required additions, relationship retrofit on an
+existing source table, index mutation, and allowed-value narrowing. This port
+is uncomposed in the current runtime. It does not materialise a service, access
+a database, or alter the public MCP, CLI, configuration, or lifecycle surface.

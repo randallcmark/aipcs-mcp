@@ -12,6 +12,7 @@ def test_synthetic_legacy_fixture_converts_one_way_with_provenance() -> None:
     converted = result.manifest.model_dump(mode="json")
     fields = {attribute["name"]: attribute for attribute in converted["entities"][0]["attributes"]}
     assert converted["manifest_version"] == 2
+    assert converted["schema_version"] == 1
     assert converted["migration_history"] == []
     assert fields["score"]["type"] == "number"
     assert fields["record_version"] == {
@@ -30,6 +31,7 @@ def test_synthetic_legacy_fixture_converts_one_way_with_provenance() -> None:
     )
     assert any(warning.code == "legacy_type_normalised" for warning in result.warnings)
     assert any(warning.code == "server_managed_field_normalised" for warning in result.warnings)
+    assert any(warning.code == "legacy_schema_version_reset" for warning in result.warnings)
     assert any(warning.code == "legacy_migration_history_discarded" for warning in result.warnings)
 
 
@@ -64,6 +66,16 @@ def test_legacy_importer_rejects_non_v1_input() -> None:
     with pytest.raises(AipcsContractError) as raised:
         import_legacy_v1({"manifest_version": 2})
     assert raised.value.code is ErrorCode.MANIFEST_VERSION_UNSUPPORTED
+
+
+@pytest.mark.parametrize("schema_version", [0, -1, "3", True, None])
+def test_legacy_importer_rejects_invalid_schema_version(schema_version: object) -> None:
+    legacy = synthetic_legacy_manifest()
+    legacy["schema_version"] = schema_version
+    with pytest.raises(AipcsContractError) as raised:
+        import_legacy_v1(legacy)
+    assert raised.value.code is ErrorCode.VALIDATION_FAILED
+    assert raised.value.message == "Legacy schema_version must be a positive integer."
 
 
 def test_legacy_importer_reports_every_retired_locator() -> None:

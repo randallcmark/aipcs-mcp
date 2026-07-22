@@ -84,6 +84,25 @@ def test_sqlite_ready_lifecycle_and_design(tmp_path: Path) -> None:
             assert failed is False
             assert successful(inspected_envelope) == seeded
 
+            rejected_manifest = copy.deepcopy(valid_manifest())
+            rejected_manifest["indices"][0]["name"] = "sqlite_project_owner_idx"
+            rejected_design, failed = await call_envelope(
+                session,
+                "aipcs_service_design",
+                {
+                    "service_id": service_id,
+                    "schema": rejected_manifest,
+                    "idempotency_key": "design-a",
+                },
+            )
+            assert failed is True
+            assert rejected_design["error"]["code"] == "validation_failed"
+            unchanged, failed = await call_envelope(
+                session, "aipcs_service_inspect", {"service_id": service_id}
+            )
+            assert failed is False
+            assert successful(unchanged) == seeded
+
             designed_envelope, failed = await call_envelope(
                 session,
                 "aipcs_service_design",

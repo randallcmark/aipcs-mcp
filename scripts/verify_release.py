@@ -798,6 +798,251 @@ def run_installed_catalog_smoke(
     )
 
 
+def _relational_contract_smoke_program() -> str:
+    """Standalone installed proof for the pure V1-07A relational contract."""
+
+    return r'''
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import FrozenInstanceError
+from inspect import Parameter, signature
+from pathlib import Path
+import site
+import sys
+from typing import get_type_hints
+
+import aipcs_mcp.manifest_v2 as manifest_module
+import aipcs_mcp.relational as relational_module
+import aipcs_mcp.storage.contracts as contracts_module
+from aipcs_mcp.manifest_v2 import ManifestV2
+from aipcs_mcp.relational import (
+    RelationalContractError,
+    RelationalSpecification,
+    RelationalTransition,
+    classify_transition,
+    compile_manifest,
+)
+from aipcs_mcp.storage.contracts import (
+    DomainSchemaState,
+    DomainSchemaStore,
+    ServiceStoreLocator,
+)
+
+sites = tuple(Path(value).resolve() for value in site.getsitepackages())
+for module in (manifest_module, relational_module, contracts_module):
+    origin = Path(module.__file__).resolve()
+    assert any(origin.is_relative_to(value) for value in sites), origin
+
+managed = [
+    {"name": "id", "type": "uuid", "required": True, "primary_key": True},
+    {"name": "owner_id", "type": "string", "required": True},
+    {"name": "created_at", "type": "datetime", "required": True},
+    {"name": "updated_at", "type": "datetime", "required": True},
+    {"name": "created_via", "type": "string", "required": True},
+    {"name": "record_version", "type": "integer", "required": True},
+]
+
+def entity(name, extra=(), **values):
+    result = {"name": name, "attributes": deepcopy(managed) + list(extra)}
+    result.update(values)
+    return result
+
+def document(entities=None, relationships=None, indices=None, *, version=1, history=None, **values):
+    result = {
+        "manifest_version": 2,
+        "schema_version": version,
+        "entities": entities or [entity("project", [{"name": "title", "type": "string"}])],
+        "relationships": relationships or [],
+        "indices": indices or [{"name": "project_title_idx", "entity": "project", "fields": ["title"]}],
+        "query_patterns": [],
+        "discovery_facets": [],
+        "migration_history": history or [],
+    }
+    result.update(values)
+    return result
+
+def validated(value):
+    return ManifestV2.model_validate(value)
+
+def rejected(value):
+    try:
+        validated(value)
+    except Exception:
+        return
+    raise AssertionError("manifest should have been rejected")
+
+# Positive breakable self/cyclic graph, distinct relationship sources, and ordered index fields.
+graph = document(
+    entities=[
+        entity("beta", [{"name": "alpha_id", "type": "uuid"}]),
+        entity("alpha", [{"name": "parent_id", "type": "uuid"}, {"name": "beta_id", "type": "uuid"}]),
+    ],
+    relationships=[
+        {"name": "beta_alpha_fk", "from": {"entity": "beta", "field": "alpha_id"}, "to": {"entity": "alpha", "field": "id"}, "on_delete": "restrict"},
+        {"name": "alpha_parent_fk", "from": {"entity": "alpha", "field": "parent_id"}, "to": {"entity": "alpha", "field": "id"}, "on_delete": "restrict"},
+        {"name": "alpha_beta_fk", "from": {"entity": "alpha", "field": "beta_id"}, "to": {"entity": "beta", "field": "id"}, "on_delete": "restrict"},
+    ],
+    indices=[
+        {"name": "beta_alpha_idx", "entity": "beta", "fields": ["alpha_id", "owner_id"]},
+        {"name": "alpha_beta_idx", "entity": "alpha", "fields": ["beta_id", "parent_id"]},
+    ],
+)
+source = validated(graph)
+specification = compile_manifest(source)
+assert [value.name for value in specification.entities] == ["alpha", "beta"]
+assert [value.name for value in specification.relationships] == ["alpha_beta_fk", "alpha_parent_fk", "beta_alpha_fk"]
+assert specification.indices[0].fields == ("beta_id", "parent_id")
+assert {(value.on_delete, value.on_update, value.constraint_timing) for value in specification.relationships} == {("restrict", "restrict", "deferred")}
+source.entities[0].attributes[0].name = "mutated"
+assert specification.entities[0].fields[0].name == "id"
+assert specification.entities[1].fields[0].name == "id"
+try:
+    specification.entities[0].fields[0].name = "mutated"
+except FrozenInstanceError:
+    pass
+else:
+    raise AssertionError("compiled nested field is mutable")
+try:
+    specification.entities += ()
+except FrozenInstanceError:
+    pass
+else:
+    raise AssertionError("compiled specification is mutable")
+
+# Every V1-07A manifest fail-closed category is checked without storage I/O.
+bad = document(); bad["entities"][0]["name"] = "sqlite_project"; rejected(bad)
+bad = document(indices=[{"name": "sqlite_project_idx", "entity": "project", "fields": ["title"]}]); rejected(bad)
+bad = document(indices=[{"name": "project", "entity": "project", "fields": ["title"]}]); rejected(bad)
+bad = document(entities=[entity("project", [{"name": "score", "type": "number", "allowed_values": [float("nan")]}])]); rejected(bad)
+bad = document(entities=[entity("project", [{"name": "label", "type": "string", "allowed_values": ["bad\x00value"]}])]); rejected(bad)
+bad = document(entities=[entity("project", [{"name": "labels", "type": "string_list", "allowed_values": ["bad\x00value"]}])]); rejected(bad)
+bad = document(version=66); rejected(bad)
+bad = document(version=2, history=[]); rejected(bad)
+bad = document(version=2, history=[{"from_schema_version": 1, "to_schema_version": 2, "operations": []}]); rejected(bad)
+bad = document(version=2, history=[{"from_schema_version": 1, "to_schema_version": 2, "operations": ["x" * 241]}]); rejected(bad)
+bad = document(version=3, history=[{"from_schema_version": 1, "to_schema_version": 3, "operations": ["skip"]}, {"from_schema_version": 2, "to_schema_version": 3, "operations": ["next"]}]); rejected(bad)
+bad = deepcopy(graph); bad["relationships"] = [{"name": "id_source_fk", "from": {"entity": "alpha", "field": "id"}, "to": {"entity": "beta", "field": "id"}, "on_delete": "restrict"}]; rejected(bad)
+bad = deepcopy(graph); bad["relationships"] = [
+    {"name": "one_fk", "from": {"entity": "alpha", "field": "beta_id"}, "to": {"entity": "beta", "field": "id"}, "on_delete": "restrict"},
+    {"name": "two_fk", "from": {"entity": "alpha", "field": "beta_id"}, "to": {"entity": "alpha", "field": "id"}, "on_delete": "restrict"},
+]; rejected(bad)
+required_cycle = document(entities=[entity("left", [{"name": "right_id", "type": "uuid", "required": True}]), entity("right", [{"name": "left_id", "type": "uuid", "required": True}])], relationships=[
+    {"name": "left_right_fk", "from": {"entity": "left", "field": "right_id"}, "to": {"entity": "right", "field": "id"}, "on_delete": "restrict"},
+    {"name": "right_left_fk", "from": {"entity": "right", "field": "left_id"}, "to": {"entity": "left", "field": "id"}, "on_delete": "restrict"},
+]); rejected(required_cycle)
+required_self_loop = document(entities=[entity("node", [{"name": "parent_id", "type": "uuid", "required": True}])], relationships=[
+    {"name": "node_parent_fk", "from": {"entity": "node", "field": "parent_id"}, "to": {"entity": "node", "field": "id"}, "on_delete": "restrict"},
+]); rejected(required_self_loop)
+larger_cycle = deepcopy(graph)
+for item in larger_cycle["entities"]:
+    for field in item["attributes"]:
+        if field["name"] in {"alpha_id", "beta_id"}:
+            field["required"] = True
+rejected(larger_cycle)
+
+class ManifestSubclass(ManifestV2):
+    pass
+
+try:
+    compile_manifest(ManifestSubclass.model_validate(document()))
+except RelationalContractError:
+    pass
+else:
+    raise AssertionError("ManifestV2 subclass bypassed compiler")
+try:
+    compile_manifest(ManifestV2.model_construct(manifest_version=2, schema_version="bad"))
+except RelationalContractError:
+    pass
+else:
+    raise AssertionError("forged manifest bypassed compiler")
+mutated = validated(document())
+mutated.schema_version = 0
+try:
+    compile_manifest(mutated)
+except RelationalContractError:
+    pass
+else:
+    raise AssertionError("mutated manifest bypassed compiler")
+
+# Additive transition and its rejected rebuild/retrofit/narrowing counterparts.
+current_payload = document(entities=[entity("project", [{"name": "title", "type": "string"}, {"name": "state", "type": "string", "allowed_values": ["open", "closed"]}])])
+target_payload = deepcopy(current_payload)
+target_payload["schema_version"] = 2
+target_payload["migration_history"] = [{"from_schema_version": 1, "to_schema_version": 2, "operations": ["add optional project summary and task"]}]
+target_payload["entities"][0]["attributes"].append({"name": "summary", "type": "string"})
+target_payload["entities"][0]["attributes"][7]["allowed_values"] = ["closed", "open", "paused"]
+target_payload["entities"].append(entity("task", [{"name": "project_id", "type": "uuid", "required": True}]))
+target_payload["relationships"] = [{"name": "task_project_fk", "from": {"entity": "task", "field": "project_id"}, "to": {"entity": "project", "field": "id"}, "on_delete": "restrict"}]
+target_payload["indices"].append({"name": "task_project_idx", "entity": "task", "fields": ["project_id", "owner_id"], "unique": True})
+transition = classify_transition(validated(current_payload), validated(target_payload))
+assert [value.name for value in transition.additions.entities] == ["task"]
+assert [(value.entity, value.field.name) for value in transition.additions.fields] == [("project", "summary")]
+assert [value.name for value in transition.additions.relationships] == ["task_project_fk"]
+assert [value.name for value in transition.additions.indices] == ["task_project_idx"]
+assert transition.current != transition.target
+metadata_only = deepcopy(current_payload)
+metadata_only["schema_version"] = 2
+metadata_only["migration_history"] = [{"from_schema_version": 1, "to_schema_version": 2, "operations": ["describe project"]}]
+metadata_only["entities"][0]["description"] = "changed"
+assert compile_manifest(validated(current_payload)).same_structure_as(compile_manifest(validated(metadata_only)))
+for change in ("required", "reorder", "retrofit", "narrow"):
+    candidate = deepcopy(target_payload)
+    if change == "required":
+        candidate["entities"][0]["attributes"].append({"name": "must_have", "type": "string", "required": True})
+    elif change == "reorder":
+        candidate["entities"][0]["attributes"][6:8] = reversed(candidate["entities"][0]["attributes"][6:8])
+    elif change == "retrofit":
+        candidate["entities"][0]["attributes"].append({"name": "task_id", "type": "uuid"})
+        candidate["relationships"].append({"name": "project_task_fk", "from": {"entity": "project", "field": "task_id"}, "to": {"entity": "task", "field": "id"}, "on_delete": "restrict"})
+    else:
+        candidate["entities"][0]["attributes"][7]["allowed_values"] = ["open"]
+    try:
+        classify_transition(validated(current_payload), validated(candidate))
+    except RelationalContractError:
+        pass
+    else:
+        raise AssertionError(f"{change} transition bypassed classifier")
+
+port_signatures = (
+    ("inspect", ["self", "locator", "specification"], {"locator": ServiceStoreLocator, "specification": RelationalSpecification, "return": DomainSchemaState}),
+    ("materialise", ["self", "locator", "specification"], {"locator": ServiceStoreLocator, "specification": RelationalSpecification, "return": DomainSchemaState}),
+    ("evolve", ["self", "locator", "transition"], {"locator": ServiceStoreLocator, "transition": RelationalTransition, "return": DomainSchemaState}),
+)
+for name, expected, hints in port_signatures:
+    method = getattr(DomainSchemaStore, name)
+    parameters = list(signature(method).parameters.values())
+    assert [parameter.name for parameter in parameters] == expected
+    assert all(parameter.kind is Parameter.POSITIONAL_OR_KEYWORD and parameter.default is Parameter.empty for parameter in parameters)
+    assert get_type_hints(method) == hints
+assert ServiceStoreLocator.for_service("sqlite", __import__("uuid").UUID(int=1)).namespace.endswith("1".zfill(32))
+'''
+
+
+def run_installed_relational_contract_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Run the V1-07A pure-contract proof from an external cwd in isolated mode."""
+
+    client = workspace / f"{name}-relational-contract-smoke.py"
+    client.write_text(_relational_contract_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"{name}-relational-contract-cwd"
+    cwd.mkdir(mode=0o700)
+    run_stage(
+        f"installed {name} relational contract smoke",
+        [python, "-I", client],
+        cwd=cwd,
+        environment=environment,
+        timeout=SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+
+
 def run_wheel_restart_principal_smoke(
     python: Path,
     workspace: Path,
@@ -1064,6 +1309,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_relational_contract_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_wheel_restart_principal_smoke(
             wheel_python,
             workspace,
@@ -1092,6 +1344,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             workspace,
             "sdist",
             heavy=False,
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_relational_contract_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
             environment=environment,
             redaction_roots=redaction_roots,
         )

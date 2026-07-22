@@ -121,6 +121,22 @@ def import_legacy_v1(source: Mapping[str, Any]) -> LegacyImportResult:
         )
 
     warnings: list[LegacyWarning] = []
+    legacy_schema_version = legacy.get("schema_version", 1)
+    if type(legacy_schema_version) is not int or legacy_schema_version < 1:
+        raise AipcsContractError(
+            ErrorCode.VALIDATION_FAILED,
+            "Legacy schema_version must be a positive integer.",
+        )
+    if legacy_schema_version != 1:
+        warnings.append(
+            LegacyWarning(
+                code="legacy_schema_version_reset",
+                message=(
+                    "Legacy schema_version was reset to 1 because the importer does not invent "
+                    "public-v2 migration history."
+                ),
+            )
+        )
     if "migration_history" in discarded:
         warnings.append(
             LegacyWarning(
@@ -136,9 +152,9 @@ def import_legacy_v1(source: Mapping[str, Any]) -> LegacyImportResult:
         ]
         facets = _convert_facets(legacy.get("discovery_facets", []), entities)
         manifest = ManifestV2.model_validate(
-            {
-                "manifest_version": 2,
-                "schema_version": legacy.get("schema_version", 1),
+                {
+                    "manifest_version": 2,
+                    "schema_version": 1,
                 "entities": entities,
                 "relationships": [],
                 "indices": legacy.get("indices", []),

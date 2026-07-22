@@ -363,6 +363,19 @@ def test_embedded_catalog_client_exercises_the_source_contract(
     assert restarted.value.code == 0
 
 
+def test_embedded_relational_client_exercises_the_source_contract(
+    monkeypatch, verifier
+) -> None:
+    program = verifier._relational_contract_smoke_program()
+    compile(program, "installed_relational_contract_smoke.py", "exec")
+    assert "aipcs_mcp.relational" in program
+    assert "DomainSchemaStore" in program
+    assert "site.getsitepackages()" in program
+
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
+    exec(compile(program, "installed_relational_contract_smoke.py", "exec"), {})
+
+
 def test_catalog_smoke_uses_each_installed_interpreter_and_external_cwd(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -409,6 +422,35 @@ def test_catalog_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert calls[2][2] == tmp_path / "sdist-catalog-cwd"
     assert calls[3][2] == tmp_path / "sdist-catalog-cwd"
     assert calls[0][2] != calls[2][2]
+
+
+def test_relational_smoke_uses_each_installed_interpreter_and_external_cwd(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name in ("wheel", "sdist"):
+        verifier.run_installed_relational_contract_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [label for label, _, _ in calls] == [
+        "installed wheel relational contract smoke",
+        "installed sdist relational contract smoke",
+    ]
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][2] == tmp_path / "wheel-relational-contract-cwd"
+    assert calls[1][2] == tmp_path / "sdist-relational-contract-cwd"
+    assert calls[0][2] != calls[1][2]
 
 
 def test_main_hides_unexpected_exception_details(monkeypatch, capsys, verifier) -> None:

@@ -13,16 +13,19 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 from aipcs_mcp.application.ports import RegistryUnitOfWork
+from aipcs_mcp.relational import RelationalSpecification, RelationalTransition
 
 from .errors import StorageContractError
 
 StorageBackend = Literal["sqlite", "postgresql"]
 StorageComponent = Literal["registry", "service_store"]
 MigrationStatus = Literal["uninitialised", "ready", "incompatible", "dirty"]
+DomainSchemaStatus = Literal["unmaterialised", "ready", "incompatible"]
 
 _BACKENDS = frozenset({"sqlite", "postgresql"})
 _COMPONENTS = frozenset({"registry", "service_store"})
 _STATUSES = frozenset({"uninitialised", "ready", "incompatible", "dirty"})
+_DOMAIN_SCHEMA_STATUSES = frozenset({"unmaterialised", "ready", "incompatible"})
 _LOCATOR_NAMESPACE = re.compile(r"^svc_[0-9a-f]{32}$")
 
 
@@ -91,6 +94,17 @@ class MigrationState:
             raise StorageContractError()
 
 
+@dataclass(frozen=True)
+class DomainSchemaState:
+    """Physical schema fidelity relative to one supplied relational specification."""
+
+    status: DomainSchemaStatus
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not str or self.status not in _DOMAIN_SCHEMA_STATUSES:
+            raise StorageContractError()
+
+
 class RegistryAdapter(Protocol):
     """Registry owner; info includes registry and migration states are registry-only."""
 
@@ -113,6 +127,28 @@ class ServiceStoreCatalog(Protocol):
     def inspect_migration(self, locator: ServiceStoreLocator) -> MigrationState: ...
 
     def migrate(self, locator: ServiceStoreLocator) -> MigrationState: ...
+
+
+class DomainSchemaStore(Protocol):
+    """Private relational schema boundary with no lifecycle or location mechanics."""
+
+    def inspect(
+        self,
+        locator: ServiceStoreLocator,
+        specification: RelationalSpecification,
+    ) -> DomainSchemaState: ...
+
+    def materialise(
+        self,
+        locator: ServiceStoreLocator,
+        specification: RelationalSpecification,
+    ) -> DomainSchemaState: ...
+
+    def evolve(
+        self,
+        locator: ServiceStoreLocator,
+        transition: RelationalTransition,
+    ) -> DomainSchemaState: ...
 
 
 def _validate_backend(backend: object) -> None:

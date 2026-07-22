@@ -7,6 +7,31 @@ from pydantic import ValidationError
 from aipcs_mcp.manifest_v2 import ManifestV2
 
 
+def _relationship(
+    name: str,
+    source_entity: str,
+    source_field: str,
+    target_entity: str,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "from": {"entity": source_entity, "field": source_field},
+        "to": {"entity": target_entity, "field": "id"},
+        "on_delete": "restrict",
+    }
+
+
+def _history(schema_version: int, operations: list[object] | None = None) -> list[dict[str, object]]:
+    return [
+        {
+            "from_schema_version": version,
+            "to_schema_version": version + 1,
+            "operations": operations if operations is not None else [f"upgrade to {version + 1}"],
+        }
+        for version in range(1, schema_version)
+    ]
+
+
 def test_manifest_accepts_explicit_facets_indices_and_fk_declarations() -> None:
     manifest = valid_manifest()
     manifest["entities"].append(
@@ -141,3 +166,222 @@ def test_manifest_bounds_query_pattern_lengths() -> None:
     manifest["query_patterns"] = ["x" * 241]
     with pytest.raises(ValidationError):
         ManifestV2.model_validate(manifest)
+
+
+@pytest.mark.parametrize(
+    ("kind", "name"),
+    [
+        ("entity", "sqlite_project"),
+        ("index", "sqlite_project_owner_idx"),
+    ],
+)
+def test_manifest_rejects_sqlite_reserved_entity_and_index_names(kind: str, name: str) -> None:
+    manifest = valid_manifest()
+    if kind == "entity":
+        manifest["entities"][0]["name"] = name
+    else:
+        manifest["indices"][0]["name"] = name
+    with pytest.raises(ValidationError, match="SQLite-reserved"):
+        ManifestV2.model_validate(manifest)
+
+
+def test_manifest_rejects_entity_index_name_collision() -> None:
+    manifest = valid_manifest()
+    manifest["indices"][0]["name"] = "project"
+    with pytest.raises(ValidationError, match="must not collide"):
+        ManifestV2.model_validate(manifest)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_manifest_rejects_non_finite_numeric_allowed_values(value: float) -> None:
+    manifest = valid_manifest()
+    manifest["entities"][0]["attributes"].append(
+        {"name": "score", "type": "number", "allowed_values": [value]}
+    )
+    with pytest.raises(ValidationError, match="must be finite"):
+        ManifestV2.model_validate(manifest)
+
+
+@pytest.mark.parametrize("attribute_type", ["string", "string_list"])
+def test_manifest_rejects_nul_in_string_allowed_values(attribute_type: str) -> None:
+    manifest = valid_manifest()
+    manifest["entities"][0]["attributes"].append(
+        {"name": "state", "type": attribute_type, "allowed_values": ["open\x00closed"]}
+    )
+    with pytest.raises(ValidationError, match="NUL"):
+        ManifestV2.model_validate(manifest)
+
+
+def test_manifest_accepts_complete_migration_history_at_public_bound() -> None:
+    manifest = valid_manifest()
+    manifest["schema_version"] = 65
+    manifest["migration_history"] = _history(65, ["x" * 240] * 32)
+    parsed = ManifestV2.model_validate(manifest)
+    assert parsed.schema_version == 65
+    assert len(parsed.migration_history) == 64
+
+
+def test_manifest_rejects_schema_version_above_history_capacity() -> None:
+    manifest = valid_manifest()
+    manifest["schema_version"] = 66
+    manifest["migration_history"] = _history(65)
+    with pytest.raises(ValidationError):
+        ManifestV2.model_validate(manifest)
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "history"),
+    [
+        (1, _history(2)),
+        (2, []),
+        (
+            2,
+            [
+                {
+                    "from_schema_version": 2,
+                    "to_schema_version": 3,
+                    "operations": ["wrong origin"],
+                }
+            ],
+        ),
+        (
+            3,
+            [
+                {
+                    "from_schema_version": 1,
+                    "to_schema_version": 2,
+                    "operations": ["first"],
+                },
+                {
+                    "from_schema_version": 2,
+                    "to_schema_version": 4,
+                    "operations": ["skips a version"],
+                },
+            ],
+        ),
+    ],
+)
+def test_manifest_rejects_incomplete_or_discontinuous_history(
+    schema_version: int, history: list[dict[str, object]]
+) -> None:
+    manifest = valid_manifest()
+    manifest["schema_version"] = schema_version
+    manifest["migration_history"] = history
+    with pytest.raises(ValidationError, match="migration_history"):
+        ManifestV2.model_validate(manifest)
+
+
+@pytest.mark.parametrize(
+    "operations",
+    [
+        [],
+        [""],
+        ["   "],
+        ["x" * 241],
+        ["operation"] * 33,
+        [1],
+    ],
+)
+def test_manifest_rejects_invalid_migration_operation_annotations(
+    operations: list[object],
+) -> None:
+    manifest = valid_manifest()
+    manifest["schema_version"] = 2
+    manifest["migration_history"] = _history(2, operations)
+    with pytest.raises(ValidationError):
+        ManifestV2.model_validate(manifest)
+
+
+def test_manifest_rejects_server_managed_relationship_source() -> None:
+    manifest = valid_manifest()
+    manifest["entities"].append(entity("task"))
+    manifest["relationships"] = [_relationship("task_project_fk", "task", "id", "project")]
+    with pytest.raises(ValidationError, match="agent-declared non-primary-key"):
+        ManifestV2.model_validate(manifest)
+
+
+def test_manifest_rejects_more_than_one_relationship_from_same_source_endpoint() -> None:
+    manifest = valid_manifest()
+    manifest["entities"].extend(
+        [
+            entity("task", [{"name": "target_id", "type": "uuid"}]),
+            entity("team"),
+        ]
+    )
+    manifest["relationships"] = [
+        _relationship("task_project_fk", "task", "target_id", "project"),
+        _relationship("task_team_fk", "task", "target_id", "team"),
+    ]
+    with pytest.raises(ValidationError, match="source endpoints must be unique"):
+        ManifestV2.model_validate(manifest)
+
+
+def test_manifest_rejects_required_self_reference() -> None:
+    manifest = valid_manifest()
+    manifest["entities"][0]["attributes"].append(
+        {"name": "parent_id", "type": "uuid", "required": True}
+    )
+    manifest["relationships"] = [
+        _relationship("project_parent_fk", "project", "parent_id", "project")
+    ]
+    with pytest.raises(ValidationError, match="directed cycle"):
+        ManifestV2.model_validate(manifest)
+
+
+def test_manifest_rejects_required_subcycle_inside_larger_nullable_graph() -> None:
+    manifest = valid_manifest()
+    manifest["entities"][0]["attributes"].append(
+        {"name": "task_id", "type": "uuid", "required": True}
+    )
+    manifest["entities"].extend(
+        [
+            entity(
+                "task",
+                [
+                    {"name": "project_id", "type": "uuid", "required": True},
+                    {"name": "note_id", "type": "uuid"},
+                ],
+            ),
+            entity("note", [{"name": "project_id", "type": "uuid", "required": True}]),
+        ]
+    )
+    manifest["relationships"] = [
+        _relationship("project_task_fk", "project", "task_id", "task"),
+        _relationship("task_project_fk", "task", "project_id", "project"),
+        _relationship("task_note_fk", "task", "note_id", "note"),
+        _relationship("note_project_fk", "note", "project_id", "project"),
+    ]
+    with pytest.raises(ValidationError, match="directed cycle"):
+        ManifestV2.model_validate(manifest)
+
+
+def test_manifest_accepts_nullable_cycles_and_multiple_distinct_sources() -> None:
+    manifest = valid_manifest()
+    manifest["entities"][0]["attributes"].extend(
+        [
+            {"name": "parent_id", "type": "uuid"},
+            {"name": "task_id", "type": "uuid", "required": True},
+        ]
+    )
+    manifest["entities"].append(
+        entity(
+            "task",
+            [
+                {"name": "project_id", "type": "uuid"},
+                {"name": "backup_project_id", "type": "uuid"},
+            ],
+        )
+    )
+    manifest["relationships"] = [
+        _relationship("project_parent_fk", "project", "parent_id", "project"),
+        _relationship("project_task_fk", "project", "task_id", "task"),
+        _relationship("task_project_fk", "task", "project_id", "project"),
+        _relationship("task_backup_project_fk", "task", "backup_project_id", "project"),
+    ]
+    parsed = ManifestV2.model_validate(manifest)
+    assert [relationship.name for relationship in parsed.relationships] == [
+        "project_parent_fk",
+        "project_task_fk",
+        "task_project_fk",
+        "task_backup_project_fk",
+    ]

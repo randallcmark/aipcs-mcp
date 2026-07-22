@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from math import isfinite
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -56,6 +57,7 @@ RETIRED_INPUT_FIELDS = frozenset(
 )
 
 AllowedValue = StrictStr | StrictInt | StrictFloat | StrictBool
+MigrationOperation = Annotated[StrictStr, Field(min_length=1, max_length=240)]
 
 
 class PublicModel(BaseModel):
@@ -90,6 +92,10 @@ class AttributeDefinition(PublicModel):
                 for value in self.allowed_values
             ):
                 raise ValueError("String allowed_values must contain 1 to 96 characters.")
+            if any(type(value) is float and not isfinite(value) for value in self.allowed_values):
+                raise ValueError("Numeric allowed_values must be finite.")
+            if any(type(value) is str and "\x00" in value for value in self.allowed_values):
+                raise ValueError("String allowed_values must not contain NUL characters.")
         if self.retrieval_mode == "membership" and self.type != "string_list":
             raise ValueError("membership retrieval_mode requires a string_list attribute.")
         if self.retrieval_mode == "annotation" and self.type != "string":
@@ -173,7 +179,7 @@ class DiscoveryFacet(PublicModel):
 class MigrationHistoryEntry(PublicModel):
     from_schema_version: int = Field(ge=1)
     to_schema_version: int = Field(ge=1)
-    operations: list[str] = Field(default_factory=list, max_length=32)
+    operations: list[MigrationOperation] = Field(min_length=1, max_length=32)
 
     @model_validator(mode="after")
     def validate_version_direction(self) -> MigrationHistoryEntry:
@@ -186,7 +192,7 @@ class ManifestV2(PublicModel):
     """The complete public schema document; manifest v1 never validates here."""
 
     manifest_version: Literal[2]
-    schema_version: int = Field(ge=1)
+    schema_version: int = Field(ge=1, le=65)
     entities: list[EntityDefinition] = Field(min_length=1, max_length=MAX_ENTITIES)
     relationships: list[RelationshipDefinition] = Field(
         default_factory=list, max_length=MAX_RELATIONSHIPS
@@ -203,15 +209,37 @@ class ManifestV2(PublicModel):
 
     @model_validator(mode="after")
     def validate_references(self) -> ManifestV2:
+        expected_history_length = self.schema_version - 1
+        if len(self.migration_history) != expected_history_length:
+            raise ValueError(
+                "migration_history must contain exactly one entry per schema transition "
+                "from version 1."
+            )
+        for expected_from, entry in enumerate(self.migration_history, start=1):
+            if (
+                entry.from_schema_version != expected_from
+                or entry.to_schema_version != expected_from + 1
+            ):
+                raise ValueError(
+                    "migration_history must advance continuously one version at a time from "
+                    "version 1."
+                )
+
         entities = {entity.name: entity for entity in self.entities}
         if len(entities) != len(self.entities):
             raise ValueError("Entity names must be unique.")
+        if any(_is_sqlite_reserved(name) for name in entities):
+            raise ValueError("Entity names must not use SQLite-reserved names.")
         relation_names = [relationship.name for relationship in self.relationships]
         index_names = [index.name for index in self.indices]
         if len(relation_names) != len(set(relation_names)):
             raise ValueError("Relationship names must be unique.")
         if len(index_names) != len(set(index_names)):
             raise ValueError("Index names must be unique.")
+        if any(_is_sqlite_reserved(name) for name in index_names):
+            raise ValueError("Index names must not use SQLite-reserved names.")
+        if set(entities).intersection(index_names):
+            raise ValueError("Entity and index names must not collide.")
         index_definitions = [
             (index.entity, tuple(index.fields), index.unique) for index in self.indices
         ]
@@ -229,6 +257,12 @@ class ManifestV2(PublicModel):
         ]
         if len(relationship_definitions) != len(set(relationship_definitions)):
             raise ValueError("Duplicate relationship definitions are not allowed.")
+        relationship_sources = [
+            (relationship.from_.entity, relationship.from_.field)
+            for relationship in self.relationships
+        ]
+        if len(relationship_sources) != len(set(relationship_sources)):
+            raise ValueError("Relationship source endpoints must be unique.")
         facet_definitions = [(facet.entity, facet.field) for facet in self.discovery_facets]
         if len(facet_definitions) != len(set(facet_definitions)):
             raise ValueError("Duplicate discovery facets are not allowed.")
@@ -239,6 +273,7 @@ class ManifestV2(PublicModel):
                 attribute = _attribute_for(entities, index.entity, field, "Index")
                 if attribute.type == "string_list":
                     raise ValueError("Indexes cannot target string_list fields.")
+        required_relationship_edges: set[tuple[str, str]] = set()
         for relationship in self.relationships:
             source = _attribute_for(
                 entities, relationship.from_.entity, relationship.from_.field, "Relationship source"
@@ -246,6 +281,10 @@ class ManifestV2(PublicModel):
             target = _attribute_for(
                 entities, relationship.to.entity, relationship.to.field, "Relationship target"
             )
+            if source.primary_key or relationship.from_.field in SERVER_MANAGED_FIELDS:
+                raise ValueError(
+                    "Relationship sources must be agent-declared non-primary-key fields."
+                )
             if source.type != "uuid":
                 raise ValueError("Relationship source fields must have type uuid.")
             if relationship.to.field != "id" or target.type != "uuid" or not target.primary_key:
@@ -254,6 +293,12 @@ class ManifestV2(PublicModel):
                 raise ValueError(
                     "A relationship may not use the identical source and target field."
                 )
+            if source.required:
+                required_relationship_edges.add(
+                    (relationship.from_.entity, relationship.to.entity)
+                )
+        if _has_directed_cycle(required_relationship_edges):
+            raise ValueError("Required relationship edges must not contain a directed cycle.")
         return self
 
     def to_public_dict(self) -> dict[str, object]:
@@ -284,3 +329,30 @@ def _allowed_value_matches_type(value: AllowedValue, attribute_type: str) -> boo
     if attribute_type == "boolean":
         return type(value) is bool
     return False
+
+
+def _is_sqlite_reserved(name: str) -> bool:
+    return name.casefold().startswith("sqlite_")
+
+
+def _has_directed_cycle(edges: set[tuple[str, str]]) -> bool:
+    adjacency: dict[str, set[str]] = {}
+    for source, target in edges:
+        adjacency.setdefault(source, set()).add(target)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str) -> bool:
+        if node in visiting:
+            return True
+        if node in visited:
+            return False
+        visiting.add(node)
+        if any(visit(target) for target in sorted(adjacency.get(node, ()))):
+            return True
+        visiting.remove(node)
+        visited.add(node)
+        return False
+
+    return any(visit(node) for node in sorted(adjacency))

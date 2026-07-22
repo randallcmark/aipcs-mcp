@@ -19,7 +19,8 @@ not yet a supported release.
 Normal design input accepts manifest v2 only. The explicit legacy converter is
 the sole v1 entry point: it produces a v2 manifest and reports discarded fields
 and warnings. It does not write data, create storage, or promise a reversible
-round trip.
+round trip. It resets the converted document to public-v2 schema version 1 when
+legacy history cannot be retained; it never invents a v2 transition chain.
 
 The `aipcs serve` command starts over stdio only. Stateless exposes only
 `aipcs_server_info`. A ready SQLite profile exposes server-info plus

@@ -28,7 +28,10 @@ The SQLite registry provides the current production unit of work, mutation
 ledger, and metadata-only audit store for seed and initial-design operations.
 It does not provide a service-store or record unit of work. The packaged
 private SQLite service-store catalog is not injected into the application and
-has no application port for materialisation or records. A successfully
+has no application port for materialisation or records. The private
+`DomainSchemaStore` relational-schema protocol is likewise uncomposed: it
+freezes pure inspection/materialisation/evolution signatures but has no runtime
+implementation or call path. A successfully
 acquired registry unit is always closed exactly once. `commit()` and `rollback()`
 terminate its transaction attempt; `close()` releases resources and performs
 adapter-safe cleanup of an unterminated attempt. The application preserves the
@@ -56,6 +59,12 @@ revision 1 can make adapter metadata ready without reading a manifest or
 changing registry state. Such a database is not a materialised service. Direct
 initialisation may leave it orphaned until a future operation record can
 coordinate and reconcile the independently committed stores.
+
+The relational specification is also not a second schema authority. It is an
+immutable, backend-neutral projection supplied by the registry-authoritative
+manifest at the point a future adapter needs comparison. No schema ledger,
+manifest copy, schema-version row, or fingerprint is introduced into a service
+store by this boundary.
 
 ## Migration and serving rule
 

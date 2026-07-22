@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = ROOT / "src" / "aipcs_mcp"
 APPLICATION_ROOT = PACKAGE_ROOT / "application"
 STORAGE_ROOT = PACKAGE_ROOT / "storage"
+RELATIONAL_MODULE = PACKAGE_ROOT / "relational.py"
 
 FORBIDDEN_IMPORT_PARTS = frozenset(
     {
@@ -130,6 +131,29 @@ def test_storage_contract_package_has_no_adapter_transport_or_configuration_depe
         }
         assert not imported_parts & forbidden, module
         assert not _ast_names(tree) & (FORBIDDEN_NAMES | {"connect", "execute", "cursor"}), module
+
+
+def test_relational_contract_has_only_manifest_and_standard_library_dependencies() -> None:
+    tree = ast.parse(RELATIONAL_MODULE.read_text(), filename=str(RELATIONAL_MODULE))
+    assert set(_imported_modules(tree)) == {
+        "__future__",
+        "dataclasses",
+        "manifest_v2",
+        "re",
+        "typing",
+    }
+    assert not _ast_names(tree) & (
+        FORBIDDEN_NAMES
+        | {
+            "connect",
+            "cursor",
+            "dsn",
+            "execute",
+            "postgresql",
+            "registry",
+            "sqlite",
+        }
+    )
 
 
 def test_application_does_not_depend_on_storage_contracts() -> None:

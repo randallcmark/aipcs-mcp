@@ -1,6 +1,9 @@
 """Public backend-neutral contracts; private adapters live in implementation subpackages."""
 
 from .contracts import (
+    DomainSchemaState,
+    DomainSchemaStatus,
+    DomainSchemaStore,
     MigrationState,
     RegistryAdapter,
     ServiceStoreCatalog,
@@ -12,6 +15,9 @@ from .contracts import (
 from .errors import StorageContractError, StorageError, StorageMigrationError, StorageUnavailable
 
 __all__ = [
+    "DomainSchemaState",
+    "DomainSchemaStatus",
+    "DomainSchemaStore",
     "MigrationState",
     "RegistryAdapter",
     "ServiceStoreCatalog",
