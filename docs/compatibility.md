@@ -10,7 +10,7 @@ contract-validation and stdio capability server; it is not a supported release.
 | Schema manifest | manifest_version | Manifest v2 is the only normal public design input. |
 | Configuration document | config_version | Strict V1 configuration document and source precedence. |
 | Legacy conversion | Explicit manifest-v1 converter | One-way library conversion with provenance and warnings. |
-| Storage migration | Adapter revision | Not implemented. |
+| Storage migration | Adapter revision | Contract only; no adapter or migration implementation. |
 | Export bundle | export_format_version | Not implemented. |
 
 ## Current contract
@@ -33,8 +33,9 @@ are recognised but unavailable; they neither construct storage nor alter MCP
 capabilities.
 
 The internal application boundary separates MCP and CLI adapters from use cases.
-It does not add a storage backend, lifecycle operation, command, or tool, and
-it is not an adapter extension contract.
+V1-06A adds pure storage value objects and future-adapter protocols, but no
+storage backend, lifecycle operation, command, tool, or adapter extension
+mechanism.
 
 ## Not yet compatible
 

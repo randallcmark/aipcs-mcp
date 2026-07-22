@@ -4,7 +4,12 @@ import pytest
 from fixtures import valid_design_request
 
 import aipcs_mcp.legacy_v1
-from aipcs_mcp.contracts import parse_public_design, public_server_info, validate_stdio_only
+from aipcs_mcp.contracts import (
+    StorageSummary,
+    parse_public_design,
+    public_server_info,
+    validate_stdio_only,
+)
 from aipcs_mcp.errors import AipcsContractError, ErrorCode
 
 
@@ -26,6 +31,29 @@ def test_server_info_is_safe_and_capability_versioned() -> None:
     }
     assert "path" not in repr(data).lower()
     assert "dsn" not in repr(data).lower()
+
+
+def test_public_storage_summary_uses_the_exact_service_store_namespace() -> None:
+    valid = "svc_00000000000000000000000000000001"
+    assert StorageSummary(backend="sqlite", namespace=valid).model_dump(mode="json") == {
+        "backend": "sqlite",
+        "namespace": valid,
+    }
+    hostile = (
+        "svc_00000000000000000000000000000000",
+        "svc_agent_defined-name",
+        "svc_0000000000000000000000000000000A",
+        "svc_%2f",
+        "sqlite://host/database",
+        "file:" + "//host/share/database",
+        "svc_0000000000000000000000000000000é",
+    )
+    for value in hostile:
+        with pytest.raises(ValueError):
+            StorageSummary(backend="sqlite", namespace=value)
+    for backend in ("mysql", "SQLite", " sqlite", 1, None):
+        with pytest.raises(ValueError):
+            StorageSummary(backend=backend, namespace=valid)
 
 
 def test_normal_design_accepts_v2_only() -> None:

@@ -23,7 +23,13 @@ durable commit. A failed ledger or audit write must fail the mutation rather
 than leave an unaccounted state change.
 
 This boundary does not yet provide a concrete production unit of work or audit
-store. It records the ownership rule that future adapters must implement.
+store. A successfully acquired unit is always closed exactly once. `commit()`
+and `rollback()` terminate its transaction attempt; `close()` releases
+resources and performs adapter-safe cleanup of an unterminated attempt. The
+application preserves the original failure when rollback or close also fail. A
+close failure after an otherwise successful operation is a bounded internal
+failure. A commit failure has indeterminate durable outcome, so callers retry
+through idempotency rather than assuming a rollback erased it.
 
 ## Independent versions
 
@@ -50,10 +56,13 @@ The application layer requests behavior through its boundary; it never creates
 tables, parses storage locations, opens database connections, or selects a
 backend.
 
+See [storage contracts](storage-contracts.md) for the pure future-adapter
+vocabulary and migration-state boundary.
+
 ## Current capability
 
 The current stateless server still exposes only aipcs_server_info over stdio.
 Storage, service and record operations, schema application, lifecycle,
-export/import, administration, and configuration profiles remain unavailable.
+export/import, administration, and persistent configuration profiles remain unavailable.
 
 See [compatibility](compatibility.md) and [security](security.md).

@@ -4,12 +4,13 @@
 It is being built around stable, generic MCP primitives and an agent-designed
 relational memory schema.
 
-The current V1-05 foundation preserves a minimal, stateless MCP server boundary:
+The current V1-06A foundation preserves a minimal, stateless MCP server boundary:
 
 - manifest v2 validation for portable relational schemas;
 - an explicit, one-way legacy manifest-v1 library converter;
 - stable structured errors and safe capability information;
 - strict, inspectable configuration for a stateless stdio runtime;
+- backend-neutral storage contracts and a test-only conformance harness;
 - an `aipcs serve` command restricted to stdio; and
 - one read-only `aipcs_server_info` MCP tool, verified through a real client.
 
@@ -34,6 +35,8 @@ implemented in this slice.
 - [Manifest v2](docs/manifest-v2.md) describes the current schema boundary.
 - [Application boundary](docs/application-boundary.md) describes the internal
   separation between transport, application use cases, and future adapters.
+- [Storage contracts](docs/storage-contracts.md) defines the pure future-adapter
+  vocabulary without adding persistence.
 - [Security and trust boundary](docs/security.md) describes safe inputs,
   errors, capability information, and transport restrictions.
 - [Compatibility](docs/compatibility.md) records what is and is not a public
@@ -55,7 +58,7 @@ Configuration can be inspected or validated without starting a server:
     uvx --from . aipcs config validate
 
 These are not released installation instructions. The stateless profile is the
-only runnable V1-05 profile. SQLite and PostgreSQL profiles may be inspected but
+only runnable V1-06A profile. SQLite and PostgreSQL profiles may be inspected but
 are explicitly unavailable until their adapters exist; they do not create or
 connect to storage.
 

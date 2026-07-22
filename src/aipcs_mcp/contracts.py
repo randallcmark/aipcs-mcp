@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from typing import Literal
 from uuid import UUID
@@ -38,6 +39,8 @@ LISTENER_ENV_KEYS = (
     "AIPCS_MCP_PORT",
     "AIPCS_MCP_MOUNT_PATH",
 )
+_SERVICE_STORE_NAMESPACE = re.compile(r"^svc_[0-9a-f]{32}$")
+_ZERO_SERVICE_STORE_NAMESPACE = f"svc_{'0' * 32}"
 
 
 class PublicModel(BaseModel):
@@ -72,7 +75,25 @@ class StorageSummary(PublicModel):
     """Safe storage metadata; a namespace is intentionally opaque to callers."""
 
     backend: Literal["sqlite", "postgresql"]
-    namespace: str = Field(pattern=r"^svc_[a-z0-9][a-z0-9_-]{0,95}$")
+    namespace: str
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def require_known_backend(cls, value: object) -> object:
+        if type(value) is not str or value not in {"sqlite", "postgresql"}:
+            raise ValueError("storage backend is invalid")
+        return value
+
+    @field_validator("namespace", mode="before")
+    @classmethod
+    def require_service_store_namespace(cls, value: object) -> object:
+        if (
+            type(value) is not str
+            or not _SERVICE_STORE_NAMESPACE.fullmatch(value)
+            or value == _ZERO_SERVICE_STORE_NAMESPACE
+        ):
+            raise ValueError("storage namespace is invalid")
+        return value
 
 
 class ServiceMetadata(PublicModel):

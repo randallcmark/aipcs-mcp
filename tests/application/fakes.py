@@ -43,10 +43,11 @@ class FakeRegistry:
         self.commits = 0
         self.fail_at: str | None = None
         self.rollback_raises = False
+        self.error_sentinel = BACKEND_SENTINEL
 
     def uow(self) -> FakeUow:
         if self.fail_at == "uow":
-            raise RuntimeError(BACKEND_SENTINEL)
+            raise RuntimeError(self.error_sentinel)
         value = FakeUow(self)
         self.uows.append(value)
         return value
@@ -59,6 +60,9 @@ class FakeUow:
         self.ledger = deepcopy(state.ledger)
         self.events = deepcopy(state.events)
         self.calls: list[str] = []
+        self.closed = False
+        self.close_count = 0
+        self.terminal_action: str | None = None
 
     @property
     def services(self) -> FakeUow:
@@ -134,13 +138,26 @@ class FakeUow:
         self.state.ledger = deepcopy(self.ledger)
         self.state.events = deepcopy(self.events)
         self.state.commits += 1
+        self.terminal_action = "committed"
 
     def rollback(self) -> None:
-        self.calls.append("rollback")
+        self._called("rollback")
         if self.state.rollback_raises:
-            raise RuntimeError(BACKEND_SENTINEL)
+            raise RuntimeError(self.state.error_sentinel)
+        self.terminal_action = "rolled_back"
+
+    def close(self) -> None:
+        self.close_count += 1
+        self._called("close")
+        if self.terminal_action is None:
+            self.terminal_action = "rolled_back"
+        self.closed = True
 
     def _called(self, name: str) -> None:
+        if self.closed:
+            raise RuntimeError(BACKEND_SENTINEL)
+        if self.terminal_action is not None and name != "close":
+            raise RuntimeError(BACKEND_SENTINEL)
         self.calls.append(name)
         if self.state.fail_at == name:
-            raise RuntimeError(BACKEND_SENTINEL)
+            raise RuntimeError(self.state.error_sentinel)

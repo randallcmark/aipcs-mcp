@@ -5,13 +5,20 @@ from __future__ import annotations
 import argparse
 import ast
 from collections.abc import Iterable
+from dataclasses import fields
 from pathlib import Path
+from uuid import UUID
 
+import pytest
+
+from aipcs_mcp.application.models import AuditEvent
 from aipcs_mcp.cli import build_parser
+from aipcs_mcp.contracts import ServiceMetadata
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = ROOT / "src" / "aipcs_mcp"
 APPLICATION_ROOT = PACKAGE_ROOT / "application"
+STORAGE_ROOT = PACKAGE_ROOT / "storage"
 
 FORBIDDEN_IMPORT_PARTS = frozenset(
     {
@@ -55,6 +62,10 @@ FORBIDDEN_NAMES = frozenset(
     }
 )
 FORBIDDEN_GENERATORS = ("datetime.now", "datetime.utcnow", "time.time", "uuid4", "random.")
+
+
+class _TextSubclass(str):
+    pass
 
 
 def _production_modules(root: Path) -> list[Path]:
@@ -105,6 +116,141 @@ def test_package_code_never_imports_test_fakes() -> None:
             part.casefold() for imported in _imported_modules(tree) for part in imported.split(".")
         }
         assert not imported_parts & {"tests", "test", "fakes", "fake"}, module
+
+
+def test_storage_contract_package_has_no_adapter_transport_or_configuration_dependencies() -> None:
+    assert STORAGE_ROOT.is_dir(), "The V1-06A storage package is required."
+    forbidden = FORBIDDEN_IMPORT_PARTS | {"storage", "importlib"}
+    modules = [STORAGE_ROOT / name for name in ("__init__.py", "contracts.py", "errors.py")]
+    assert all(module.is_file() for module in modules)
+    for module in modules:
+        tree = ast.parse(module.read_text(), filename=str(module))
+        imported_parts = {
+            part.casefold() for imported in _imported_modules(tree) for part in imported.split(".")
+        }
+        assert not imported_parts & forbidden, module
+        assert not _ast_names(tree) & (FORBIDDEN_NAMES | {"connect", "execute", "cursor"}), module
+
+
+def test_application_does_not_depend_on_storage_contracts() -> None:
+    for module in _production_modules(APPLICATION_ROOT):
+        tree = ast.parse(module.read_text(), filename=str(module))
+        assert "storage" not in {
+            part.casefold() for imported in _imported_modules(tree) for part in imported.split(".")
+        }, module
+
+
+def test_storage_values_are_allowlisted_and_reject_hostile_locator_input() -> None:
+    from aipcs_mcp.storage import (  # noqa: PLC0415
+        MigrationState,
+        ServiceStoreLocator,
+        StorageAdapterInfo,
+        StorageContractError,
+    )
+
+    assert [field.name for field in fields(ServiceStoreLocator)] == ["backend", "namespace"]
+    assert [field.name for field in fields(StorageAdapterInfo)] == ["backend", "supported_components"]
+    assert [field.name for field in fields(MigrationState)] == [
+        "component",
+        "applied_revision",
+        "target_revision",
+        "status",
+    ]
+    valid = ServiceStoreLocator.for_service("sqlite", UUID(int=1))
+    assert valid.namespace == "svc_00000000000000000000000000000001"
+    for hostile in (
+        "../../private",
+        "file:" + "//host/share/store",
+        "postgresql://secret@host/private",
+        "svc_%2f",
+        "svc_0000000000000000000000000000000A",
+        "svc_0000000000000000000000000000000é",
+        "svc_0000000000000000000000000000000 ",
+        "svc_00000000000000000000000000000000",
+    ):
+        with pytest.raises(StorageContractError) as captured:
+            ServiceStoreLocator("sqlite", hostile)
+        assert hostile not in str(captured.value)
+        assert hostile not in repr(captured.value)
+        assert captured.value.args == (StorageContractError.message,)
+        assert captured.value.__cause__ is None
+        assert captured.value.__context__ is None
+
+    for backend in ("mysql", "sqlite://host/database", "SQLite", "", 1, None):
+        with pytest.raises(StorageContractError):
+            ServiceStoreLocator(backend, valid.namespace)
+    with pytest.raises(StorageContractError):
+        ServiceStoreLocator(_TextSubclass("sqlite"), valid.namespace)
+    with pytest.raises(StorageContractError):
+        ServiceStoreLocator("sqlite", _TextSubclass(valid.namespace))
+    for service_id in (UUID(int=0), "00000000-0000-0000-0000-000000000001", None):
+        with pytest.raises(StorageContractError):
+            ServiceStoreLocator.for_service("sqlite", service_id)
+
+
+def test_migration_state_keeps_readiness_separate_from_adapter_information() -> None:
+    from aipcs_mcp.storage import (  # noqa: PLC0415
+        MigrationState,
+        StorageAdapterInfo,
+        StorageContractError,
+    )
+
+    assert StorageAdapterInfo("sqlite", frozenset({"registry"})).supported_components == {
+        "registry"
+    }
+    assert MigrationState("registry", 0, 1, "uninitialised").applied_revision == 0
+    assert MigrationState("service_store", 1, 1, "ready").status == "ready"
+    for invalid in (
+        ("registry", 1, 1, "uninitialised"),
+        ("registry", 0, 1, "ready"),
+        ("registry", -1, 1, "dirty"),
+        ("registry", 1, 0, "dirty"),
+        ("domain", 1, 1, "ready"),
+        ("registry", True, 1, "dirty"),
+        ("registry", 1, True, "dirty"),
+    ):
+        with pytest.raises(StorageContractError):
+            MigrationState(*invalid)
+    with pytest.raises(StorageContractError):
+        StorageAdapterInfo("sqlite", frozenset({"registry", "records"}))
+    for components in ({"registry"}, frozenset(), frozenset({_TextSubclass("registry")})):
+        with pytest.raises(StorageContractError):
+            StorageAdapterInfo("sqlite", components)
+    for invalid in (
+        (_TextSubclass("registry"), 1, 1, "ready"),
+        ("registry", 1, 1, _TextSubclass("ready")),
+    ):
+        with pytest.raises(StorageContractError):
+            MigrationState(*invalid)
+    assert MigrationState("registry", 0, 1, "incompatible").status == "incompatible"
+    assert MigrationState("registry", 1, 1, "dirty").status == "dirty"
+    assert MigrationState("registry", 2, 1, "incompatible").status == "incompatible"
+
+
+def test_application_and_audit_projections_remain_allowlisted() -> None:
+    assert [field.name for field in fields(AuditEvent)] == [
+        "action",
+        "outcome",
+        "service_id",
+        "principal_id",
+        "created_via",
+        "at",
+    ]
+    assert tuple(ServiceMetadata.model_fields) == (
+        "service_id",
+        "domain_name",
+        "domain_class",
+        "intent_description",
+        "design_state",
+        "operational_status",
+        "schema_",
+        "schema_version",
+        "created_at",
+        "updated_at",
+        "last_activity_at",
+        "materialised_at",
+        "storage",
+    )
 
 
 def test_cli_command_surface_is_serve_and_config_show_validate() -> None:

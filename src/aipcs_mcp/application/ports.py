@@ -19,7 +19,7 @@ class IdProvider(Protocol):
 
 
 class ServiceRepository(Protocol):
-    """Principal-scoped service access; list order is created time then service ID."""
+    """Principal-scoped detached snapshots; list order is created time then service ID."""
 
     def find_domain(self, principal_id: str, domain_name: str) -> Service | None: ...
     def get(self, principal_id: str, service_id: UUID) -> Service | None: ...
@@ -29,6 +29,8 @@ class ServiceRepository(Protocol):
 
 
 class MutationLedger(Protocol):
+    """Claims and replay results are detached snapshots owned by the transaction."""
+
     def claim(self, principal_id: str, key: str, fingerprint: str) -> MutationClaim: ...
     def complete(self, principal_id: str, key: str, fingerprint: str, result: Service) -> None: ...
 
@@ -44,6 +46,7 @@ class RegistryUnitOfWork(Protocol):
 
     def commit(self) -> None: ...
     def rollback(self) -> None: ...
+    def close(self) -> None: ...
 
 
 UowFactory = Callable[[], RegistryUnitOfWork]

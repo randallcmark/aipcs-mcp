@@ -22,7 +22,10 @@ reached.
   before configuration resolution and before any MCP server construction.
 
 No listener, remote transport, hosted service, authentication flow, storage
-adapter, database connection, or migration is implemented in this slice.
+adapter, database connection, or migration is implemented in this slice. The
+pure storage contracts accept only closed backend/component values and opaque
+service-store identifiers; they contain no physical location, connection,
+credential, or raw adapter error field.
 
 ## Safe responses
 

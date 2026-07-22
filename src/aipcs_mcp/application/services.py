@@ -8,7 +8,7 @@ import re
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Any, Never
+from typing import Any
 from uuid import UUID
 
 from aipcs_mcp.contracts import ServiceMetadata
@@ -39,6 +39,13 @@ _MAX_CREATED_VIA_LENGTH = 64
 _MAX_IDEMPOTENCY_KEY_LENGTH = 128
 _MAX_DOMAIN_CLASS_LENGTH = 64
 _MAX_INTENT_LENGTH = 1_000
+_SAFE_APPLICATION_ERROR_TYPES = (
+    Conflict,
+    InternalFailure,
+    InvalidCommand,
+    InvalidState,
+    NotFound,
+)
 
 
 class ServiceApplication:
@@ -56,92 +63,106 @@ class ServiceApplication:
             claim = uow.mutations.claim(context.principal_id, command.idempotency_key, fingerprint)
             replay = self._resolve_claim(claim, context.principal_id)
             if replay is not None:
-                return self._project(replay)
-
-            existing = uow.services.find_domain(context.principal_id, command.domain_name)
-            if existing is not None and existing.principal_id != context.principal_id:
-                existing = None
-            if existing is not None:
-                result = self._project(existing)
-                now = self._now()
-                uow.audits.append(
-                    AuditEvent(
-                        action="seed",
-                        outcome="duplicate",
-                        service_id=existing.service_id,
-                        principal_id=context.principal_id,
-                        created_via=context.created_via,
-                        at=now,
+                result = self._project(replay)
+            else:
+                existing = uow.services.find_domain(context.principal_id, command.domain_name)
+                if existing is not None and existing.principal_id != context.principal_id:
+                    existing = None
+                if existing is not None:
+                    result = self._project(existing)
+                    now = self._now()
+                    uow.audits.append(
+                        AuditEvent(
+                            action="seed",
+                            outcome="duplicate",
+                            service_id=existing.service_id,
+                            principal_id=context.principal_id,
+                            created_via=context.created_via,
+                            at=now,
+                        )
                     )
-                )
-                uow.mutations.complete(
-                    context.principal_id,
-                    command.idempotency_key,
-                    fingerprint,
-                    existing,
-                )
-                uow.commit()
-                return result
-
-            now = self._now()
-            service = Service(
-                service_id=self._new_service_id(),
-                principal_id=context.principal_id,
-                domain_name=command.domain_name,
-                domain_class=command.domain_class,
-                intent_description=command.intent_description,
-                created_at=now,
-                updated_at=now,
-                last_activity_at=now,
-            )
-            result = self._project(service)
-            uow.services.add(service)
-            uow.audits.append(
-                AuditEvent(
-                    action="seed",
-                    outcome="created",
-                    service_id=service.service_id,
-                    principal_id=context.principal_id,
-                    created_via=context.created_via,
-                    at=now,
-                )
-            )
-            uow.mutations.complete(
-                context.principal_id,
-                command.idempotency_key,
-                fingerprint,
-                service,
-            )
-            uow.commit()
-            return result
+                    uow.mutations.complete(
+                        context.principal_id,
+                        command.idempotency_key,
+                        fingerprint,
+                        existing,
+                    )
+                    uow.commit()
+                else:
+                    now = self._now()
+                    service = Service(
+                        service_id=self._new_service_id(),
+                        principal_id=context.principal_id,
+                        domain_name=command.domain_name,
+                        domain_class=command.domain_class,
+                        intent_description=command.intent_description,
+                        created_at=now,
+                        updated_at=now,
+                        last_activity_at=now,
+                    )
+                    result = self._project(service)
+                    uow.services.add(service)
+                    uow.audits.append(
+                        AuditEvent(
+                            action="seed",
+                            outcome="created",
+                            service_id=service.service_id,
+                            principal_id=context.principal_id,
+                            created_via=context.created_via,
+                            at=now,
+                        )
+                    )
+                    uow.mutations.complete(
+                        context.principal_id,
+                        command.idempotency_key,
+                        fingerprint,
+                        service,
+                    )
+                    uow.commit()
         except Exception as error:
-            self._raise_after_rollback(uow, error)
+            failure = self._failure_after_rollback(uow, error)
+        else:
+            failure = self._close_failure(uow)
+            if failure is None:
+                return result
+        raise failure from None
 
     def list(self, context: ApplicationContext, limit: int = 100) -> list[ServiceMetadata]:
         self._validate_context(context)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise InvalidCommand()
+        uow = self._new_uow()
         try:
-            items = self._new_uow().services.list(context.principal_id, limit)
+            items = uow.services.list(context.principal_id, limit)
         except Exception as error:
-            self._raise_internal(error)
+            failure = self._failure_after_close(uow, error)
+        else:
+            failure = self._close_failure(uow)
+        if failure is not None:
+            raise failure from None
         try:
             scoped = (item for item in items if item.principal_id == context.principal_id)
             ordered = sorted(scoped, key=lambda item: (item.created_at, item.service_id))[:limit]
-            return [self._project(item) for item in ordered]
-        except ApplicationError:
-            raise
+            result = [self._project(item) for item in ordered]
         except Exception as error:
-            self._raise_internal(error)
+            failure = self._safe_application_error(error)
+        else:
+            return result
+        raise failure from None
 
     def inspect(self, context: ApplicationContext, service_id: UUID) -> ServiceMetadata:
         self._validate_context(context)
         if not isinstance(service_id, UUID) or service_id.int == 0:
             raise InvalidCommand()
+        uow = self._new_uow()
         try:
-            service = self._new_uow().services.get(context.principal_id, service_id)
+            service = uow.services.get(context.principal_id, service_id)
         except Exception as error:
-            self._raise_internal(error)
+            failure = self._failure_after_close(uow, error)
+        else:
+            failure = self._close_failure(uow)
+        if failure is not None:
+            raise failure from None
         if service is None or service.principal_id != context.principal_id:
             raise NotFound()
         return self._project(service)
@@ -156,50 +177,54 @@ class ServiceApplication:
             claim = uow.mutations.claim(context.principal_id, command.idempotency_key, fingerprint)
             replay = self._resolve_claim(claim, context.principal_id)
             if replay is not None:
-                return self._project(replay)
+                result = self._project(replay)
+            else:
+                service = uow.services.get(context.principal_id, command.service_id)
+                if service is None or service.principal_id != context.principal_id:
+                    raise NotFound()
+                if (
+                    service.operational_status != "active"
+                    or service.design_state != "seeded"
+                    or service.manifest is not None
+                ):
+                    raise InvalidState()
 
-            service = uow.services.get(context.principal_id, command.service_id)
-            if service is None or service.principal_id != context.principal_id:
-                raise NotFound()
-            if (
-                service.operational_status != "active"
-                or service.design_state != "seeded"
-                or service.manifest is not None
-            ):
-                raise InvalidState()
-
-            now = self._now()
-            if now < service.updated_at:
-                raise InternalFailure()
-            changed = replace(
-                service,
-                manifest=command.manifest.model_copy(deep=True),
-                schema_version=1,
-                updated_at=now,
-                last_activity_at=now,
-            )
-            result = self._project(changed)
-            uow.services.save(changed)
-            uow.audits.append(
-                AuditEvent(
-                    action="design",
-                    outcome="accepted",
-                    service_id=changed.service_id,
-                    principal_id=context.principal_id,
-                    created_via=context.created_via,
-                    at=now,
+                now = self._now()
+                if now < service.updated_at:
+                    raise InternalFailure()
+                changed = replace(
+                    service,
+                    manifest=command.manifest.model_copy(deep=True),
+                    schema_version=1,
+                    updated_at=now,
+                    last_activity_at=now,
                 )
-            )
-            uow.mutations.complete(
-                context.principal_id,
-                command.idempotency_key,
-                fingerprint,
-                changed,
-            )
-            uow.commit()
-            return result
+                result = self._project(changed)
+                uow.services.save(changed)
+                uow.audits.append(
+                    AuditEvent(
+                        action="design",
+                        outcome="accepted",
+                        service_id=changed.service_id,
+                        principal_id=context.principal_id,
+                        created_via=context.created_via,
+                        at=now,
+                    )
+                )
+                uow.mutations.complete(
+                    context.principal_id,
+                    command.idempotency_key,
+                    fingerprint,
+                    changed,
+                )
+                uow.commit()
         except Exception as error:
-            self._raise_after_rollback(uow, error)
+            failure = self._failure_after_rollback(uow, error)
+        else:
+            failure = self._close_failure(uow)
+            if failure is None:
+                return result
+        raise failure from None
 
     def _validate_context(self, context: ApplicationContext) -> None:
         if (
@@ -245,33 +270,43 @@ class ServiceApplication:
     def _manifest_snapshot(manifest: ManifestV2) -> ManifestV2:
         try:
             payload = manifest.model_dump(mode="json", by_alias=True, warnings="error")
-            return ManifestV2.model_validate(payload)
+            result = ManifestV2.model_validate(payload)
         except Exception:
-            raise InvalidCommand() from None
+            failure = InvalidCommand()
+        else:
+            return result
+        raise failure from None
 
     def _new_uow(self) -> RegistryUnitOfWork:
         try:
-            return self._uows()
-        except Exception as error:
-            self._raise_internal(error)
+            result = self._uows()
+        except Exception:
+            failure = InternalFailure()
+        else:
+            return result
+        raise failure from None
 
     def _now(self) -> datetime:
         try:
             value = self._clock.now()
             if value.tzinfo is None or value.utcoffset() != timedelta(0):
                 raise InternalFailure()
+        except Exception:
+            failure = InternalFailure()
+        else:
             return value
-        except Exception as error:
-            self._raise_internal(error)
+        raise failure from None
 
     def _new_service_id(self) -> UUID:
         try:
             value = self._ids.new_service_id()
             if not isinstance(value, UUID) or value.int == 0:
                 raise InternalFailure()
+        except Exception:
+            failure = InternalFailure()
+        else:
             return value
-        except Exception as error:
-            self._raise_internal(error)
+        raise failure from None
 
     @staticmethod
     def _resolve_claim(claim: MutationClaim, principal_id: str) -> Service | None:
@@ -290,21 +325,45 @@ class ServiceApplication:
     @staticmethod
     def _project(service: Service) -> ServiceMetadata:
         try:
-            return project(service)
-        except Exception as error:
-            ServiceApplication._raise_internal(error)
+            result = project(service)
+        except Exception:
+            failure = InternalFailure()
+        else:
+            return result
+        raise failure from None
 
     @staticmethod
-    def _raise_internal(_error: Exception) -> Never:
-        raise InternalFailure() from None
+    def _close_failure(uow: RegistryUnitOfWork) -> InternalFailure | None:
+        try:
+            uow.close()
+        except Exception:
+            return InternalFailure()
+        return None
 
     @classmethod
-    def _raise_after_rollback(cls, uow: RegistryUnitOfWork, error: Exception) -> Never:
+    def _failure_after_close(
+        cls, uow: RegistryUnitOfWork, error: Exception
+    ) -> ApplicationError:
+        with suppress(Exception):
+            uow.close()
+        return cls._safe_application_error(error)
+
+    @classmethod
+    def _failure_after_rollback(
+        cls, uow: RegistryUnitOfWork, error: Exception
+    ) -> ApplicationError:
         with suppress(Exception):
             uow.rollback()
-        if isinstance(error, ApplicationError):
-            raise error from None
-        cls._raise_internal(error)
+        with suppress(Exception):
+            uow.close()
+        return cls._safe_application_error(error)
+
+    @staticmethod
+    def _safe_application_error(error: Exception) -> ApplicationError:
+        for error_type in _SAFE_APPLICATION_ERROR_TYPES:
+            if type(error) is error_type:
+                return error_type()
+        return InternalFailure()
 
 
 def _fingerprint(context: ApplicationContext, command: Any) -> str:
