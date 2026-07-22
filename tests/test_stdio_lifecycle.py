@@ -42,6 +42,12 @@ def _assert_public_metadata(metadata: dict[str, object]) -> None:
     assert metadata["storage"] is None
 
 
+def test_source_stdio_process_disables_checkout_bytecode(tmp_path: Path) -> None:
+    parameters = sqlite_parameters(tmp_path / "registry", "test-principal")
+    assert parameters.env is not None
+    assert parameters.env["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
 def test_sqlite_ready_lifecycle_and_design(tmp_path: Path) -> None:
     root = tmp_path / "aipcs-stdio-root"
     _secure_parent(root)

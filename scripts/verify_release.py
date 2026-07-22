@@ -38,6 +38,11 @@ _SCRUBBED_ENVIRONMENT_KEYS = frozenset(
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     }
 )
+_GENERATED_DIRECTORY_NAMES = frozenset(
+    {"__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
+)
+_GENERATED_FILE_SUFFIXES = frozenset({".db", ".db3", ".pyc", ".pyo", ".sqlite", ".sqlite3"})
+_GENERATED_FILE_ENDINGS = ("-journal", "-wal", "-shm")
 
 
 class ReleaseVerificationError(RuntimeError):
@@ -158,6 +163,32 @@ def require_local_preconditions(root: Path, uv: str | None = None) -> str:
             "uv is required; install it and prime the locked offline cache."
         )
     return resolved_uv
+
+
+def generated_checkout_artifacts(root: Path) -> tuple[Path, ...]:
+    """Find denied ignored/generated material without entering .git or the development venv."""
+
+    artifacts: list[Path] = []
+    for current, directories, names in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        if current_path == root:
+            directories[:] = [name for name in directories if name not in {".git", ".venv"}]
+        for directory in tuple(directories):
+            if directory in _GENERATED_DIRECTORY_NAMES or directory.endswith(".egg-info"):
+                artifacts.append(current_path / directory)
+                directories.remove(directory)
+        for name in names:
+            path = current_path / name
+            if path.suffix.casefold() in _GENERATED_FILE_SUFFIXES or name.casefold().endswith(
+                _GENERATED_FILE_ENDINGS
+            ):
+                artifacts.append(path)
+    return tuple(sorted(artifacts))
+
+
+def require_clean_checkout_artifacts(root: Path) -> None:
+    if generated_checkout_artifacts(root):
+        raise ReleaseVerificationError("source checkout contains generated or database artifacts.")
 
 
 def _safe_relative_path(value: str) -> PurePosixPath:
@@ -791,6 +822,7 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
     root = root.resolve()
     environment = scrubbed_environment()
     uv = require_local_preconditions(root)
+    require_clean_checkout_artifacts(root)
     workspace = Path(tempfile.mkdtemp(prefix="aipcs-release-"))
     failed = True
     summary: str | None = None
@@ -885,6 +917,7 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        require_clean_checkout_artifacts(root)
         summary = _summary(
             _commit(source_snapshot.root, environment=environment),
             source_state,

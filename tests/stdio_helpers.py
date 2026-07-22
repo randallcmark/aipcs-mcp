@@ -44,7 +44,11 @@ def sqlite_parameters(root: Path, principal: str, *, debug: bool = False) -> Std
     ]
     if debug:
         args.extend(("--log-level", "debug"))
-    environment = {"PYTHONPATH": str(ROOT / "src"), "PATH": os.environ.get("PATH", "")}
+    environment = {
+        "PYTHONPATH": str(ROOT / "src"),
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
     return StdioServerParameters(command=sys.executable, args=args, cwd=ROOT, env=environment)
 
 

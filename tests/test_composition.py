@@ -130,7 +130,11 @@ def test_non_ready_sqlite_fails_before_mcp_construction(
 
 
 def _run_bad_startup(root: Path) -> subprocess.CompletedProcess[str]:
-    environment = {"PYTHONPATH": str(ROOT / "src"), "PATH": os.environ.get("PATH", "")}
+    environment = {
+        "PYTHONPATH": str(ROOT / "src"),
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
     return subprocess.run(
         [
             sys.executable,

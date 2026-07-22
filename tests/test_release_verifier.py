@@ -61,6 +61,25 @@ def test_intended_set_keeps_dirty_and_untracked_but_excludes_ignored(
     assert (root / "tracked.txt").read_text(encoding="utf-8") == "dirty tracked content\n"
 
 
+def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
+    tmp_path: Path, verifier
+) -> None:
+    root = tmp_path / "source"
+    (root / ".git" / "__pycache__").mkdir(parents=True)
+    (root / ".venv" / "lib").mkdir(parents=True)
+    (root / ".venv" / "lib" / "ignored.pyc").write_bytes(b"ignored")
+    (root / "src" / "__pycache__").mkdir(parents=True)
+    (root / "src" / "__pycache__" / "module.pyc").write_bytes(b"generated")
+    (root / "state.sqlite").write_bytes(b"generated")
+
+    relative = {
+        path.relative_to(root).as_posix() for path in verifier.generated_checkout_artifacts(root)
+    }
+    assert relative == {"src/__pycache__", "state.sqlite"}
+    with pytest.raises(verifier.ReleaseVerificationError, match="generated or database"):
+        verifier.require_clean_checkout_artifacts(root)
+
+
 def test_clean_copy_preserves_content_and_mode_with_distinct_inodes(
     tmp_path: Path, verifier
 ) -> None:

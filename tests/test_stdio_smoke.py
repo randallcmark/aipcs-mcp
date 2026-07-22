@@ -19,7 +19,10 @@ async def _stdio_smoke() -> None:
         command=sys.executable,
         args=["-m", "aipcs_mcp", "serve", "--transport", "stdio"],
         cwd=ROOT,
-        env={"PYTHONPATH": str(ROOT / "src")},
+        env={
+            "PYTHONPATH": str(ROOT / "src"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
     )
     async with (
         stdio_client(parameters) as (read_stream, write_stream),
