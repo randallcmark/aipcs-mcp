@@ -363,6 +363,23 @@ def test_embedded_catalog_client_exercises_the_source_contract(
     assert restarted.value.code == 0
 
 
+def test_embedded_domain_schema_client_exercises_the_source_contract(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    program = verifier._domain_schema_smoke_program()
+    compile(program, "installed_domain_schema_smoke.py", "exec")
+    assert "SQLiteDomainSchemaStore" in program
+    assert 'catalog.migrate(locator).status == "ready"' in program
+    assert 'ordered == ("title", "quantity")' in program
+    assert "site.getsitepackages()" in program
+
+    root = tmp_path / "domain-schema-root"
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
+    monkeypatch.setattr(sys, "argv", ["installed_domain_schema_smoke.py", str(root)])
+    exec(compile(program, "installed_domain_schema_smoke.py", "exec"), {})
+    assert (root / "service-stores").is_dir()
+
+
 def test_embedded_relational_client_exercises_the_source_contract(
     monkeypatch, verifier
 ) -> None:
@@ -422,6 +439,37 @@ def test_catalog_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert calls[2][2] == tmp_path / "sdist-catalog-cwd"
     assert calls[3][2] == tmp_path / "sdist-catalog-cwd"
     assert calls[0][2] != calls[2][2]
+
+
+def test_domain_schema_smoke_uses_each_installed_interpreter_and_external_cwd(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name in ("wheel", "sdist"):
+        verifier.run_installed_domain_schema_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [label for label, _, _ in calls] == [
+        "installed wheel domain schema smoke",
+        "installed sdist domain schema smoke",
+    ]
+    assert calls[0][1][0].endswith("wheel-venv/bin/python")
+    assert calls[1][1][0].endswith("sdist-venv/bin/python")
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][2] == tmp_path / "wheel-domain-schema-cwd"
+    assert calls[1][2] == tmp_path / "sdist-domain-schema-cwd"
+    assert calls[0][2] != calls[1][2]
 
 
 def test_relational_smoke_uses_each_installed_interpreter_and_external_cwd(

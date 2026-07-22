@@ -798,6 +798,179 @@ def run_installed_catalog_smoke(
     )
 
 
+def _domain_schema_smoke_program() -> str:
+    """Standalone installed V1-07B domain-schema proof with no checkout imports."""
+
+    return r'''
+import site
+import sqlite3
+import sys
+from copy import deepcopy
+from pathlib import Path
+from uuid import UUID
+
+import aipcs_mcp.storage.sqlite.domain_schema as domain_schema_module
+import aipcs_mcp.storage.sqlite.domain_schema_layout as domain_schema_layout_module
+import aipcs_mcp.storage.sqlite.service_store as service_store_module
+import aipcs_mcp.storage.sqlite.service_store_inspection as service_store_inspection_module
+from aipcs_mcp.manifest_v2 import ManifestV2
+from aipcs_mcp.relational import compile_manifest
+from aipcs_mcp.storage import DomainSchemaState
+from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
+from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
+
+root = Path(sys.argv[1])
+sites = tuple(Path(value).resolve() for value in site.getsitepackages())
+for module in (
+    domain_schema_module,
+    domain_schema_layout_module,
+    service_store_module,
+    service_store_inspection_module,
+):
+    origin = Path(module.__file__).resolve()
+    assert any(origin.is_relative_to(value) for value in sites), origin
+
+managed = [
+    {"name": "id", "type": "uuid", "required": True, "primary_key": True},
+    {"name": "owner_id", "type": "string", "required": True},
+    {"name": "created_at", "type": "datetime", "required": True},
+    {"name": "updated_at", "type": "datetime", "required": True},
+    {"name": "created_via", "type": "string", "required": True},
+    {"name": "record_version", "type": "integer", "required": True},
+]
+
+def entity(name, attributes):
+    return {"name": name, "attributes": deepcopy(managed) + attributes}
+
+document = {
+    "manifest_version": 2,
+    "schema_version": 1,
+    "entities": [
+        entity("account", [{"name": "label", "type": "string", "required": True}]),
+        entity("project", [
+            {"name": "title", "type": "string", "required": True},
+            {"name": "quantity", "type": "integer"},
+            {"name": "ratio", "type": "number"},
+            {"name": "enabled", "type": "boolean"},
+            {"name": "recorded_at", "type": "datetime"},
+            {"name": "account_id", "type": "uuid"},
+            {"name": "parent_id", "type": "uuid"},
+            {"name": "labels", "type": "string_list"},
+        ]),
+    ],
+    "relationships": [
+        {
+            "name": "project_account_fk",
+            "from": {"entity": "project", "field": "account_id"},
+            "to": {"entity": "account", "field": "id"},
+            "on_delete": "restrict",
+        },
+        {
+            "name": "project_parent_fk",
+            "from": {"entity": "project", "field": "parent_id"},
+            "to": {"entity": "project", "field": "id"},
+            "on_delete": "restrict",
+        },
+    ],
+    "indices": [
+        {
+            "name": "project_account_title_unique_idx",
+            "entity": "project",
+            "fields": ["account_id", "title"],
+            "unique": True,
+        },
+        {
+            "name": "project_title_quantity_idx",
+            "entity": "project",
+            "fields": ["title", "quantity"],
+        },
+    ],
+    "query_patterns": [],
+    "discovery_facets": [],
+    "migration_history": [],
+}
+specification = compile_manifest(ManifestV2.model_validate(document))
+policy = SQLiteLocationPolicy(root)
+catalog = SQLiteServiceStoreCatalog(policy)
+locator = catalog.allocate(UUID(int=41))
+assert catalog.migrate(locator).status == "ready"
+store = SQLiteDomainSchemaStore(policy)
+assert store.inspect(locator, specification) == DomainSchemaState("unmaterialised")
+assert store.materialise(locator, specification) == DomainSchemaState("ready")
+assert store.inspect(locator, specification) == DomainSchemaState("ready")
+assert store.materialise(locator, specification) == DomainSchemaState("ready")
+
+database = root / "service-stores" / f"{locator.namespace}.sqlite"
+with sqlite3.connect(database) as connection:
+    project = tuple(
+        (row[1], row[2], row[3])
+        for row in connection.execute('PRAGMA table_xinfo("project")')
+    )
+    assert project[-8:] == (
+        ("title", "TEXT", 1),
+        ("quantity", "INTEGER", 0),
+        ("ratio", "REAL", 0),
+        ("enabled", "INTEGER", 0),
+        ("recorded_at", "TEXT", 0),
+        ("account_id", "TEXT", 0),
+        ("parent_id", "TEXT", 0),
+        ("labels", "TEXT", 0),
+    )
+    foreign_keys = tuple(connection.execute('PRAGMA foreign_key_list("project")'))
+    assert foreign_keys == (
+        (0, 0, "project", "parent_id", "id", "RESTRICT", "RESTRICT", "NONE"),
+        (1, 0, "account", "account_id", "id", "RESTRICT", "RESTRICT", "NONE"),
+    )
+    project_sql = connection.execute(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='project'"
+    ).fetchone()[0]
+    assert "DEFERRABLE" not in project_sql
+    ordered = tuple(
+        row[2]
+        for row in connection.execute('PRAGMA index_xinfo("project_title_quantity_idx")')
+        if row[5]
+    )
+    assert ordered == ("title", "quantity")
+    unique_ordered = tuple(
+        row[2]
+        for row in connection.execute('PRAGMA index_xinfo("project_account_title_unique_idx")')
+        if row[5]
+    )
+    assert unique_ordered == ("account_id", "title")
+    index_flags = {
+        row[1]: row[2]
+        for row in connection.execute('PRAGMA index_list("project")')
+    }
+    assert index_flags["project_title_quantity_idx"] == 0
+    assert index_flags["project_account_title_unique_idx"] == 1
+'''
+
+
+def run_installed_domain_schema_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Exercise installed V1-07B initial materialisation from an external cwd."""
+
+    client = workspace / f"{name}-domain-schema-smoke.py"
+    client.write_text(_domain_schema_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"{name}-domain-schema-cwd"
+    cwd.mkdir(mode=0o700)
+    root = workspace / f"{name}-domain-schema-root"
+    run_stage(
+        f"installed {name} domain schema smoke",
+        [python, "-I", client, root],
+        cwd=cwd,
+        environment=environment,
+        timeout=SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+
+
 def _relational_contract_smoke_program() -> str:
     """Standalone installed proof for the pure V1-07A relational contract."""
 
@@ -1309,6 +1482,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_domain_schema_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_installed_relational_contract_smoke(
             wheel_python,
             workspace,
@@ -1344,6 +1524,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             workspace,
             "sdist",
             heavy=False,
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_domain_schema_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
             environment=environment,
             redaction_roots=redaction_roots,
         )

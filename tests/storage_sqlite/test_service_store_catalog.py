@@ -15,6 +15,8 @@ from aipcs_mcp.storage import MigrationState, ServiceStoreLocator, StorageContra
 from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
 from aipcs_mcp.storage.sqlite import service_store as catalog_module
+from aipcs_mcp.storage.sqlite import service_store_inspection as inspection_module
+from aipcs_mcp.storage.sqlite.connection import connect
 from aipcs_mcp.storage.sqlite.service_store_migrations import (
     CHECKSUM,
     DDL,
@@ -148,6 +150,31 @@ def test_migration_is_idempotent_and_preserves_ledger_timestamp(tmp_path: Path) 
             f'SELECT migration_id,checksum,applied_at FROM "{MIGRATION}"'
         ).fetchone()
     assert after == before
+
+
+def test_connection_inspector_reports_ready_for_existing_hardened_connection(
+    tmp_path: Path,
+) -> None:
+    catalog, locator, _, _ = _ready(tmp_path)
+    anchored = catalog._location.acquire_service_store(
+        locator.namespace,
+        create=False,
+        allow_journal=False,
+    )
+    assert anchored is not None
+
+    connection = None
+    try:
+        connection = connect(anchored, "ro", query_only=True)
+        assert inspection_module.inspect_connection(
+            connection,
+            locator.namespace,
+            integrity=True,
+        ) == MigrationState("service_store", 1, 1, "ready")
+    finally:
+        if connection is not None:
+            connection.close()
+        anchored.close()
 
 
 def test_revision_one_contains_only_exact_reserved_metadata(tmp_path: Path) -> None:
@@ -306,8 +333,8 @@ def test_precommit_readiness_fault_rolls_back_to_uninitialised(
     locator = _locator()
     with monkeypatch.context() as context:
         context.setattr(
-            catalog_module,
-            "_inspect",
+            inspection_module,
+            "inspect_connection",
             lambda connection, namespace, *, integrity: MigrationState(
                 "service_store", 1, 1, "incompatible"
             ),
@@ -478,7 +505,7 @@ def test_observable_replacement_at_precommit_does_not_mutate_substitute(
     locator = _locator()
     database = _database(root, locator)
     original = database.with_suffix(".precommit-original")
-    real_inspect = catalog_module._inspect
+    real_inspect = inspection_module.inspect_connection
     swapped = False
 
     def replace_then_inspect(connection, namespace, *, integrity):
@@ -490,7 +517,7 @@ def test_observable_replacement_at_precommit_does_not_mutate_substitute(
             swapped = True
         return real_inspect(connection, namespace, integrity=integrity)
 
-    monkeypatch.setattr(catalog_module, "_inspect", replace_then_inspect)
+    monkeypatch.setattr(inspection_module, "inspect_connection", replace_then_inspect)
     with pytest.raises(StorageUnavailable) as captured:
         catalog.migrate(locator)
     _assert_bounded(captured.value, root)

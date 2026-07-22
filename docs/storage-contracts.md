@@ -106,11 +106,62 @@ registry application and service-catalog behavior without treating SQL,
 filesystem layout, connections, or drivers as portable contract details. They
 are not shipped as a storage adapter.
 
+## Private SQLite domain-schema store
+
+`SQLiteDomainSchemaStore` is the private SQLite implementation of the
+`DomainSchemaStore` protocol. It uses the same descriptor-anchored location
+policy and opaque locator mapping as `SQLiteServiceStoreCatalog`: a valid
+SQLite locator selects only
+`service-stores/svc_<32 lowercase hexadecimal characters>.sqlite` below the
+configured SQLite data root. It does not allocate a locator, create a
+directory or database, compose with the registry, or add a public storage
+adapter surface.
+
+Every `inspect()` and `materialise()` call first requires that selected,
+already-existing database to pass the exact revision-1 service-store foundation
+inspection on the very connection used for the domain operation. A missing,
+empty, dirty, incompatible, copied, or otherwise non-ready foundation is a
+`StorageMigrationError`, not a domain `unmaterialised` result. In particular,
+all domain objects being absent is `unmaterialised` only after the exact
+foundation metadata and migration ledger prove readiness; without that ledger,
+the store must not infer whether the empty domain is a fresh service or an
+unknown database. Invalid locators, specifications, and transitions are
+`StorageContractError`; unavailable or unsafe storage remains a bounded
+`StorageUnavailable` error.
+
+Against a ready foundation, inspection compares the non-reserved database
+objects exactly with the supplied compiled relational specification. It returns
+`unmaterialised` when every domain table and index is absent, `ready` only for
+the complete exact layout with a clean foreign-key check, and `incompatible`
+for any partial, extra, altered, or orphaned domain layout. These states are
+relative to that supplied specification and are not persisted as a manifest,
+schema version, fingerprint, or second ledger. Inspection never repairs.
+Because no domain-schema ledger is stored, a ready foundation after complete external deletion of
+every domain object is observationally identical to a never-materialised domain and is therefore
+also `unmaterialised`; any partial disappearance remains detectable as `incompatible`. Later
+registry-lifecycle composition supplies the historical context needed to treat an unexpectedly
+empty previously materialised service as a cross-store recovery case.
+
+`materialise()` supports initial physical DDL only, and therefore accepts only
+`schema_version == 1`. It atomically creates the deterministic tables and
+ordered explicit indexes only from `unmaterialised`; repeat materialisation of
+the exact layout is a no-op, and an incompatible layout is preserved. SQLite
+foreign keys are named, `ON DELETE RESTRICT ON UPDATE RESTRICT`, immediate,
+and never `DEFERRABLE`; nullable foreign-key fields are the supported way to
+stage otherwise cyclic data. `evolve()` deeply revalidates the internally consistent additive
+transition value but is deliberately unavailable and performs no location I/O; Python object
+identity is not treated as a provenance seal.
+
+This private store is not composed by the runtime, MCP tools, CLI,
+configuration, registry lifecycle, or record surface. It provides no domain
+rows, record operations, migration history, schema repair, service allocation,
+or cross-store transaction.
+
 ## Private relational schema contract
 
 `DomainSchemaStore` is a private, backend-neutral protocol for a later domain
 schema adapter. It accepts an opaque `ServiceStoreLocator` and an immutable
-compiled relational specification, or a factory-built additive transition. Its
+compiled relational specification, or a deeply revalidated additive transition. Its
 only operations are inspection relative to a supplied specification, exact
 initial materialisation, and exact transition. Inspection reports only
 `unmaterialised`, `ready`, or `incompatible` relative to that supplied target.
