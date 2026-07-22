@@ -26,8 +26,10 @@ must fail the mutation rather than leave an unaccounted state change.
 
 The SQLite registry provides the current production unit of work, mutation
 ledger, and metadata-only audit store for seed and initial-design operations.
-It does not provide a service-store or record unit of work. A successfully
-acquired unit is always closed exactly once. `commit()` and `rollback()`
+It does not provide a service-store or record unit of work. The packaged
+private SQLite service-store catalog is not injected into the application and
+has no application port for materialisation or records. A successfully
+acquired registry unit is always closed exactly once. `commit()` and `rollback()`
 terminate its transaction attempt; `close()` releases resources and performs
 adapter-safe cleanup of an unterminated attempt. The application preserves the
 original failure when rollback or close also fail. A close failure after an
@@ -49,10 +51,17 @@ Three version dimensions remain separate:
 A schema change is not an adapter migration, and neither is a substitute for a
 durable operation/recovery record.
 
+The uncomposed service-store catalog demonstrates that separation: its private
+revision 1 can make adapter metadata ready without reading a manifest or
+changing registry state. Such a database is not a materialised service. Direct
+initialisation may leave it orphaned until a future operation record can
+coordinate and reconcile the independently committed stores.
+
 ## Migration and serving rule
 
 A SQLite adapter applies its required registry migration once before it reports
-the process ready to serve. Migration failure prevents MCP construction. Read
+the process ready to serve. Migration failure prevents MCP construction. The
+runtime does not construct or migrate the service-store catalog. Read
 operations do not execute DDL, and opening a unit of work does not
 opportunistically alter storage layout.
 
@@ -60,8 +69,8 @@ The application layer requests behavior through its boundary; it never creates
 tables, parses storage locations, opens database connections, or selects a
 backend.
 
-See [storage contracts](storage-contracts.md) for the pure future-adapter
-vocabulary and migration-state boundary.
+See [storage contracts](storage-contracts.md) for the pure adapter vocabulary
+and migration-state boundary.
 
 ## Current capability
 
@@ -69,7 +78,9 @@ Stateless exposes only `aipcs_server_info` over stdio. A ready SQLite profile
 adds seed, list, inspect, and design. Design validates and stores an initial
 manifest but does not apply it to physical tables: a resulting service remains
 `seeded`, has no storage projection, and cannot hold records. There is no
-standalone lifecycle/admin CLI, service store, materialisation, record API,
-export/import, PostgreSQL, remote transport, or adapter discovery mechanism.
+standalone lifecycle/admin CLI, public service-store allocation or
+materialisation, record API, export/import, PostgreSQL, remote transport, or
+adapter discovery mechanism. The packaged private catalog remains outside this
+application and public capability surface.
 
 See [compatibility](compatibility.md) and [security](security.md).

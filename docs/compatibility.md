@@ -11,7 +11,7 @@ not yet a supported release.
 | Schema manifest | manifest_version | Manifest v2 is the only normal public design input. |
 | Configuration document | config_version | Strict V1 configuration document and source precedence. |
 | Legacy conversion | Explicit manifest-v1 converter | One-way library conversion with provenance and warnings. |
-| Storage migration | Adapter revision | SQLite registry revision 1; adapter-private layout and readiness state. |
+| Storage migration | Adapter revision | Independent SQLite registry revision 1 and private service-store revision 1; adapter-private layouts and readiness state. |
 | Export bundle | export_format_version | Not implemented. |
 
 ## Current contract
@@ -48,12 +48,21 @@ Design accepts and stores an initial manifest-v2 document but does not
 materialise a service store, create domain tables, create records, or expose
 generated tools. `design_state` remains `seeded` and `storage` remains null.
 
+The distribution also contains a private SQLite service-store catalog. Its
+pure locator allocation and independent metadata migration are an uncomposed
+implementation seam, not a new MCP, CLI, configuration, or application
+contract. The current runtime never constructs it. Its filesystem layout and
+migration objects are adapter-private and are not a portable-storage promise.
+Direct initialisation can create an orphan database without changing registry
+state; public materialisation remains gated on recoverable cross-store work.
+
 ## Not yet compatible
 
-The project does not provide PostgreSQL, service-store materialisation, records,
-branches, search, export/import, recovery, multi-writer guarantees,
-administration CLI, remote transport, or deployment interface. Their future
-compatibility commitments will be documented when they exist.
+The project does not provide PostgreSQL, public service-store allocation or
+materialisation, records, branches, search, export/import, recovery,
+multi-writer guarantees, administration CLI, remote transport, or deployment
+interface. Their future compatibility commitments will be documented when they
+exist.
 
 The contract identifier is currently `1.0`. Although earlier planning described
 it as SemVer, no version increment policy is defined yet. Support windows,

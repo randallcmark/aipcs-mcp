@@ -3,8 +3,10 @@
 `aipcs-mcp` is a pre-release, local-first persistence foundation for AI agents.
 It provides a small, stable MCP surface over an agent-defined relational-memory
 schema. The current implementation supports durable service registration and
-initial design storage through a local SQLite registry; it does not yet create
-agent-authored tables or store records.
+initial design storage through a local SQLite registry. It also packages a
+private, uncomposed SQLite catalog that can initialise adapter metadata for an
+opaque per-service database. No public operation invokes that catalog, creates
+agent-authored tables, or stores records.
 
 The public runtime provides:
 
@@ -16,8 +18,8 @@ The public runtime provides:
 
 SQLite support is deliberately narrow: local POSIX filesystems on Linux and
 macOS, one host, and one active writer. PostgreSQL, Windows SQLite, remote MCP,
-service stores, record operations, administration, and hosted deployment are
-not available.
+public service-store allocation or materialisation, record operations,
+administration, and hosted deployment are not available.
 
 ## Public v1 direction
 
@@ -33,7 +35,8 @@ than generating bespoke MCP tools or services.
 - [Application boundary](docs/application-boundary.md) describes the separation
   between transport, lifecycle use cases, and storage.
 - [Storage contracts](docs/storage-contracts.md) defines the backend-neutral
-  vocabulary and the supported SQLite registry boundary.
+  vocabulary, the supported SQLite registry boundary, and the private
+  uncomposed service-store foundation.
 - [Security and trust boundary](docs/security.md) describes safe inputs,
   errors, capability information, and transport restrictions.
 - [Compatibility](docs/compatibility.md) records what is and is not a public
@@ -133,17 +136,27 @@ idempotency key. It validates and stores the manifest, but leaves the service
 seeded: `materialised_at` and `storage` stay `null`, and it creates no service
 database, tables, records, or generated tools.
 
+The installed package contains a private SQLite service-store catalog for the
+next materialisation slice. Its logical allocation is deterministic and its
+explicit migration can create only adapter-owned metadata in a contained
+per-service database. It is not wired to configuration, `serve`, MCP, or the
+application layer. Directly initialising it can therefore create an orphaned
+foundation database with no registry state transition; this is a development
+seam, not a user workflow. Recoverable registry/store coordination is required
+before public materialisation can use it.
+
 AIPCS remains stdio-only. Listener transport settings are rejected before
 configuration resolution or server construction.
 
 Tests and example data in this repository are synthetic contract fixtures.
 They must not contain operational records, credentials, or personal context.
 
-## Out of scope for public v1
+## Current exclusions
 
-- dynamically generated domain-specific MCP tools or per-domain web services;
-- service-store allocation/materialisation, records, branches, search, or
-  cross-service retrieval;
+- dynamically generated domain-specific MCP tools or per-domain web services
+  are out of scope for the core public-v1 runtime;
+- public service-store allocation/materialisation, records, branches, search,
+  and cross-service retrieval are planned but not available yet;
 - PostgreSQL, remote MCP, hosted tenancy, or authentication; and
 - standalone lifecycle, storage, or administration CLI commands; and
 - automatic deletion, archival, merging, or rewriting of memory.

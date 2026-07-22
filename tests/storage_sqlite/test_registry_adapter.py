@@ -100,6 +100,34 @@ class Harness:
         self.failure = boundary
 
 
+def _directory_snapshot(directory: Path) -> tuple[tuple[str, int, int, int], ...]:
+    return tuple(
+        sorted(
+            (
+                entry.name,
+                entry.stat().st_mode,
+                entry.stat().st_size,
+                entry.stat().st_mtime_ns,
+            )
+            for entry in directory.iterdir()
+        )
+    )
+
+
+def _leave_wal_header_without_sidecars(database: Path, *, malformed: bool) -> None:
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    for suffix in ("-wal", "-shm"):
+        Path(str(database) + suffix).unlink(missing_ok=True)
+    if malformed:
+        descriptor = os.open(database, os.O_WRONLY)
+        try:
+            assert os.pwrite(descriptor, b"\x00", 21) == 1
+        finally:
+            os.close(descriptor)
+    database.chmod(0o600)
+
+
 def test_sqlite_adapter_satisfies_unchanged_registry_conformance(tmp_path: Path) -> None:
     counter = 0
 
@@ -162,6 +190,27 @@ def test_hostile_sidecars_fail_closed(tmp_path: Path, suffix: str) -> None:
     if suffix == "-journal":
         assert adapter.migrate().status == "ready"
         assert not sidecar.exists()
+
+
+@pytest.mark.parametrize("malformed", [False, True], ids=["valid", "malformed"])
+def test_wal_header_without_sidecars_never_changes_registry_layout(
+    tmp_path: Path, malformed: bool
+) -> None:
+    root = tmp_path / "root"
+    adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
+    assert adapter.migrate().status == "ready"
+    _leave_wal_header_without_sidecars(root / "registry.sqlite", malformed=malformed)
+    before = _directory_snapshot(root)
+
+    with pytest.raises(StorageUnavailable):
+        adapter.inspect_migration()
+    assert _directory_snapshot(root) == before
+    with pytest.raises(StorageUnavailable):
+        adapter.migrate()
+    assert _directory_snapshot(root) == before
+    with pytest.raises(StorageUnavailable):
+        adapter.open_uow()
+    assert _directory_snapshot(root) == before
 
 
 def test_readiness_rejects_dangling_foreign_key(tmp_path: Path) -> None:

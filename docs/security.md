@@ -33,11 +33,19 @@ provenance value; callers cannot override it.
 
 SQLite is supported only for a local POSIX filesystem on Linux and macOS, one
 host, and one active writer. Its location policy enforces an operator-owned
-`0700` root and `0600` registry file, rejects WAL/SHM state, and fails closed on
-Windows. `serve` alone performs the explicit startup migration; it fails before
-MCP is constructed when storage is unsafe, dirty, incompatible, newer, or not
-ready. Do not use this boundary as a network-filesystem, multi-writer, remote,
-or PostgreSQL deployment mechanism.
+`0700` root, an owner-only service-store container, and `0600` database files.
+It rejects WAL/SHM state and fails closed on Windows. `serve` performs only the
+explicit registry startup migration; it fails before MCP is constructed when
+that storage is unsafe, dirty, incompatible, newer, or not ready. Do not use
+this boundary as a network-filesystem, multi-writer, remote, or PostgreSQL
+deployment mechanism.
+
+Filesystem validation is a local same-effective-user boundary, not isolation
+from a malicious process running as that user. Descriptor-anchored operations
+reject unsafe ancestors, containers, links, file types, modes, sidecars, and
+observable replacement, but a hostile same-user process is already inside the
+operator's filesystem authority. Keep the data root private and do not expose
+it to untrusted same-user workloads.
 
 ## Safe responses
 
@@ -63,6 +71,11 @@ filesystem locations, principal or owner information, audit data, or network
 endpoints. The capability is true only when a ready SQLite process registers
 all four lifecycle tools; an unavailable profile is not a server capability.
 
+The opaque `svc_` locator namespace is a non-secret logical identifier.
+Physical data-root and database paths remain private: they are not locator
+fields and must not appear in responses, capabilities, errors, logs, audit
+records, or representations.
+
 ## Test data and operational boundary
 
 All repository test data is synthetic and marked with its provenance. Do not
@@ -70,11 +83,15 @@ add operational stores, database copies, credentials, or personal context to
 this repository.
 
 The registry stores service metadata and initial manifests only. A design does
-not materialise an agent-defined service store, create tables, or make records
-durable. Service stores, records, branches, retrieval, backup/export, recovery,
-operator administration, remote transport, PostgreSQL, and multi-user tenancy
-are not implemented. Future slices must preserve the same boundary: validate
-input before persistence, keep configuration separate from data, and redact
+not invoke the packaged private service-store catalog, create a service
+database or agent-defined table, or make records durable. The catalog can be
+exercised directly as an internal foundation and creates only namespace-bound
+adapter migration metadata. Because it is uncomposed, direct initialisation can
+leave an orphan database and is not a public workflow. Public materialisation,
+records, branches, retrieval, backup/export, cross-store recovery, operator
+administration, remote transport, PostgreSQL, and multi-user tenancy are not
+implemented. Future slices must preserve the same boundary: validate input
+before persistence, keep configuration separate from data, and redact
 sensitive implementation details from errors and capability output.
 
 There is not yet a supported release, maintenance, or security-fix policy.

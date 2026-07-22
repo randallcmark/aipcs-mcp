@@ -15,6 +15,7 @@ def connect(location: AnchoredLocation, mode: str, *, query_only: bool) -> sqlit
     if sqlite3.sqlite_version_info < (3, 37, 0) or mode not in {"ro", "rw"}:
         raise StorageUnavailable()
     location.verify_database_identity()
+    location.reject_wal_header()
     path = location._sqlite_path()
     uri = "file:" + quote(str(path), safe="/") + "?mode=" + mode
     connection: sqlite3.Connection | None = None

@@ -70,14 +70,40 @@ def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
     (root / ".venv" / "lib" / "ignored.pyc").write_bytes(b"ignored")
     (root / "src" / "__pycache__").mkdir(parents=True)
     (root / "src" / "__pycache__" / "module.pyc").write_bytes(b"generated")
+    (root / ".mypy_cache").mkdir()
+    (root / "coverage.xml").write_text("generated", encoding="utf-8")
+    (root / "module.py~").write_text("generated", encoding="utf-8")
     (root / "state.sqlite").write_bytes(b"generated")
 
     relative = {
         path.relative_to(root).as_posix() for path in verifier.generated_checkout_artifacts(root)
     }
-    assert relative == {"src/__pycache__", "state.sqlite"}
+    assert relative == {
+        ".mypy_cache",
+        "coverage.xml",
+        "module.py~",
+        "src/__pycache__",
+        "state.sqlite",
+    }
     with pytest.raises(verifier.ReleaseVerificationError, match="generated or database"):
         verifier.require_clean_checkout_artifacts(root)
+
+
+def test_release_workspace_canonicalises_a_system_style_intermediate_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verifier
+) -> None:
+    actual_parent = tmp_path / "actual-parent"
+    workspace = actual_parent / "workspace"
+    workspace.mkdir(mode=0o700, parents=True)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(actual_parent, target_is_directory=True)
+    presented = linked_parent / workspace.name
+    monkeypatch.setattr(verifier.tempfile, "mkdtemp", lambda **_: str(presented))
+
+    canonical = verifier.create_workspace()
+
+    assert canonical == workspace.resolve(strict=True)
+    assert canonical.is_dir()
 
 
 def test_clean_copy_preserves_content_and_mode_with_distinct_inodes(
@@ -312,6 +338,77 @@ def test_embedded_client_is_syntactically_valid(verifier) -> None:
     assert "metadata_fields" in program
     assert 'features"]["registry_lifecycle"] is True' in program
     assert "design_replay == designed" in program
+
+
+def test_embedded_catalog_client_is_syntactically_valid(verifier) -> None:
+    program = verifier._catalog_smoke_program()
+    compile(program, "installed_catalog_smoke.py", "exec")
+    assert "aipcs_mcp.storage.sqlite.service_store" in program
+    assert 'mode == "heavy"' in program
+    assert 'substituted.status == "incompatible"' in program
+    assert "site.getsitepackages()" in program
+
+
+def test_embedded_catalog_client_exercises_the_source_contract(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    root = tmp_path / "catalog-root"
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
+    monkeypatch.setattr(sys, "argv", ["installed_catalog_smoke.py", str(root), "heavy"])
+    exec(compile(verifier._catalog_smoke_program(), "installed_catalog_smoke.py", "exec"), {})
+    assert (root / "service-stores").is_dir()
+    monkeypatch.setattr(sys, "argv", ["installed_catalog_smoke.py", str(root), "restart"])
+    with pytest.raises(SystemExit) as restarted:
+        exec(compile(verifier._catalog_smoke_program(), "installed_catalog_smoke.py", "exec"), {})
+    assert restarted.value.code == 0
+
+
+def test_catalog_smoke_uses_each_installed_interpreter_and_external_cwd(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    verifier.run_installed_catalog_smoke(
+        tmp_path / "wheel-venv" / "bin" / "python",
+        tmp_path,
+        "wheel",
+        heavy=True,
+        environment={},
+        redaction_roots=(),
+    )
+    verifier.run_installed_catalog_smoke(
+        tmp_path / "sdist-venv" / "bin" / "python",
+        tmp_path,
+        "sdist",
+        heavy=False,
+        environment={},
+        redaction_roots=(),
+    )
+    assert [label for label, _, _ in calls] == [
+        "installed wheel catalog smoke",
+        "installed wheel catalog restart",
+        "installed sdist catalog smoke",
+        "installed sdist catalog restart",
+    ]
+    assert calls[0][1][0].endswith("wheel-venv/bin/python")
+    assert calls[1][1][0].endswith("wheel-venv/bin/python")
+    assert calls[2][1][0].endswith("sdist-venv/bin/python")
+    assert calls[3][1][0].endswith("sdist-venv/bin/python")
+    assert all(call[1][1] == "-I" for call in calls)
+    assert calls[0][1][-1] == "heavy"
+    assert calls[1][1][-1] == "restart"
+    assert calls[2][1][-1] == "baseline"
+    assert calls[3][1][-1] == "restart"
+    assert calls[0][2] == tmp_path / "wheel-catalog-cwd"
+    assert calls[1][2] == tmp_path / "wheel-catalog-cwd"
+    assert calls[2][2] == tmp_path / "sdist-catalog-cwd"
+    assert calls[3][2] == tmp_path / "sdist-catalog-cwd"
+    assert calls[0][2] != calls[2][2]
 
 
 def test_main_hides_unexpected_exception_details(monkeypatch, capsys, verifier) -> None:

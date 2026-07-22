@@ -7,7 +7,7 @@ these cases intentionally assert public behaviour and tracing only.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import UUID
 
 from fixtures import valid_manifest
@@ -21,6 +21,7 @@ from aipcs_mcp.application.models import (
 from aipcs_mcp.application.services import ServiceApplication
 from aipcs_mcp.manifest_v2 import ManifestV2
 from aipcs_mcp.storage import (
+    MigrationState,
     RegistryAdapter,
     ServiceStoreCatalog,
     ServiceStoreLocator,
@@ -44,6 +45,7 @@ class RegistryHarness(Protocol):
 
 
 RegistryHarnessFactory = Callable[[], RegistryHarness]
+ServiceStoreCatalogFactory = Callable[[], ServiceStoreCatalog]
 
 
 def assert_storage_component_ownership(
@@ -66,6 +68,60 @@ def assert_storage_component_ownership(
     mismatch = ServiceStoreLocator(other_backend, locator.namespace)
     _expect(StorageContractError, lambda: catalog.inspect_migration(mismatch))
     _expect(StorageContractError, lambda: catalog.migrate(mismatch))
+
+
+def assert_service_store_catalog_conformance(
+    factory: ServiceStoreCatalogFactory, *, backend: str
+) -> None:
+    """Assert backend-neutral logical allocation and migration-state behavior."""
+
+    catalog = factory()
+    info = catalog.info()
+    assert info.backend == backend
+    assert info.supported_components == frozenset({"service_store"})
+
+    first_id = UUID(int=1)
+    second_id = UUID(int=2)
+    first = catalog.allocate(first_id)
+    assert first == ServiceStoreLocator.for_service(backend, first_id)  # type: ignore[arg-type]
+    assert catalog.allocate(first_id) == first
+    second = catalog.allocate(second_id)
+    assert second == ServiceStoreLocator.for_service(backend, second_id)  # type: ignore[arg-type]
+    assert second != first
+
+    expected_uninitialised = MigrationState("service_store", 0, 1, "uninitialised")
+    expected_ready = MigrationState("service_store", 1, 1, "ready")
+    assert catalog.inspect_migration(first) == expected_uninitialised
+    assert catalog.inspect_migration(second) == expected_uninitialised
+    assert catalog.migrate(first) == expected_ready
+    assert catalog.inspect_migration(first) == expected_ready
+    assert catalog.migrate(first) == expected_ready
+    assert catalog.inspect_migration(second) == expected_uninitialised
+
+    restarted = factory()
+    assert restarted.inspect_migration(first) == expected_ready
+    assert restarted.inspect_migration(second) == expected_uninitialised
+
+    other_backend = "postgresql" if backend == "sqlite" else "sqlite"
+    mismatch = ServiceStoreLocator(other_backend, first.namespace)  # type: ignore[arg-type]
+
+    class LocatorSubclass(ServiceStoreLocator):
+        pass
+
+    subclassed = LocatorSubclass(first.backend, first.namespace)
+    for operation in (catalog.inspect_migration, catalog.migrate):
+        _expect(StorageContractError, lambda current=operation: current(mismatch))
+        _expect(StorageContractError, lambda current=operation: current(subclassed))
+        _expect(
+            StorageContractError,
+            lambda current=operation: current(cast(ServiceStoreLocator, object())),
+        )
+
+    for invalid_id in (UUID(int=0), "not-a-uuid", True):
+        _expect(
+            StorageContractError,
+            lambda current=invalid_id: catalog.allocate(cast(UUID, current)),
+        )
 
 
 def assert_registry_application_conformance(factory: RegistryHarnessFactory) -> None:
@@ -97,7 +153,9 @@ def assert_registry_application_conformance(factory: RegistryHarnessFactory) -> 
     requested.entities[0].description = "caller mutation"
     designed.schema_.entities[0].description = "result mutation"
     assert (
-        harness.restart().inspect(context, created.service_id).model_dump(mode="json", by_alias=True)
+        harness.restart()
+        .inspect(context, created.service_id)
+        .model_dump(mode="json", by_alias=True)
         == expected_design
     )
     design_replay = harness.restart().design(
@@ -113,7 +171,9 @@ def assert_registry_application_conformance(factory: RegistryHarnessFactory) -> 
     listed = harness.restart().list(context)
     listed[0].schema_.entities[0].description = "list mutation"
     assert (
-        harness.restart().inspect(context, created.service_id).model_dump(mode="json", by_alias=True)
+        harness.restart()
+        .inspect(context, created.service_id)
+        .model_dump(mode="json", by_alias=True)
         == expected_design
     )
 
@@ -187,5 +247,7 @@ def _expect(error_type: type[Exception], operation: Callable[[], object]) -> Exc
         assert error.__context__ is None
         return error
     except Exception as error:
-        raise AssertionError(f"Expected {error_type.__name__}, got {type(error).__name__}.") from None
+        raise AssertionError(
+            f"Expected {error_type.__name__}, got {type(error).__name__}."
+        ) from None
     raise AssertionError(f"Expected {error_type.__name__}.")

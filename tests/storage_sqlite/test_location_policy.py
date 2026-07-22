@@ -5,13 +5,18 @@ import socket
 import stat
 import tempfile
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
 from aipcs_mcp.configuration.models import ConfigOverrides
 from aipcs_mcp.configuration.resolver import resolve_configuration
 from aipcs_mcp.storage.errors import StorageUnavailable
-from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
+from aipcs_mcp.storage.sqlite import (
+    SQLiteLocationPolicy,
+    SQLiteRegistryAdapter,
+    SQLiteServiceStoreCatalog,
+)
 from aipcs_mcp.storage.sqlite import location as location_module
 
 
@@ -146,6 +151,48 @@ def test_missing_leaf_under_unsafe_parent_fails_closed(tmp_path: Path) -> None:
         adapter.inspect_migration()
 
 
+@pytest.mark.parametrize("component", ["registry", "service_store"])
+def test_explicit_root_rejects_an_intermediate_symlink(tmp_path: Path, component: str) -> None:
+    actual_parent = tmp_path / "actual-parent"
+    nested_parent = actual_parent / "nested-parent"
+    nested_parent.mkdir(mode=0o700, parents=True)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(actual_parent, target_is_directory=True)
+    # The symlink is deliberately not the final component of root.parent:
+    # a single O_NOFOLLOW open of root.parent would follow it.
+    root = linked_parent / nested_parent.name / "root"
+    policy = SQLiteLocationPolicy(root)
+
+    if component == "registry":
+        with pytest.raises(StorageUnavailable):
+            SQLiteRegistryAdapter(policy).migrate()
+    else:
+        catalog = SQLiteServiceStoreCatalog(policy)
+        locator = catalog.allocate(UUID(int=1))
+        with pytest.raises(StorageUnavailable):
+            catalog.migrate(locator)
+    assert not (nested_parent / "root").exists()
+
+
+def test_service_catalog_rejects_broad_default_root_for_inspection_and_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(location_module.sys, "platform", "linux")
+    home = tmp_path / "home"
+    root = home / ".local" / "share" / "aipcs-mcp"
+    root.mkdir(mode=0o755, parents=True)
+    root.chmod(0o755)
+    policy = SQLiteLocationPolicy.from_resolved(root, "default")
+    catalog = SQLiteServiceStoreCatalog(policy)
+    locator = catalog.allocate(UUID(int=1))
+
+    with pytest.raises(StorageUnavailable):
+        catalog.inspect_migration(locator)
+    with pytest.raises(StorageUnavailable):
+        catalog.migrate(locator)
+    assert not (root / "service-stores").exists()
+
+
 @pytest.mark.parametrize("kind", ["hardlink", "fifo", "broad_mode"])
 def test_database_must_be_a_single_private_regular_file(tmp_path: Path, kind: str) -> None:
     root = tmp_path / "root"
@@ -204,7 +251,7 @@ def test_uri_metacharacters_are_opaque_path_data(tmp_path: Path) -> None:
     uow.close()
 
 
-@pytest.mark.parametrize("capability", ["mkdir", "stat_follow"])
+@pytest.mark.parametrize("capability", ["mkdir", "stat_follow", "pread"])
 def test_missing_descriptor_capability_fails_before_io(
     tmp_path: Path, monkeypatch, capability: str
 ) -> None:
@@ -212,10 +259,12 @@ def test_missing_descriptor_capability_fails_before_io(
         supported = set(location_module.os.supports_dir_fd)
         supported.discard(location_module.os.mkdir)
         monkeypatch.setattr(location_module.os, "supports_dir_fd", supported)
-    else:
+    elif capability == "stat_follow":
         supported = set(location_module.os.supports_follow_symlinks)
         supported.discard(location_module.os.stat)
         monkeypatch.setattr(location_module.os, "supports_follow_symlinks", supported)
+    else:
+        monkeypatch.delattr(location_module.os, "pread")
     with pytest.raises(StorageUnavailable):
         SQLiteLocationPolicy(tmp_path / "root")
     assert not (tmp_path / "root").exists()

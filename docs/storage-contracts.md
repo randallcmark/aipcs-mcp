@@ -2,14 +2,21 @@
 
 The storage layer defines pure, backend-neutral contracts. The current SQLite
 registry adapter implements the registry portion and is composed only by the
-local stdio runtime. It is not a general adapter plugin API, a service-store
-implementation, or a PostgreSQL implementation.
+local stdio runtime. A private SQLite service-store catalog implements the
+separate service-store portion as an uncomposed foundation. Neither is a
+general adapter plugin API or a PostgreSQL implementation.
 
 The reference adapter is certified only for local POSIX filesystems on Linux
 and macOS, one host and one active writer. It uses a descriptor-anchored `0700`
-root and `0600` registry file, rejects WAL/SHM, allows native rollback-journal
-recovery only during the explicit startup migration, and fails closed on
-Windows. It is not supported on network filesystems or as a multi-writer store.
+root and `0600` database files, rejects WAL/SHM, allows native rollback-journal
+recovery only during an explicit migration, and fails closed on Windows. It is
+not supported on network filesystems or as a multi-writer store.
+
+These filesystem controls operate within a local same-effective-user trust
+boundary. They reject unsafe modes, links, nonregular files, and observable
+path or file replacement, but they are not a sandbox against a malicious
+process running as the same operating-system user. Keep the data root private
+and do not run untrusted same-user processes against it.
 
 `aipcs serve --profile sqlite` is the sole public composition path: it obtains
 the opaque location from resolved configuration, calls `migrate()` once before
@@ -17,8 +24,8 @@ MCP construction, and proceeds only at the exact ready revision. `config show`
 and `config validate` do not construct an adapter, open the registry, create a
 directory, or migrate. A failed startup does not start a partial MCP server.
 
-`ServiceStoreLocator` is an opaque logical identifier for a future
-materialised service store. It is exactly `svc_` followed by the lowercase
+`ServiceStoreLocator` is an opaque logical identifier for a service-store
+allocation. It is exactly `svc_` followed by the lowercase
 32-character hexadecimal form of a non-zero service UUID. It is not a path,
 URI, DSN, host, database name, credential, SQL identifier, or agent-authored
 domain name.
@@ -26,12 +33,12 @@ domain name.
 identifier is later projected publicly; it is never a second free-form label.
 
 `StorageAdapterInfo` says which of the closed `registry` and `service_store`
-components a future SQLite or PostgreSQL adapter owns. It does not say that a
+components a SQLite or future PostgreSQL adapter owns. It does not say that a
 configured store is present, compatible, migrated, or ready. That dynamic
 state is represented separately by `MigrationState`.
 
 Migration revisions are adapter-private positive integers. `applied_revision`
-uses zero only when no public migration is applied. `ready` means it equals the
+uses zero only when no adapter migration is applied. `ready` means it equals the
 adapter target revision; `uninitialised` means zero and is migratable only after
 the future adapter verifies an absent or empty physical store. An unversioned
 non-empty store, unknown/newer revision, missing required ledger, or checksum
@@ -40,9 +47,9 @@ migration does not repair either state. Revisions are not package, MCP,
 manifest, schema, record, or export versions.
 
 `inspect_migration()` is observation only. `migrate()` is the sole explicit
-initialisation or layout-changing operation. The public runtime uses migration
-only at SQLite startup; no tool call retries or opportunistically changes the
-layout. Safe operator diagnostics remain intentionally bounded.
+initialisation or layout-changing operation. The public runtime uses only the
+registry migration at SQLite startup; no tool call allocates or migrates a
+service store. Safe diagnostics remain intentionally bounded.
 
 Registry unit-of-work callers close every successfully acquired unit exactly
 once. A successful commit or rollback ends its transaction attempt, then close
@@ -62,12 +69,39 @@ is always for that component. The current public lifecycle persists registry
 metadata, idempotency outcomes, and metadata-only audit information within one
 unit of work. Audit data and principal identity are never projected by MCP.
 
-A service-store catalog would declare its backend and `service_store` ownership;
-allocated locators would use that backend, foreign-backend locators would fail
-safely, and its migration state would always be service-store state. No
-service-store catalog, allocation, materialisation, record operation,
-PostgreSQL adapter, repair, recovery, or cross-store transaction exists yet.
+The private SQLite service-store catalog declares only `service_store`
+ownership. `allocate()` purely derives the canonical locator and performs no
+filesystem or registry I/O. `inspect_migration()` does not create a directory,
+database, table, journal, or sidecar. Explicit `migrate()` maps a validated
+locator to the adapter-private layout below and initialises revision 1:
+
+```text
+<sqlite-data-root>/
+  registry.sqlite
+  service-stores/
+    svc_<32 lowercase hexadecimal characters>.sqlite
+```
+
+The container is `0700`; every selected database is an owned, single-link
+regular `0600` file. The database contains only two reserved adapter tables:
+service-store metadata and its independent checksummed migration ledger. The
+metadata binds the database to the exact locator namespace, so copying or
+renaming a valid database to a different locator cannot report ready. It stores
+no principal, domain name, manifest, schema version, lifecycle state, audit,
+record, branch, or idempotency data. Adapter readiness validates its reserved
+objects only; future manifest-aware validation of domain objects belongs to the
+materialisation slice.
+
+The catalog rejects a foreign-backend locator before I/O, reports migration
+state only for `service_store`, and does not repair dirty or incompatible
+state. It is packaged for internal composition work but is not constructed by
+the current runtime or application. Direct initialisation can create an orphan
+database because there is deliberately no registry transition or cross-store
+operation record in this slice. Public materialisation must remain unavailable
+until that operation becomes recoverable. No record operation, PostgreSQL
+adapter, repair, backup, import/export, or cross-store transaction exists yet.
 
 The reusable test-only conformance cases in `tests/storage_contracts/` assert
-application behaviour and UoW traces without SQL, storage layout, connection,
-or driver assertions. They are not shipped as a storage adapter.
+registry application and service-catalog behavior without treating SQL,
+filesystem layout, connections, or drivers as portable contract details. They
+are not shipped as a storage adapter.

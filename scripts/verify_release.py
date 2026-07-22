@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -39,9 +40,35 @@ _SCRUBBED_ENVIRONMENT_KEYS = frozenset(
     }
 )
 _GENERATED_DIRECTORY_NAMES = frozenset(
-    {"__pycache__", ".pytest_cache", ".ruff_cache", "build", "dist"}
+    {
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "build",
+        "dist",
+        "htmlcov",
+    }
 )
-_GENERATED_FILE_SUFFIXES = frozenset({".db", ".db3", ".pyc", ".pyo", ".sqlite", ".sqlite3"})
+_GENERATED_FILE_SUFFIXES = frozenset(
+    {
+        ".bak",
+        ".db",
+        ".db3",
+        ".orig",
+        ".pyc",
+        ".pyo",
+        ".rej",
+        ".sqlite",
+        ".sqlite3",
+        ".swn",
+        ".swo",
+        ".swp",
+        ".temp",
+        ".tmp",
+    }
+)
+_GENERATED_FILE_NAMES = frozenset({".coverage", ".ds_store", "coverage.xml"})
 _GENERATED_FILE_ENDINGS = ("-journal", "-wal", "-shm")
 
 
@@ -174,13 +201,20 @@ def generated_checkout_artifacts(root: Path) -> tuple[Path, ...]:
         if current_path == root:
             directories[:] = [name for name in directories if name not in {".git", ".venv"}]
         for directory in tuple(directories):
-            if directory in _GENERATED_DIRECTORY_NAMES or directory.endswith(".egg-info"):
+            folded = directory.casefold()
+            if folded in _GENERATED_DIRECTORY_NAMES or folded.endswith(".egg-info"):
                 artifacts.append(current_path / directory)
                 directories.remove(directory)
         for name in names:
             path = current_path / name
-            if path.suffix.casefold() in _GENERATED_FILE_SUFFIXES or name.casefold().endswith(
-                _GENERATED_FILE_ENDINGS
+            folded = name.casefold()
+            if (
+                folded in _GENERATED_FILE_NAMES
+                or path.suffix.casefold() in _GENERATED_FILE_SUFFIXES
+                or folded.endswith(_GENERATED_FILE_ENDINGS)
+                or name.endswith("~")
+                or name.startswith(".#")
+                or (len(name) > 2 and name.startswith("#") and name.endswith("#"))
             ):
                 artifacts.append(path)
     return tuple(sorted(artifacts))
@@ -642,6 +676,128 @@ def _run_smoke_client(
     )
 
 
+def _catalog_smoke_program() -> str:
+    """Standalone installed private-catalog proof with no checkout imports."""
+
+    return r"""
+import shutil
+import site
+import sqlite3
+import sys
+from pathlib import Path
+from uuid import UUID
+
+import aipcs_mcp.storage.sqlite.service_store as service_store_module
+from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
+
+root, mode = Path(sys.argv[1]), sys.argv[2]
+origin = Path(service_store_module.__file__).resolve()
+sites = tuple(Path(value).resolve() for value in site.getsitepackages())
+assert any(origin.is_relative_to(value) for value in sites), origin
+
+def catalog():
+    return SQLiteServiceStoreCatalog(SQLiteLocationPolicy(root))
+
+def database(locator):
+    return root / "service-stores" / f"{locator.namespace}.sqlite"
+
+def migration_row(locator):
+    uri = "file:" + str(database(locator)) + "?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        return connection.execute(
+            'SELECT component,revision,migration_id,checksum,applied_at '
+            'FROM "__aipcs_service_store_migration"'
+        ).fetchone()
+
+first = catalog()
+locator_a = first.allocate(UUID(int=1))
+assert locator_a.namespace == "svc_00000000000000000000000000000001"
+if mode == "restart":
+    assert root.is_dir()
+    assert first.inspect_migration(locator_a).status == "ready"
+    assert migration_row(locator_a) is not None
+    raise SystemExit(0)
+if mode not in {"baseline", "heavy"}:
+    raise AssertionError("unknown installed catalog smoke mode")
+
+assert not root.exists()
+missing = first.inspect_migration(locator_a)
+assert (missing.component, missing.applied_revision, missing.target_revision, missing.status) == (
+    "service_store", 0, 1, "uninitialised"
+)
+assert not root.exists()
+
+ready = first.migrate(locator_a)
+assert (ready.component, ready.applied_revision, ready.target_revision, ready.status) == (
+    "service_store", 1, 1, "ready"
+)
+db_a = database(locator_a)
+assert db_a.is_file()
+with sqlite3.connect(f"file:{db_a}?mode=ro", uri=True) as connection:
+    objects = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_schema WHERE substr(name,1,7) <> 'sqlite_'"
+        )
+    }
+assert objects == {"__aipcs_service_store_meta", "__aipcs_service_store_migration"}
+ledger = migration_row(locator_a)
+assert first.migrate(locator_a) == ready
+assert migration_row(locator_a) == ledger
+assert catalog().inspect_migration(locator_a) == ready
+
+if mode == "heavy":
+    second = catalog()
+    locator_b = second.allocate(UUID(int=2))
+    assert second.inspect_migration(locator_b).status == "uninitialised"
+    assert db_a.is_file() and not database(locator_b).exists()
+    assert second.migrate(locator_b).status == "ready"
+    assert catalog().inspect_migration(locator_a) == ready
+    assert catalog().inspect_migration(locator_b).status == "ready"
+
+    locator_c = second.allocate(UUID(int=3))
+    db_c = database(locator_c)
+    shutil.copyfile(db_a, db_c)
+    db_c.chmod(0o600)
+    substituted = catalog().inspect_migration(locator_c)
+    assert substituted.status == "incompatible"
+"""
+
+
+def run_installed_catalog_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    *,
+    heavy: bool,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Exercise the same catalog baseline under one installed distribution."""
+
+    client = workspace / f"{name}-catalog-smoke.py"
+    client.write_text(_catalog_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"{name}-catalog-cwd"
+    cwd.mkdir(mode=0o700)
+    root = workspace / f"{name}-catalog-root"
+    run_stage(
+        f"installed {name} catalog smoke",
+        [python, "-I", client, root, "heavy" if heavy else "baseline"],
+        cwd=cwd,
+        environment=environment,
+        timeout=SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+    run_stage(
+        f"installed {name} catalog restart",
+        [python, "-I", client, root, "restart"],
+        cwd=cwd,
+        environment=environment,
+        timeout=SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+
+
 def run_wheel_restart_principal_smoke(
     python: Path,
     workspace: Path,
@@ -816,6 +972,18 @@ def cleanup_workspace(workspace: Path, *, failed: bool, keep_failed_workdir: boo
     return True
 
 
+def create_workspace() -> Path:
+    """Create one canonical private path suitable for the explicit SQLite policy."""
+
+    created = Path(tempfile.mkdtemp(prefix="aipcs-release-"))
+    try:
+        return created.resolve(strict=True)
+    except OSError:
+        with suppress(OSError):
+            shutil.rmtree(created)
+        raise ReleaseVerificationError("release workspace creation failed.") from None
+
+
 def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> None:
     """Run the complete source/copy/distribution rehearsal and print a short summary."""
 
@@ -823,7 +991,7 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
     environment = scrubbed_environment()
     uv = require_local_preconditions(root)
     require_clean_checkout_artifacts(root)
-    workspace = Path(tempfile.mkdtemp(prefix="aipcs-release-"))
+    workspace = create_workspace()
     failed = True
     summary: str | None = None
     try:
@@ -888,6 +1056,14 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_catalog_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            heavy=True,
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_wheel_restart_principal_smoke(
             wheel_python,
             workspace,
@@ -908,6 +1084,14 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             root,
             clean_copy.root,
             name="sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_catalog_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
+            heavy=False,
             environment=environment,
             redaction_roots=redaction_roots,
         )

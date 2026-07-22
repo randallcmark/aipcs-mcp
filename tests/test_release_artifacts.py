@@ -8,6 +8,8 @@ import tarfile
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -145,3 +147,73 @@ def test_content_guard_rejects_nonregular_zip_member(tmp_path: Path) -> None:
     )
     assert rejected.returncode == 1
     assert "non-regular archive entry" in rejected.stdout
+
+
+@pytest.mark.parametrize("kind", ["wheel", "sdist"])
+def test_content_guard_rejects_sidecars_caches_coverage_and_editor_residue(
+    tmp_path: Path, kind: str
+) -> None:
+    members = (
+        "aipcs_mcp/state.sqlite-journal",
+        "aipcs_mcp/state.db-wal",
+        "aipcs_mcp/state.sqlite-shm",
+        "aipcs_mcp/__pycache__/module.py",
+        "aipcs_mcp/.pytest_cache/nodeids",
+        "aipcs_mcp/.ruff_cache/index",
+        "aipcs_mcp/.mypy_cache/index",
+        "aipcs_mcp/.coverage",
+        "aipcs_mcp/coverage.xml",
+        "aipcs_mcp/htmlcov/index.html",
+        "aipcs_mcp/module.tmp",
+        "aipcs_mcp/module.temp",
+        "aipcs_mcp/module.swp",
+        "aipcs_mcp/module.swo",
+        "aipcs_mcp/module.swn",
+        "aipcs_mcp/module.bak",
+        "aipcs_mcp/module.orig",
+        "aipcs_mcp/module.rej",
+        "aipcs_mcp/module.py~",
+        "aipcs_mcp/#module.py#",
+        "aipcs_mcp/.#module.py",
+        "aipcs_mcp/.DS_Store",
+    )
+    if kind == "wheel":
+        artifact = _wheel(tmp_path / "residue.whl", members)
+    else:
+        artifact = _sdist(
+            tmp_path / "residue.tar.gz", tuple(f"aipcs_mcp-0/src/{name}" for name in members)
+        )
+    rejected = subprocess.run(
+        [sys.executable, "scripts/check_wheel_contents.py", str(artifact)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 1
+    for member in members:
+        assert member in rejected.stdout
+
+
+def test_content_guard_residue_rules_do_not_reject_similar_production_names(
+    tmp_path: Path,
+) -> None:
+    safe = _wheel(
+        tmp_path / "safe-names.whl",
+        (
+            "aipcs_mcp/cache.py",
+            "aipcs_mcp/coverage_policy.py",
+            "aipcs_mcp/htmlcoverage.py",
+            "aipcs_mcp/journal.py",
+            "aipcs_mcp/template.py",
+            "aipcs_mcp/walrus.py",
+        ),
+    )
+    accepted = subprocess.run(
+        [sys.executable, "scripts/check_wheel_contents.py", str(safe)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
