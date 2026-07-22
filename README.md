@@ -4,9 +4,9 @@
 It provides a small, stable MCP surface over an agent-defined relational-memory
 schema. The current implementation supports durable service registration and
 initial design storage through a local SQLite registry. It also packages a
-private, uncomposed SQLite catalog that can initialise adapter metadata for an
-opaque per-service database. No public operation invokes that catalog, creates
-agent-authored tables, or stores records.
+private, uncomposed SQLite catalog and relational-schema adapter for
+distribution-level fidelity proof. No public operation invokes either seam,
+creates agent-authored tables, or stores records.
 
 The public runtime provides:
 
@@ -36,7 +36,9 @@ than generating bespoke MCP tools or services.
   between transport, lifecycle use cases, and storage.
 - [Storage contracts](docs/storage-contracts.md) defines the backend-neutral
   vocabulary, the supported SQLite registry boundary, and the private
-  uncomposed service-store foundation.
+  uncomposed relational contract.
+- [Private relational boundary](docs/private-relational-boundary.md) explains
+  the packaged internal proof seam and its public exclusions.
 - [Security and trust boundary](docs/security.md) describes safe inputs,
   errors, capability information, and transport restrictions.
 - [Compatibility](docs/compatibility.md) records what is and is not a public
@@ -136,14 +138,16 @@ idempotency key. It validates and stores the manifest, but leaves the service
 seeded: `materialised_at` and `storage` stay `null`, and it creates no service
 database, tables, records, or generated tools.
 
-The installed package contains a private SQLite service-store catalog for the
-next materialisation slice. Its logical allocation is deterministic and its
-explicit migration can create only adapter-owned metadata in a contained
-per-service database. It is not wired to configuration, `serve`, MCP, or the
-application layer. Directly initialising it can therefore create an orphaned
-foundation database with no registry state transition; this is a development
-seam, not a user workflow. Recoverable registry/store coordination is required
-before public materialisation can use it.
+The installed package contains a private SQLite service-store catalog and
+relational-schema adapter for internal fidelity proof. The catalog establishes
+only adapter metadata and its independent foundation migration ledger; the
+domain adapter can compare, materialise, and converge supplied relational
+specifications only through direct private code. Neither is wired to
+configuration, `serve`, MCP, or the application layer. Direct use can create an
+orphan foundation or physical schema unknown to registry lifecycle, so it is a
+development seam rather than a user workflow. Recoverable registry/store
+coordination is required before public materialisation can exist. See the
+[private relational boundary](docs/private-relational-boundary.md).
 
 AIPCS remains stdio-only. Listener transport settings are rejected before
 configuration resolution or server construction.

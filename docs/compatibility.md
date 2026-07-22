@@ -11,7 +11,7 @@ not yet a supported release.
 | Schema manifest | manifest_version | Manifest v2 is the only normal public design input. |
 | Configuration document | config_version | Strict V1 configuration document and source precedence. |
 | Legacy conversion | Explicit manifest-v1 converter | One-way library conversion with provenance and warnings. |
-| Storage migration | Adapter revision | Independent SQLite registry revision 1 and private service-store revision 1; adapter-private layouts and readiness state. |
+| Storage migration | Adapter revision | Independent SQLite registry revision 1 and private service-store revision 1; adapter-private layouts, foundation readiness, and relational fidelity checks. |
 | Export bundle | export_format_version | Not implemented. |
 
 ## Current contract
@@ -49,13 +49,18 @@ Design accepts and stores an initial manifest-v2 document but does not
 materialise a service store, create domain tables, create records, or expose
 generated tools. `design_state` remains `seeded` and `storage` remains null.
 
-The distribution also contains a private SQLite service-store catalog. Its
-pure locator allocation and independent metadata migration are an uncomposed
-implementation seam, not a new MCP, CLI, configuration, or application
-contract. The current runtime never constructs it. Its filesystem layout and
-migration objects are adapter-private and are not a portable-storage promise.
-Direct initialisation can create an orphan database without changing registry
-state; public materialisation remains gated on recoverable cross-store work.
+The distribution also contains a private SQLite service-store catalog and
+domain-schema adapter. The catalog's pure locator allocation and independent
+foundation migration establish adapter-private ownership; the domain adapter
+can directly inspect, materialise, or apply one validated additive transition
+to a supplied physical schema. Both remain uncomposed implementation seams,
+not MCP, CLI, configuration, application, or public compatibility contracts.
+The current runtime constructs neither. Their filesystem layout, foundation
+migration ledger, and relational behavior are not a portable-storage promise.
+Direct use can create an orphan database or physical schema without changing
+registry state; public materialisation remains gated on V1-08 recoverable
+cross-store coordination. See the [private relational
+boundary](private-relational-boundary.md).
 
 ## Not yet compatible
 

@@ -799,7 +799,7 @@ def run_installed_catalog_smoke(
 
 
 def _domain_schema_smoke_program() -> str:
-    """Standalone installed V1-07B/C domain-schema proof with no checkout imports."""
+    """Standalone installed V1-07B/C/D domain-schema proof with no checkout imports."""
 
     return r'''
 import site
@@ -821,6 +821,8 @@ from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCat
 from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
 
 root = Path(sys.argv[1])
+mode = sys.argv[2]
+assert mode in {"initial", "restart"}
 sites = tuple(Path(value).resolve() for value in site.getsitepackages())
 for module in (
     domain_schema_module,
@@ -930,99 +932,115 @@ transition = classify_transition(source_manifest, target_manifest)
 policy = SQLiteLocationPolicy(root)
 catalog = SQLiteServiceStoreCatalog(policy)
 locator = catalog.allocate(UUID(int=41))
-assert catalog.migrate(locator).status == "ready"
 store = SQLiteDomainSchemaStore(policy)
-assert store.inspect(locator, source_specification) == DomainSchemaState("unmaterialised")
-assert store.materialise(locator, source_specification) == DomainSchemaState("ready")
-assert store.inspect(locator, source_specification) == DomainSchemaState("ready")
-
 database = root / "service-stores" / f"{locator.namespace}.sqlite"
-with sqlite3.connect(database) as connection:
-    connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute(
-        'INSERT INTO "account" ("id","owner_id","created_at","updated_at","created_via",'
-        '"record_version","label") VALUES (?,?,?,?,?,?,?)',
-        ("account-1", "owner", "t", "t", "smoke", 1, "Account"),
-    )
-    connection.execute(
-        'INSERT INTO "project" ("id","owner_id","created_at","updated_at","created_via",'
-        '"record_version","title","quantity","account_id") VALUES (?,?,?,?,?,?,?,?,?)',
-        ("project-1", "owner", "t", "t", "smoke", 1, "Project", 7, "account-1"),
-    )
 
+def schema_snapshot():
+    with sqlite3.connect(database) as connection:
+        return tuple(connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+            "WHERE sql IS NOT NULL ORDER BY type, name"
+        ))
+
+def assert_target_state(*, prove_token_tolerance):
+    assert store.inspect(locator, target_specification) == DomainSchemaState("ready")
+    assert store.inspect(locator, source_specification) == DomainSchemaState("incompatible")
+    with sqlite3.connect(database) as connection:
+        project = tuple(
+            (row[1], row[2], row[3])
+            for row in connection.execute('PRAGMA table_xinfo("project")')
+        )
+        assert project[-9:] == (
+            ("title", "TEXT", 1),
+            ("quantity", "INTEGER", 0),
+            ("ratio", "REAL", 0),
+            ("enabled", "INTEGER", 0),
+            ("recorded_at", "TEXT", 0),
+            ("account_id", "TEXT", 0),
+            ("parent_id", "TEXT", 0),
+            ("labels", "TEXT", 0),
+            ("summary", "TEXT", 0),
+        )
+        assert connection.execute(
+            'SELECT "title","quantity","account_id","summary" FROM "project" WHERE "id"=?',
+            ("project-1",),
+        ).fetchone() == ("Project", 7, "account-1", None)
+        foreign_keys = tuple(connection.execute('PRAGMA foreign_key_list("project")'))
+        assert foreign_keys == (
+            (0, 0, "project", "parent_id", "id", "RESTRICT", "RESTRICT", "NONE"),
+            (1, 0, "account", "account_id", "id", "RESTRICT", "RESTRICT", "NONE"),
+        )
+        project_sql = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='project'"
+        ).fetchone()[0]
+        assert "DEFERRABLE" not in project_sql
+        ordered = tuple(
+            row[2]
+            for row in connection.execute('PRAGMA index_xinfo("project_title_quantity_idx")')
+            if row[5]
+        )
+        assert ordered == ("title", "quantity")
+        unique_ordered = tuple(
+            row[2]
+            for row in connection.execute('PRAGMA index_xinfo("project_account_title_unique_idx")')
+            if row[5]
+        )
+        assert unique_ordered == ("account_id", "title")
+        assert tuple(connection.execute('PRAGMA foreign_key_list("task")')) == (
+            (0, 0, "project", "project_id", "id", "RESTRICT", "RESTRICT", "NONE"),
+        )
+        assert tuple(
+            row[2]
+            for row in connection.execute('PRAGMA index_xinfo("project_summary_title_idx")')
+            if row[5]
+        ) == ("summary", "title")
+        assert tuple(
+            row[2]
+            for row in connection.execute('PRAGMA index_xinfo("task_project_owner_unique_idx")')
+            if row[5]
+        ) == ("project_id", "owner_id")
+        index_flags = {
+            row[1]: row[2]
+            for row in connection.execute('PRAGMA index_list("project")')
+        }
+        assert index_flags["project_title_quantity_idx"] == 0
+        assert index_flags["project_account_title_unique_idx"] == 1
+        if prove_token_tolerance:
+            connection.execute("PRAGMA writable_schema=ON")
+            connection.execute(
+                "UPDATE sqlite_schema SET sql=replace(sql, 'CREATE TABLE', 'CREATE\tTABLE') "
+                "WHERE type='table' AND name='project'"
+            )
+            connection.execute("PRAGMA writable_schema=OFF")
+    assert store.inspect(locator, target_specification) == DomainSchemaState("ready")
+
+if mode == "initial":
+    assert catalog.migrate(locator).status == "ready"
+    assert store.inspect(locator, source_specification) == DomainSchemaState("unmaterialised")
+    assert store.materialise(locator, source_specification) == DomainSchemaState("ready")
+    assert store.inspect(locator, source_specification) == DomainSchemaState("ready")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            'INSERT INTO "account" ("id","owner_id","created_at","updated_at","created_via",'
+            '"record_version","label") VALUES (?,?,?,?,?,?,?)',
+            ("account-1", "owner", "t", "t", "smoke", 1, "Account"),
+        )
+        connection.execute(
+            'INSERT INTO "project" ("id","owner_id","created_at","updated_at","created_via",'
+            '"record_version","title","quantity","account_id") VALUES (?,?,?,?,?,?,?,?,?)',
+            ("project-1", "owner", "t", "t", "smoke", 1, "Project", 7, "account-1"),
+        )
+    assert store.evolve(locator, transition) == DomainSchemaState("ready")
+    assert_target_state(prove_token_tolerance=True)
+else:
+    assert catalog.inspect_migration(locator).status == "ready"
+    assert_target_state(prove_token_tolerance=False)
+
+before_retry = schema_snapshot()
 assert store.evolve(locator, transition) == DomainSchemaState("ready")
-assert store.inspect(locator, target_specification) == DomainSchemaState("ready")
-assert store.inspect(locator, source_specification) == DomainSchemaState("incompatible")
-assert store.evolve(locator, transition) == DomainSchemaState("ready")
-
-with sqlite3.connect(database) as connection:
-    project = tuple(
-        (row[1], row[2], row[3])
-        for row in connection.execute('PRAGMA table_xinfo("project")')
-    )
-    assert project[-9:] == (
-        ("title", "TEXT", 1),
-        ("quantity", "INTEGER", 0),
-        ("ratio", "REAL", 0),
-        ("enabled", "INTEGER", 0),
-        ("recorded_at", "TEXT", 0),
-        ("account_id", "TEXT", 0),
-        ("parent_id", "TEXT", 0),
-        ("labels", "TEXT", 0),
-        ("summary", "TEXT", 0),
-    )
-    assert connection.execute(
-        'SELECT "title","quantity","account_id","summary" FROM "project" WHERE "id"=?',
-        ("project-1",),
-    ).fetchone() == ("Project", 7, "account-1", None)
-    foreign_keys = tuple(connection.execute('PRAGMA foreign_key_list("project")'))
-    assert foreign_keys == (
-        (0, 0, "project", "parent_id", "id", "RESTRICT", "RESTRICT", "NONE"),
-        (1, 0, "account", "account_id", "id", "RESTRICT", "RESTRICT", "NONE"),
-    )
-    project_sql = connection.execute(
-        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='project'"
-    ).fetchone()[0]
-    assert "DEFERRABLE" not in project_sql
-    ordered = tuple(
-        row[2]
-        for row in connection.execute('PRAGMA index_xinfo("project_title_quantity_idx")')
-        if row[5]
-    )
-    assert ordered == ("title", "quantity")
-    unique_ordered = tuple(
-        row[2]
-        for row in connection.execute('PRAGMA index_xinfo("project_account_title_unique_idx")')
-        if row[5]
-    )
-    assert unique_ordered == ("account_id", "title")
-    assert tuple(connection.execute('PRAGMA foreign_key_list("task")')) == (
-        (0, 0, "project", "project_id", "id", "RESTRICT", "RESTRICT", "NONE"),
-    )
-    assert tuple(
-        row[2]
-        for row in connection.execute('PRAGMA index_xinfo("project_summary_title_idx")')
-        if row[5]
-    ) == ("summary", "title")
-    assert tuple(
-        row[2]
-        for row in connection.execute('PRAGMA index_xinfo("task_project_owner_unique_idx")')
-        if row[5]
-    ) == ("project_id", "owner_id")
-    index_flags = {
-        row[1]: row[2]
-        for row in connection.execute('PRAGMA index_list("project")')
-    }
-    assert index_flags["project_title_quantity_idx"] == 0
-    assert index_flags["project_account_title_unique_idx"] == 1
-    connection.execute("PRAGMA writable_schema=ON")
-    connection.execute(
-        "UPDATE sqlite_schema SET sql=replace(sql, 'CREATE TABLE', 'CREATE\tTABLE') "
-        "WHERE type='table' AND name='project'"
-    )
-    connection.execute("PRAGMA writable_schema=OFF")
-
-assert store.inspect(locator, target_specification) == DomainSchemaState("ready")
+assert schema_snapshot() == before_retry
+assert_target_state(prove_token_tolerance=False)
 '''
 
 
@@ -1034,21 +1052,22 @@ def run_installed_domain_schema_smoke(
     environment: Mapping[str, str],
     redaction_roots: Iterable[Path],
 ) -> None:
-    """Exercise installed V1-07B/C private schema convergence from an external cwd."""
+    """Exercise installed V1-07B/C/D schema convergence across a restart."""
 
     client = workspace / f"{name}-domain-schema-smoke.py"
     client.write_text(_domain_schema_smoke_program(), encoding="utf-8")
     cwd = workspace / f"{name}-domain-schema-cwd"
     cwd.mkdir(mode=0o700)
     root = workspace / f"{name}-domain-schema-root"
-    run_stage(
-        f"installed {name} domain schema smoke",
-        [python, "-I", client, root],
-        cwd=cwd,
-        environment=environment,
-        timeout=SMOKE_TIMEOUT_SECONDS,
-        redaction_roots=redaction_roots,
-    )
+    for mode in ("initial", "restart"):
+        run_stage(
+            f"installed {name} domain schema {mode}",
+            [python, "-I", client, root, mode],
+            cwd=cwd,
+            environment=environment,
+            timeout=SMOKE_TIMEOUT_SECONDS,
+            redaction_roots=redaction_roots,
+        )
 
 
 def _relational_contract_smoke_program() -> str:

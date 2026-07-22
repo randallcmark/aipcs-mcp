@@ -375,11 +375,19 @@ def test_embedded_domain_schema_client_exercises_the_source_contract(
     assert 'source_specification) == DomainSchemaState("incompatible")' in program
     assert "PRAGMA writable_schema=ON" in program
     assert 'ordered == ("title", "quantity")' in program
+    assert 'catalog.inspect_migration(locator).status == "ready"' in program
+    assert "before_retry = schema_snapshot()" in program
     assert "site.getsitepackages()" in program
 
     root = tmp_path / "domain-schema-root"
     monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
-    monkeypatch.setattr(sys, "argv", ["installed_domain_schema_smoke.py", str(root)])
+    monkeypatch.setattr(
+        sys, "argv", ["installed_domain_schema_smoke.py", str(root), "initial"]
+    )
+    exec(compile(program, "installed_domain_schema_smoke.py", "exec"), {})
+    monkeypatch.setattr(
+        sys, "argv", ["installed_domain_schema_smoke.py", str(root), "restart"]
+    )
     exec(compile(program, "installed_domain_schema_smoke.py", "exec"), {})
     assert (root / "service-stores").is_dir()
 
@@ -465,15 +473,28 @@ def test_domain_schema_smoke_uses_each_installed_interpreter_and_external_cwd(
         )
 
     assert [label for label, _, _ in calls] == [
-        "installed wheel domain schema smoke",
-        "installed sdist domain schema smoke",
+        "installed wheel domain schema initial",
+        "installed wheel domain schema restart",
+        "installed sdist domain schema initial",
+        "installed sdist domain schema restart",
     ]
     assert calls[0][1][0].endswith("wheel-venv/bin/python")
-    assert calls[1][1][0].endswith("sdist-venv/bin/python")
+    assert calls[1][1][0].endswith("wheel-venv/bin/python")
+    assert calls[2][1][0].endswith("sdist-venv/bin/python")
+    assert calls[3][1][0].endswith("sdist-venv/bin/python")
     assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][1][-1] == "initial"
+    assert calls[1][1][-1] == "restart"
+    assert calls[2][1][-1] == "initial"
+    assert calls[3][1][-1] == "restart"
     assert calls[0][2] == tmp_path / "wheel-domain-schema-cwd"
-    assert calls[1][2] == tmp_path / "sdist-domain-schema-cwd"
-    assert calls[0][2] != calls[1][2]
+    assert calls[1][2] == tmp_path / "wheel-domain-schema-cwd"
+    assert calls[2][2] == tmp_path / "sdist-domain-schema-cwd"
+    assert calls[3][2] == tmp_path / "sdist-domain-schema-cwd"
+    assert calls[0][2] != calls[2][2]
+    assert calls[0][1][-2] == calls[1][1][-2]
+    assert calls[2][1][-2] == calls[3][1][-2]
+    assert calls[0][1][-2] != calls[2][1][-2]
 
 
 def test_relational_smoke_uses_each_installed_interpreter_and_external_cwd(

@@ -83,16 +83,21 @@ add operational stores, database copies, credentials, or personal context to
 this repository.
 
 The registry stores service metadata and initial manifests only. A design does
-not invoke the packaged private service-store catalog, create a service
-database or agent-defined table, or make records durable. The catalog can be
-exercised directly as an internal foundation and creates only namespace-bound
-adapter migration metadata. Because it is uncomposed, direct initialisation can
-leave an orphan database and is not a public workflow. Public materialisation,
-records, branches, retrieval, backup/export, cross-store recovery, operator
-administration, remote transport, PostgreSQL, and multi-user tenancy are not
-implemented. Future slices must preserve the same boundary: validate input
-before persistence, keep configuration separate from data, and redact
-sensitive implementation details from errors and capability output.
+not invoke the packaged private service-store catalog or domain-schema adapter,
+create a service database or agent-defined table, or make records durable. The
+catalog can be exercised directly as an internal foundation and creates only
+namespace-bound adapter metadata and its checksummed migration ledger; the
+separate private domain adapter can operate on that ready foundation only
+through direct internal code. Because both are uncomposed, direct use can leave
+an orphan database or physical schema and is not a public workflow. It adds no
+MCP tool, CLI command, configuration option, capability, repair, or recovery
+path. Public materialisation, records, branches, retrieval, backup/export,
+cross-store recovery, operator administration, remote transport, PostgreSQL,
+and multi-user tenancy are not implemented. Future slices must preserve the
+same boundary: validate input before persistence, keep configuration separate
+from data, and redact sensitive implementation details from errors and
+capability output. See the [private relational
+boundary](private-relational-boundary.md).
 
 There is not yet a supported release, maintenance, or security-fix policy.
 Treat this pre-release contract as development software and report potential
