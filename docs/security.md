@@ -21,8 +21,9 @@ reached.
 - Public v1 is stdio only. Listener-oriented transport settings are rejected
   before configuration resolution and before any MCP server construction.
 
-No listener, remote transport, hosted service, authentication flow, storage
-adapter, database connection, or migration is implemented in this slice. The
+No listener, remote transport, hosted service, authentication flow, or runnable
+persistent profile is implemented in this slice. A private POSIX-only SQLite
+registry adapter and migration exist behind the internal seam. The
 pure storage contracts accept only closed backend/component values and opaque
 service-store identifiers; they contain no physical location, connection,
 credential, or raw adapter error field.
@@ -46,11 +47,11 @@ All repository test data is synthetic and marked with its provenance. Do not
 add agent transcripts, operational stores, database copies, credentials, or
 personal context to this repository.
 
-Persistence, storage adapters, lifecycle operations, backup/export, and
-operator administration are not implemented yet. Future slices must preserve
-the same boundary: validate input before persistence, keep configuration
-separate from data, and redact sensitive implementation details from errors
-and capability output.
+Runnable persistence, service-store adapters, lifecycle operations,
+backup/export, and operator administration are not implemented yet. Future
+slices must preserve the same boundary: validate input before persistence, keep
+configuration separate from data, and redact sensitive implementation details
+from errors and capability output.
 
 There is not yet a supported release, maintenance, or security-fix policy.
 Treat this pre-release contract as development software and report potential

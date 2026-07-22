@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import sys
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -54,6 +55,8 @@ def resolve_configuration(
     transport = _choice(values["transport"], {"stdio"}, "transport")
     principal = _text(values["principal_id"], "principal_id", optional=True, maximum=128)
     root = _absolute_path(values["sqlite_data_root"])
+    if profile == "sqlite" and root is None:
+        root = _default_sqlite_root(environ)
     dsn_ref = _dsn_reference(values["postgres_dsn_env"])
     level = _choice(values["log_level"], {"debug", "info", "warning", "error"}, "log_level")
     _validate_profile(profile, principal, root, dsn_ref, file_values)
@@ -182,6 +185,35 @@ def _absolute_path(value: object) -> Path | None:
         raise ConfigurationError(path="sqlite")
     path = Path(value)
     if not path.is_absolute():
+        raise ConfigurationError(path="sqlite")
+    return path
+
+
+def _default_sqlite_root(environ: Mapping[str, str]) -> Path:
+    """Select a pure, redacted platform default; never touch the filesystem."""
+
+    if sys.platform == "darwin":
+        return _platform_root(environ.get("HOME")) / "Library" / "Application Support" / "aipcs-mcp"
+    if sys.platform == "win32":
+        value = environ.get("LOCALAPPDATA")
+        return _platform_root(value) / "aipcs-mcp"
+    xdg = environ.get("XDG_DATA_HOME")
+    if xdg is not None:
+        return _platform_root(xdg) / "aipcs-mcp"
+    return _platform_root(environ.get("HOME")) / ".local" / "share" / "aipcs-mcp"
+
+
+def _platform_root(value: object) -> Path:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or not value.isprintable()
+        or len(value) > 4096
+    ):
+        raise ConfigurationError(path="sqlite")
+    path = Path(value)
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts):
         raise ConfigurationError(path="sqlite")
     return path
 

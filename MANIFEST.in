@@ -1,0 +1,5 @@
+prune tests
+prune .agents
+prune .codex
+global-exclude *.py[cod]
+global-exclude *.sqlite *.sqlite3 *.db *.db3

@@ -4,7 +4,7 @@ AIPCS resolves configuration once for each CLI invocation. The resolved snapshot
 is immutable and is passed to runtime wiring; application use cases do not read
 configuration files or environment variables.
 
-The configuration vocabulary describes only V1-05 behavior. It does not create
+The configuration vocabulary describes V1-06B behavior. It does not create
 storage, select an adapter implementation, connect to a database, or add MCP
 tools.
 
@@ -43,7 +43,9 @@ values fail validation.
 | PostgreSQL DSN reference | `AIPCS_POSTGRES_DSN_ENV` |
 | Stderr log level | `AIPCS_LOG_LEVEL` |
 
-Only these exact names are read by the configuration resolver.
+Only these exact names participate in AIPCS field precedence. For an omitted
+SQLite root, `XDG_DATA_HOME`, `HOME`, or future Windows `LOCALAPPDATA` is read
+solely to select the documented redacted platform default.
 Present-but-blank values fail validation; they do not fall through to a
 lower-precedence source.
 
@@ -79,14 +81,18 @@ is accepted.
     level = "warning"
 
 The optional SQLite `data_root` descriptor must be absolute and no longer than
-4,096 characters. It is never opened or created in V1-05. PostgreSQL requires a
+4,096 characters. When a SQLite profile omits it, resolution selects a redacted
+platform default: `$XDG_DATA_HOME/aipcs-mcp` (or `~/.local/share/aipcs-mcp`) on
+Linux, `~/Library/Application Support/aipcs-mcp` on macOS, and a future
+`LOCALAPPDATA` location on Windows. Resolution never opens or creates this
+path, and reports it as not explicitly configured. PostgreSQL requires a
 `dsn_env` reference matching `^[A-Z][A-Z0-9_]{0,127}$`; its value is not read and
 connectivity is not tested. Logging level is one of `debug`, `info`, `warning`,
 or `error`.
 
 ## Profiles and availability
 
-| Profile | V1-05 state | Validate or serve |
+| Profile | V1-06B state | Validate or serve |
 | --- | --- | --- |
 | stateless | Available and runnable | Succeeds over stdio. |
 | sqlite | Recognised, unavailable | Returns unsupported_operation. |
@@ -98,8 +104,10 @@ it. This remains true when `config show` inspects an unavailable persistent
 profile. AIPCS does not derive an identity from the operating-system user, host,
 or current directory.
 
-An unavailable profile is not configured, connected, ready, or serving. It
-does not change server-info, construct a driver, or create storage.
+An unavailable profile is not connected, ready, or serving. It does not change
+server-info, construct a driver, or create storage. SQLite's private adapter
+may be exercised only by internal composition/tests; the profile remains
+unavailable in this slice.
 
 ## Safe reports and failures
 

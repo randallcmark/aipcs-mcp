@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Reject test, local-state, and private material from an AIPCS wheel."""
+"""Reject test, local-state, and private material from an AIPCS release artifact."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path, PurePosixPath
+from tarfile import ReadError
+from tarfile import open as open_tar
 from zipfile import BadZipFile, ZipFile
 
 DENIED_PARTS = frozenset(
@@ -19,9 +21,7 @@ DENIED_PARTS = frozenset(
         "tests",
     }
 )
-DENIED_SUFFIXES = frozenset(
-    {".db", ".db3", ".pyc", ".pyo", ".sqlite", ".sqlite3"}
-)
+DENIED_SUFFIXES = frozenset({".db", ".db3", ".pyc", ".pyo", ".sqlite", ".sqlite3"})
 DENIED_NAMES = frozenset({"AGENTS.md", "CLAUDE.md"})
 
 
@@ -40,25 +40,32 @@ def member_violation(name: str) -> str | None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("wheel", type=Path)
+    parser = argparse.ArgumentParser(
+        description="Check a built wheel or source distribution for private material."
+    )
+    parser.add_argument("artifact", type=Path, help="path to a .whl or .tar.gz artifact")
     args = parser.parse_args()
-    if args.wheel.suffix != ".whl" or not args.wheel.is_file():
-        parser.error("wheel must be an existing .whl file")
+    if not args.artifact.is_file():
+        parser.error("artifact must be an existing wheel or sdist")
     try:
-        with ZipFile(args.wheel) as archive:
-            failures = [
-                f"{name}: {reason}"
-                for name in archive.namelist()
-                if (reason := member_violation(name)) is not None
-            ]
-    except BadZipFile:
-        parser.error("wheel must be a valid ZIP archive")
+        if args.artifact.suffix == ".whl":
+            with ZipFile(args.artifact) as archive:
+                names = archive.namelist()
+        elif args.artifact.name.endswith(".tar.gz"):
+            with open_tar(args.artifact, "r:gz") as archive:
+                names = archive.getnames()
+        else:
+            parser.error("artifact must be a .whl or .tar.gz")
+        failures = [
+            f"{name}: {reason}" for name in names if (reason := member_violation(name)) is not None
+        ]
+    except (BadZipFile, ReadError):
+        parser.error("artifact archive is invalid")
     if failures:
-        print("Wheel content check failed:")
+        print("Artifact content check failed:")
         print("\n".join(sorted(failures)))
         return 1
-    print("Wheel content check passed.")
+    print("Artifact content check passed.")
     return 0
 
 

@@ -1,4 +1,5 @@
 """Supplemental adversarial V1-05 configuration coverage."""
+
 from __future__ import annotations
 
 import json
@@ -32,16 +33,33 @@ def test_each_field_proves_environment_over_file_and_file_over_default(tmp_path:
     )
     file = resolve(path=sqlite)
     env = resolve(
-        environ={"AIPCS_PROFILE": "sqlite", "AIPCS_PRINCIPAL_ID": "env-p", "AIPCS_SQLITE_DATA_ROOT": "/env-root",
-                 "AIPCS_TRANSPORT": "stdio", "AIPCS_LOG_LEVEL": "info"},
+        environ={
+            "AIPCS_PROFILE": "sqlite",
+            "AIPCS_PRINCIPAL_ID": "env-p",
+            "AIPCS_SQLITE_DATA_ROOT": "/env-root",
+            "AIPCS_TRANSPORT": "stdio",
+            "AIPCS_LOG_LEVEL": "info",
+        },
         path=sqlite,
     )
     default = resolve()
-    assert (file.profile, file.sources["profile"], default.profile) == ("sqlite", "file", "stateless")
+    assert (file.profile, file.sources["profile"], default.profile) == (
+        "sqlite",
+        "file",
+        "stateless",
+    )
     assert (env.profile, env.sources["profile"]) == ("sqlite", "environment")
-    assert (file.transport, file.sources["transport"], env.sources["transport"]) == ("stdio", "file", "environment")
+    assert (file.transport, file.sources["transport"], env.sources["transport"]) == (
+        "stdio",
+        "file",
+        "environment",
+    )
     assert (file.principal_id, env.principal_id, default.principal_id) == ("file-p", "env-p", None)
-    assert (file.sqlite_data_root, env.sqlite_data_root, default.sqlite_data_root) == (Path("/file-root"), Path("/env-root"), None)
+    assert (file.sqlite_data_root, env.sqlite_data_root, default.sqlite_data_root) == (
+        Path("/file-root"),
+        Path("/env-root"),
+        None,
+    )
     assert (file.log_level, env.log_level, default.log_level) == ("error", "info", "warning")
     assert env.sources["principal_id"] == "environment"
     assert env.sources["sqlite_data_root"] == "environment"
@@ -98,7 +116,7 @@ def test_each_field_proves_environment_over_file_and_file_over_default(tmp_path:
         (
             "principal_id",
             'config_version=1\nprofile="sqlite"\n[identity]\nprincipal_id="file"\n',
-            {"AIPCS_PRINCIPAL_ID": "environment"},
+            {"AIPCS_PRINCIPAL_ID": "environment", "HOME": "/safe-home"},
             ConfigOverrides(principal_id="cli"),
             "cli",
         ),
@@ -178,21 +196,30 @@ def test_postgresql_reference_is_strict(value: str) -> None:
         )
 
 
-@pytest.mark.parametrize("text", [
-    "not valid toml =\n", "config_version=1.0\n", "config_version=true\n", 'config_version="1"\n',
-    "config_version=1\nunknown=1\n", "config_version=1\nvalues=[1]\n",
-    "config_version=1\nidentity=[]\n",
-    "config_version=1\n[identity]\nprincipal_id=1\n",
-    "config_version=1\n[logging]\nunknown=\"warning\"\n",
-    "config_version=1\n[one.two.three.four.five.six.seven.eight.nine]\n",
-    "config_version=1\n" + "".join(f"key_{i}=1\n" for i in range(129)),
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not valid toml =\n",
+        "config_version=1.0\n",
+        "config_version=true\n",
+        'config_version="1"\n',
+        "config_version=1\nunknown=1\n",
+        "config_version=1\nvalues=[1]\n",
+        "config_version=1\nidentity=[]\n",
+        "config_version=1\n[identity]\nprincipal_id=1\n",
+        'config_version=1\n[logging]\nunknown="warning"\n',
+        "config_version=1\n[one.two.three.four.five.six.seven.eight.nine]\n",
+        "config_version=1\n" + "".join(f"key_{i}=1\n" for i in range(129)),
+    ],
+)
 def test_hostile_toml_is_rejected(tmp_path: Path, text: str) -> None:
     with pytest.raises(ConfigurationError):
         resolve(path=write(tmp_path / "hostile.toml", text))
 
 
-def test_missing_non_utf8_oversize_no_discovery_and_no_storage_creation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_missing_non_utf8_oversize_no_discovery_and_no_storage_creation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     with pytest.raises(ConfigurationError):
         resolve(path=tmp_path / "missing.toml")
     with pytest.raises(ConfigurationError):
@@ -204,11 +231,16 @@ def test_missing_non_utf8_oversize_no_discovery_and_no_storage_creation(monkeypa
     raw.write_bytes(b"x" * 65537)
     with pytest.raises(ConfigurationError):
         resolve(path=raw)
-    write(tmp_path / "aipcs.toml", 'config_version=1\nprofile="sqlite"\n[identity]\nprincipal_id="p"\n')
+    write(
+        tmp_path / "aipcs.toml",
+        'config_version=1\nprofile="sqlite"\n[identity]\nprincipal_id="p"\n',
+    )
     monkeypatch.chdir(tmp_path)
     assert resolve().profile == "stateless"
     root = tmp_path / "not-created"
-    config = resolve(overrides=ConfigOverrides(profile="sqlite", principal_id="p", sqlite_data_root=str(root)))
+    config = resolve(
+        overrides=ConfigOverrides(profile="sqlite", principal_id="p", sqlite_data_root=str(root))
+    )
     with pytest.raises(ConfigurationError):
         require_runnable(config)
     assert not root.exists()
@@ -230,13 +262,16 @@ def test_undocumented_environment_names_and_config_selector_are_ignored(tmp_path
     assert all(source == "default" for source in config.sources.values())
 
 
-@pytest.mark.parametrize("text", [
-    'config_version=1\nprofile="stateless"\n[sqlite]\ndata_root="/state"\n',
-    'config_version=1\nprofile="sqlite"\n',
-    'config_version=1\nprofile="sqlite"\n[identity]\nprincipal_id="p"\n[postgresql]\ndsn_env="AIPCS_DSN"\n',
-    'config_version=1\nprofile="postgresql"\n[identity]\nprincipal_id="p"\n',
-    'config_version=1\nprofile="postgresql"\n[identity]\nprincipal_id="p"\n[postgresql]\ndsn="postgresql://secret@host/db"\n',
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        'config_version=1\nprofile="stateless"\n[sqlite]\ndata_root="/state"\n',
+        'config_version=1\nprofile="sqlite"\n',
+        'config_version=1\nprofile="sqlite"\n[identity]\nprincipal_id="p"\n[postgresql]\ndsn_env="AIPCS_DSN"\n',
+        'config_version=1\nprofile="postgresql"\n[identity]\nprincipal_id="p"\n',
+        'config_version=1\nprofile="postgresql"\n[identity]\nprincipal_id="p"\n[postgresql]\ndsn="postgresql://secret@host/db"\n',
+    ],
+)
 def test_profile_principal_storage_and_dsn_contradictions_fail(tmp_path: Path, text: str) -> None:
     with pytest.raises(ConfigurationError):
         resolve(path=write(tmp_path / "bad.toml", text))
@@ -281,7 +316,9 @@ def test_sensitive_configuration_values_are_absent_from_repr_and_errors() -> Non
     assert '"code":"internal_error"' in public_error
 
 
-def test_cli_redacts_and_validate_serve_stop_before_server(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+def test_cli_redacts_and_validate_serve_stop_before_server(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
     for key in (*LISTENER_ENV_KEYS, *TRANSPORT_ENV_KEYS):
         monkeypatch.delenv(key, raising=False)
     secret = "postgresql://user:secret@private-host/private-db"
@@ -289,8 +326,13 @@ def test_cli_redacts_and_validate_serve_stop_before_server(monkeypatch: pytest.M
     assert cli.main(["config", "show", "--config", str(bad)]) == 2
     output = capsys.readouterr().err
     assert secret not in output and str(bad) not in output
-    unavailable = write(tmp_path / "sqlite.toml", 'config_version=1\nprofile="sqlite"\n[identity]\nprincipal_id="hidden"\n')
-    monkeypatch.setattr(cli, "create_server", lambda: (_ for _ in ()).throw(AssertionError("server started")))
+    unavailable = write(
+        tmp_path / "sqlite.toml",
+        'config_version=1\nprofile="sqlite"\n[identity]\nprincipal_id="hidden"\n',
+    )
+    monkeypatch.setattr(
+        cli, "create_server", lambda: (_ for _ in ()).throw(AssertionError("server started"))
+    )
     assert cli.main(["config", "show", "--config", str(unavailable)]) == 0
     assert cli.main(["config", "validate", "--config", str(unavailable)]) == 2
     assert cli.main(["serve", "--config", str(unavailable)]) == 2
@@ -350,9 +392,15 @@ def test_serve_logging_configuration_is_stderr_only(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("argv", [["config", "show"], ["config", "validate"], ["serve"]])
-def test_listener_preflight_precedes_resolution(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]) -> None:
+def test_listener_preflight_precedes_resolution(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
     monkeypatch.setenv("FASTMCP_PORT", "8000")
-    monkeypatch.setattr(cli, "resolve_configuration", lambda **_: (_ for _ in ()).throw(AssertionError("resolver ran")))
+    monkeypatch.setattr(
+        cli,
+        "resolve_configuration",
+        lambda **_: (_ for _ in ()).throw(AssertionError("resolver ran")),
+    )
     assert cli.main(argv) == 2
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "transport_not_supported"
 

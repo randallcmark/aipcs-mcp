@@ -1,4 +1,4 @@
-"""Backend-neutral storage contracts; no adapter implementation is supplied."""
+"""Public backend-neutral contracts; private adapters live in implementation subpackages."""
 
 from .contracts import (
     MigrationState,

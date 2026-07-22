@@ -15,7 +15,7 @@ def safe_config_report(config: ResolvedConfiguration) -> dict[str, object]:
         "identity": {"principal_configured": config.principal_id is not None},
         "logging": {"level": config.log_level},
         "storage": {
-            "sqlite_data_root_configured": config.sqlite_data_root is not None,
+            "sqlite_data_root_configured": config.sources["sqlite_data_root"] != "default",
             "postgresql_dsn_configured": config.postgres_dsn_env is not None,
         },
         "sources": dict(config.sources),

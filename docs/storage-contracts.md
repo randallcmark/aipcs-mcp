@@ -1,8 +1,13 @@
 # Storage contracts
 
-V1-06A defines pure, backend-neutral contracts only. It does not ship a
-database adapter, driver, migration implementation, storage profile, or public
-storage capability report.
+V1-06A defines pure, backend-neutral contracts. V1-06B adds a private SQLite
+registry reference adapter behind those unchanged contracts; it does not make a
+storage profile runnable or add a public storage capability report.
+
+The reference adapter is certified only for local POSIX filesystems on Linux
+and macOS, one host and one active writer. It uses a descriptor-anchored `0700`
+root and `0600` registry file, rejects WAL/SHM, allows native rollback-journal
+recovery only during explicit migration, and fails closed on Windows.
 
 `ServiceStoreLocator` is an opaque logical identifier for a future
 materialised service store. It is exactly `svc_` followed by the lowercase

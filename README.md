@@ -4,19 +4,20 @@
 It is being built around stable, generic MCP primitives and an agent-designed
 relational memory schema.
 
-The current V1-06A foundation preserves a minimal, stateless MCP server boundary:
+The current V1-06B foundation preserves a minimal, stateless MCP server boundary:
 
 - manifest v2 validation for portable relational schemas;
 - an explicit, one-way legacy manifest-v1 library converter;
 - stable structured errors and safe capability information;
 - strict, inspectable configuration for a stateless stdio runtime;
-- backend-neutral storage contracts and a test-only conformance harness;
+- backend-neutral storage contracts, a private SQLite registry adapter, and a
+  test-only conformance harness;
 - an `aipcs serve` command restricted to stdio; and
 - one read-only `aipcs_server_info` MCP tool, verified through a real client.
 
-It does **not** yet provide persistence, a storage adapter, service or record
-lifecycle operations, export/import bundles, an administration CLI, or a
-released installation workflow.
+It does **not** yet provide runnable persistence, a public storage adapter,
+service or record lifecycle operations, export/import bundles, an
+administration CLI, or a released installation workflow.
 
 ## Public v1 direction
 
@@ -24,9 +25,9 @@ Public v1 is local-first and stdio-only. The server will own a small set of
 generic primitives; schemas describe records, relationships, indexes, and
 retrieval intent rather than creating bespoke MCP tools or services.
 
-SQLite will be the zero-configuration reference adapter. PostgreSQL will be a
-second reference adapter demonstrating the same storage boundary. Neither is
-implemented in this slice.
+SQLite is the private registry reference adapter. PostgreSQL will be a second
+reference adapter demonstrating the same storage boundary. Neither profile is
+runnable in this slice.
 
 ## Contract documentation
 
@@ -35,8 +36,8 @@ implemented in this slice.
 - [Manifest v2](docs/manifest-v2.md) describes the current schema boundary.
 - [Application boundary](docs/application-boundary.md) describes the internal
   separation between transport, application use cases, and future adapters.
-- [Storage contracts](docs/storage-contracts.md) defines the pure future-adapter
-  vocabulary without adding persistence.
+- [Storage contracts](docs/storage-contracts.md) defines the public
+  backend-neutral vocabulary and private SQLite reference boundary.
 - [Security and trust boundary](docs/security.md) describes safe inputs,
   errors, capability information, and transport restrictions.
 - [Compatibility](docs/compatibility.md) records what is and is not a public
@@ -58,9 +59,14 @@ Configuration can be inspected or validated without starting a server:
     uvx --from . aipcs config validate
 
 These are not released installation instructions. The stateless profile is the
-only runnable V1-06A profile. SQLite and PostgreSQL profiles may be inspected but
-are explicitly unavailable until their adapters exist; they do not create or
-connect to storage.
+only runnable V1-06B profile. SQLite and PostgreSQL profiles may be inspected but
+remain explicitly unavailable; the SQLite adapter is a private non-serving seam
+until later runtime wiring.
+
+The current SQLite boundary is local POSIX storage on Linux and macOS, one host
+and one active writer. It requires an operator-owned `0700` root and `0600`
+registry file, never enables WAL, and creates or migrates storage only through
+the explicit private migration operation. Windows fails closed.
 
 AIPCS remains stdio-only. Listener transports and listener-oriented environment
 settings are rejected before configuration resolution or server construction.
