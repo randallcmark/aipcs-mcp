@@ -13,4 +13,4 @@ def test_reports_are_allowlisted() -> None:
     )
     report = safe_config_report(config)
     assert "secret" not in repr(report) and "/private" not in repr(report)
-    assert safe_validation_report(config)["runnable"] is False
+    assert safe_validation_report(config)["runnable"] is True

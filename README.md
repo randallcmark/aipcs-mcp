@@ -1,43 +1,39 @@
 # AIPCS MCP
 
-`aipcs-mcp` is a pre-release, self-hosted persistence foundation for AI agents.
-It is being built around stable, generic MCP primitives and an agent-designed
-relational memory schema.
+`aipcs-mcp` is a pre-release, local-first persistence foundation for AI agents.
+It provides a small, stable MCP surface over an agent-defined relational-memory
+schema. The current implementation supports durable service registration and
+initial design storage through a local SQLite registry; it does not yet create
+agent-authored tables or store records.
 
-The current V1-06B foundation preserves a minimal, stateless MCP server boundary:
+The public runtime provides:
 
-- manifest v2 validation for portable relational schemas;
-- an explicit, one-way legacy manifest-v1 library converter;
-- stable structured errors and safe capability information;
-- strict, inspectable configuration for a stateless stdio runtime;
-- backend-neutral storage contracts, a private SQLite registry adapter, and a
-  test-only conformance harness;
-- an `aipcs serve` command restricted to stdio; and
-- one read-only `aipcs_server_info` MCP tool, verified through a real client.
+- manifest v2 validation and an explicit, one-way manifest-v1 library converter;
+- a strict, redacted configuration model;
+- a stateless stdio server for capability discovery; and
+- a SQLite stdio profile for principal-scoped service seed, list, inspect, and
+  initial-design lifecycle operations.
 
-It does **not** yet provide runnable persistence, a public storage adapter,
-service or record lifecycle operations, export/import bundles, an
-administration CLI, or a released installation workflow.
+SQLite support is deliberately narrow: local POSIX filesystems on Linux and
+macOS, one host, and one active writer. PostgreSQL, Windows SQLite, remote MCP,
+service stores, record operations, administration, and hosted deployment are
+not available.
 
 ## Public v1 direction
 
-Public v1 is local-first and stdio-only. The server will own a small set of
-generic primitives; schemas describe records, relationships, indexes, and
-retrieval intent rather than creating bespoke MCP tools or services.
-
-SQLite is the private registry reference adapter. PostgreSQL will be a second
-reference adapter demonstrating the same storage boundary. Neither profile is
-runnable in this slice.
+Public v1 is local-first and stdio-only. The server owns generic primitives;
+schemas describe records, relationships, indexes, and retrieval intent rather
+than generating bespoke MCP tools or services.
 
 ## Contract documentation
 
 - [Configuration](docs/configuration.md) documents precedence, profiles, and
   redacted inspection.
 - [Manifest v2](docs/manifest-v2.md) describes the current schema boundary.
-- [Application boundary](docs/application-boundary.md) describes the internal
-  separation between transport, application use cases, and future adapters.
-- [Storage contracts](docs/storage-contracts.md) defines the public
-  backend-neutral vocabulary and private SQLite reference boundary.
+- [Application boundary](docs/application-boundary.md) describes the separation
+  between transport, lifecycle use cases, and storage.
+- [Storage contracts](docs/storage-contracts.md) defines the backend-neutral
+  vocabulary and the supported SQLite registry boundary.
 - [Security and trust boundary](docs/security.md) describes safe inputs,
   errors, capability information, and transport restrictions.
 - [Compatibility](docs/compatibility.md) records what is and is not a public
@@ -47,30 +43,98 @@ runnable in this slice.
 
 ## Development status
 
-There is no supported release installation or production deployment at this
-stage. From a checkout, the stateless server can be run as a **development smoke
-only**:
+There is not yet a supported release installation or production deployment.
+From a checkout, run the stdio server with the project environment:
 
-    uvx --from . aipcs serve
+    uv run aipcs serve
 
-Configuration can be inspected or validated without starting a server:
+To run the durable SQLite registry, supply a process-local principal and either
+an explicit root or a platform default:
 
-    uvx --from . aipcs config show
-    uvx --from . aipcs config validate
+    uv run aipcs serve --profile sqlite --principal-id local-agent \
+      --sqlite-data-root /absolute/operator-owned/aipcs-data
 
-These are not released installation instructions. The stateless profile is the
-only runnable V1-06B profile. SQLite and PostgreSQL profiles may be inspected but
-remain explicitly unavailable; the SQLite adapter is a private non-serving seam
-until later runtime wiring.
+On Linux an omitted root resolves to `$XDG_DATA_HOME/aipcs-mcp` (or
+`~/.local/share/aipcs-mcp`); on macOS it resolves below
+`~/Library/Application Support/aipcs-mcp`. Resolution does not touch storage.
+Each `serve` startup performs the one explicit migration operation, then starts
+MCP only when the registry is ready.
+`config show` and `config validate` never create directories, open a database,
+or migrate storage:
 
-The current SQLite boundary is local POSIX storage on Linux and macOS, one host
-and one active writer. It requires an operator-owned `0700` root and `0600`
-registry file, never enables WAL, and creates or migrates storage only through
-the explicit private migration operation. Windows fails closed.
+    uv run aipcs config show --profile sqlite --principal-id local-agent
+    uv run aipcs config validate --profile sqlite --principal-id local-agent
 
-AIPCS remains stdio-only. Listener transports and listener-oriented environment
-settings are rejected before configuration resolution or server construction.
-Configuration adds no MCP tool, data operation, lifecycle behavior, or backend.
+These are checkout/development invocations, not released installation
+instructions. An explicit SQLite root must be an absolute operator-owned location.
+The service validates the live path only when it starts; configuration output
+reports structural support, not whether a store is ready.
+
+Use one active writer for a registry. The SQLite adapter requires an
+operator-owned `0700` root and `0600` registry file, never enables WAL, and
+fails closed on Windows. Do not place the registry on a network filesystem.
+
+## MCP tools
+
+The stateless profile exposes exactly one tool:
+
+- `aipcs_server_info`
+
+A ready SQLite profile exposes exactly five tools:
+
+- `aipcs_server_info`
+- `aipcs_service_seed`
+- `aipcs_service_list`
+- `aipcs_service_inspect`
+- `aipcs_service_design`
+
+`aipcs_server_info` reports `features.registry_lifecycle: true` only in the
+ready SQLite profile. `tools/list` is the source of truth for the live surface.
+All tool arguments are flat JSON objects. Successful calls return
+`{"ok": true, "result": ..., "error": null}`; safe failures return
+`{"ok": false, "result": null, "error": ...}`. A normal MCP client invokes
+the tools; the examples below show their JSON arguments and result shape.
+
+```json
+// aipcs_service_seed
+{
+  "domain_name": "project_context",
+  "domain_class": "project",
+  "intent_description": "Persist compact project context for future agent sessions.",
+  "idempotency_key": "seed-project-context-001"
+}
+```
+
+```json
+// successful result (abbreviated)
+{
+  "service_id": "11111111-2222-4333-8444-555555555555",
+  "domain_name": "project_context",
+  "domain_class": "project",
+  "intent_description": "Persist compact project context for future agent sessions.",
+  "design_state": "seeded",
+  "operational_status": "active",
+  "schema": null,
+  "schema_version": null,
+  "materialised_at": null,
+  "storage": null
+}
+```
+
+Use `aipcs_service_list` with an optional strict integer `limit` from 1 through
+100 (default 100). It returns `{"services": [ ... ]}` in creation order. Use
+`aipcs_service_inspect` with the lowercase canonical non-zero UUID returned by
+seed. Both mutations require an idempotency key (nonempty, at most 128
+characters): retrying the same request returns the original outcome; reusing a
+key with a different request returns `conflict`.
+
+`aipcs_service_design` accepts the service UUID, a manifest-v2 `schema`, and an
+idempotency key. It validates and stores the manifest, but leaves the service
+seeded: `materialised_at` and `storage` stay `null`, and it creates no service
+database, tables, records, or generated tools.
+
+AIPCS remains stdio-only. Listener transport settings are rejected before
+configuration resolution or server construction.
 
 Tests and example data in this repository are synthetic contract fixtures.
 They must not contain operational records, credentials, or personal context.
@@ -78,6 +142,8 @@ They must not contain operational records, credentials, or personal context.
 ## Out of scope for public v1
 
 - dynamically generated domain-specific MCP tools or per-domain web services;
-- fuzzy, semantic, full-text, or cross-service retrieval;
-- remote MCP, hosted tenancy, OAuth/DCR, or zero-knowledge hosting; and
+- service-store allocation/materialisation, records, branches, search, or
+  cross-service retrieval;
+- PostgreSQL, remote MCP, hosted tenancy, or authentication; and
+- standalone lifecycle, storage, or administration CLI commands; and
 - automatic deletion, archival, merging, or rewriting of memory.

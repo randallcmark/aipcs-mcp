@@ -35,12 +35,12 @@ def test_non_stdio_configuration_returns_one_failure_envelope_before_server_cons
 
     constructed = False
 
-    def unexpected_server() -> Any:
+    def unexpected_server(_: object) -> Any:
         nonlocal constructed
         constructed = True
-        raise AssertionError("FastMCP must not be constructed for rejected configuration")
+        raise AssertionError("server must not be constructed for rejected configuration")
 
-    monkeypatch.setattr(cli, "create_server", unexpected_server)
+    monkeypatch.setattr(cli, "compose_server", unexpected_server)
 
     assert cli.main(argv) == 2
     assert constructed is False
@@ -67,11 +67,13 @@ def test_stdio_configuration_constructs_server_only_after_preflight(
     _clear_transport_environment(monkeypatch)
     calls: list[str] = []
 
-    class StubServer:
-        def run(self, *, transport: str) -> None:
-            calls.append(transport)
+    class StubServer: ...
 
-    monkeypatch.setattr(cli, "create_server", StubServer)
+    async def run_stdio(_: object) -> None:
+        calls.append("stdio")
+
+    monkeypatch.setattr(cli, "compose_server", lambda _: StubServer())
+    monkeypatch.setattr(cli, "run_stdio", run_stdio)
     monkeypatch.setattr(cli, "_configure_stderr_logging", lambda _: None)
 
     assert cli.main(["serve", "--transport", "stdio"]) == 0

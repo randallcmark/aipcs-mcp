@@ -35,8 +35,10 @@ def test_config_show_returns_redacted_success_without_constructing_server(
     )
     monkeypatch.setattr(
         cli,
-        "create_server",
-        lambda: (_ for _ in ()).throw(AssertionError("config commands must not construct FastMCP")),
+        "compose_server",
+        lambda _: (_ for _ in ()).throw(
+            AssertionError("config commands must not construct a server")
+        ),
     )
 
     assert (
@@ -79,8 +81,10 @@ def test_config_validate_requires_runnable_profile_without_constructing_server(
     )
     monkeypatch.setattr(
         cli,
-        "create_server",
-        lambda: (_ for _ in ()).throw(AssertionError("config commands must not construct FastMCP")),
+        "compose_server",
+        lambda _: (_ for _ in ()).throw(
+            AssertionError("config commands must not construct a server")
+        ),
     )
 
     assert cli.main(["config", "validate"]) == 0
@@ -110,7 +114,7 @@ def test_config_failure_uses_existing_error_envelope(
 
 
 def test_serve_resolves_and_requires_runnable_before_server_construction(
-    monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_transport_environment(monkeypatch)
     resolved = object()
@@ -119,11 +123,13 @@ def test_serve_resolves_and_requires_runnable_before_server_construction(
     monkeypatch.setattr(cli, "require_runnable", lambda value: calls.append("runnable"))
     monkeypatch.setattr(cli, "_configure_stderr_logging", lambda value: calls.append("logging"))
 
-    class StubServer:
-        def run(self, *, transport: str) -> None:
-            calls.append(transport)
+    class StubServer: ...
 
-    monkeypatch.setattr(cli, "create_server", StubServer)
+    async def run_stdio(_: object) -> None:
+        calls.append("stdio")
+
+    monkeypatch.setattr(cli, "compose_server", lambda _: StubServer())
+    monkeypatch.setattr(cli, "run_stdio", run_stdio)
 
     assert cli.main(["serve"]) == 0
     assert calls == ["runnable", "logging", "stdio"]

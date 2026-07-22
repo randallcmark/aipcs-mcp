@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from .models import ResolvedConfiguration
+from .resolver import is_supported_sqlite_platform
 
 
 def safe_config_report(config: ResolvedConfiguration) -> dict[str, object]:
+    runnable = _structurally_runnable(config)
     return {
         "config_version": 1,
         "profile": config.profile,
-        "available": config.profile == "stateless",
-        "runnable": config.profile == "stateless",
+        "available": runnable,
+        "runnable": runnable,
         "transport": config.transport,
         "identity": {"principal_configured": config.principal_id is not None},
         "logging": {"level": config.log_level},
@@ -27,5 +29,11 @@ def safe_validation_report(config: ResolvedConfiguration) -> dict[str, object]:
         "config_version": 1,
         "valid": True,
         "profile": config.profile,
-        "runnable": config.profile == "stateless",
+        "runnable": _structurally_runnable(config),
     }
+
+
+def _structurally_runnable(config: ResolvedConfiguration) -> bool:
+    return config.profile == "stateless" or (
+        config.profile == "sqlite" and is_supported_sqlite_platform()
+    )

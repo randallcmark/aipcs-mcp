@@ -38,9 +38,11 @@ an explicit entity-and-field object rather than a shorthand string.
 ## Initial design and evolution
 
 The current normal design request accepts an initial manifest only:
-schema_version must be 1 and migration_history must be empty. A future migration
-and lifecycle slice will define how later schema versions are applied. Do not
-infer persistence behavior from this validation-only contract.
+schema_version must be 1 and migration_history must be empty. In the ready
+SQLite lifecycle profile, a validated initial manifest is stored against a
+service seed. That is registry persistence only: it does not materialise a
+service store, create tables, or make records available. A future migration and
+lifecycle slice will define how later schema versions are applied.
 
 ## Retired input
 

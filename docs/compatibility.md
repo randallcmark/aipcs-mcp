@@ -1,16 +1,17 @@
 # Compatibility and release boundary
 
-`aipcs-mcp` is pre-release (`0.0.0.dev0`). The current public surface is a stateless
-contract-validation and stdio capability server; it is not a supported release.
+`aipcs-mcp` is pre-release (`0.0.0.dev0`). It has a narrow public stdio contract
+for stateless capability discovery and SQLite-backed registry lifecycle. It is
+not yet a supported release.
 
 | Layer | Identifier | Current status |
 | --- | --- | --- |
 | Distribution | aipcs-mcp SemVer | Local development package and aipcs command; no released install. |
-| MCP capability contract | aipcs_mcp_contract SemVer | One server-info tool with versioned safe capability and error shapes. |
+| MCP capability contract | aipcs_mcp_contract | Version `1.0`; safe capability, error, and lifecycle shapes. |
 | Schema manifest | manifest_version | Manifest v2 is the only normal public design input. |
 | Configuration document | config_version | Strict V1 configuration document and source precedence. |
 | Legacy conversion | Explicit manifest-v1 converter | One-way library conversion with provenance and warnings. |
-| Storage migration | Adapter revision | Private SQLite registry revision 1; no runnable profile or public lifecycle surface. |
+| Storage migration | Adapter revision | SQLite registry revision 1; adapter-private layout and readiness state. |
 | Export bundle | export_format_version | Not implemented. |
 
 ## Current contract
@@ -20,29 +21,44 @@ the sole v1 entry point: it produces a v2 manifest and reports discarded fields
 and warnings. It does not write data, create storage, or promise a reversible
 round trip.
 
-The `aipcs serve` command starts over stdio only. Its sole MCP tool exposes a
-structured capability envelope containing contract versions, supported manifest
-versions, and enabled features; it deliberately omits storage locations,
-credentials, network endpoints, and owner information.
+The `aipcs serve` command starts over stdio only. Stateless exposes only
+`aipcs_server_info`. A ready SQLite profile exposes server-info plus
+`aipcs_service_seed`, `aipcs_service_list`, `aipcs_service_inspect`, and
+`aipcs_service_design`. Server-info's `registry_lifecycle` feature is true only
+when all four lifecycle tools are registered after a ready startup migration.
+It deliberately omits storage locations, credentials, network endpoints,
+principal identity, and audit data.
 
 AIPCS configuration is resolved by explicit CLI option, documented environment
 variable, selected TOML file, and safe default in that order. `config show` is
 redacted. `config validate` and `serve` succeed only for a runnable profile.
-Stateless is the only runnable V1-06B profile. SQLite and PostgreSQL descriptors
-are recognised but unavailable; they neither construct storage nor alter MCP
-capabilities.
+Stateless is runnable everywhere supported by the package. SQLite is structurally
+runnable only on Linux and macOS, subject to live storage checks at `serve`.
+Windows SQLite and PostgreSQL are unavailable. Configuration inspection does not
+claim a path is ready and does not touch storage.
 
-The internal application boundary separates MCP and CLI adapters from use cases.
-V1-06A adds pure storage values and protocols; V1-06B adds a private SQLite
-registry adapter without a runnable profile, lifecycle operation, command,
-tool, or adapter extension mechanism.
+The SQLite lifecycle is principal-scoped. A configured principal is an opaque,
+process-local boundary selected by the operator, not client identity or hosted
+tenancy. The MCP transport fixes `created_via` to `mcp`; callers cannot set
+either value. Mutation retries use a required idempotency key. Repeating the
+same request replays the durable result; reusing the key with different content
+returns `conflict`.
+
+Design accepts and stores an initial manifest-v2 document but does not
+materialise a service store, create domain tables, create records, or expose
+generated tools. `design_state` remains `seeded` and `storage` remains null.
 
 ## Not yet compatible
 
-The project does not yet provide a runnable SQLite or PostgreSQL profile,
-persistent public service or record operations, export bundle,
-administration CLI, or deployment interface. Their future compatibility
-commitments will be documented when they exist.
+The project does not provide PostgreSQL, service-store materialisation, records,
+branches, search, export/import, recovery, multi-writer guarantees,
+administration CLI, remote transport, or deployment interface. Their future
+compatibility commitments will be documented when they exist.
+
+The contract identifier is currently `1.0`. Although earlier planning described
+it as SemVer, no version increment policy is defined yet. Support windows,
+security-fix policy, deprecation rules, and a formal contract-version policy are
+explicitly deferred; do not infer them from this pre-release identifier.
 
 Earlier implementations and data stores are not a public runtime compatibility
 promise. Do not treat the legacy converter as a storage importer.

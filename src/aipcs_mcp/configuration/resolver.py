@@ -72,8 +72,16 @@ def resolve_configuration(
 
 
 def require_runnable(config: ResolvedConfiguration) -> None:
-    if config.profile != "stateless":
+    if config.profile == "postgresql" or (
+        config.profile == "sqlite" and not is_supported_sqlite_platform()
+    ):
         raise ConfigurationError(ErrorCode.UNSUPPORTED_OPERATION, "profile")
+
+
+def is_supported_sqlite_platform() -> bool:
+    """Return only the POSIX platforms certified by the SQLite location policy."""
+
+    return sys.platform == "darwin" or sys.platform.startswith("linux")
 
 
 def _read_file(path: Path | None) -> dict[str, object]:

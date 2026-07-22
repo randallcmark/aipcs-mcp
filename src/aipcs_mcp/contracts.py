@@ -13,6 +13,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictInt,
     ValidationError,
     field_validator,
     model_validator,
@@ -71,6 +72,39 @@ class PublicDesignRequest(PublicModel):
         return self
 
 
+class ServiceSeedRequest(PublicModel):
+    """Flat transport request for the durable seed operation."""
+
+    domain_name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$", max_length=63)
+    domain_class: str = Field(min_length=1, max_length=64)
+    intent_description: str = Field(min_length=1, max_length=1_000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class ServiceListRequest(PublicModel):
+    """Flat, deliberately small list request."""
+
+    limit: StrictInt = Field(default=100, ge=1, le=100)
+
+
+class ServiceInspectRequest(PublicModel):
+    """Flat transport request for one service projection."""
+
+    service_id: UUID
+
+    @field_validator("service_id", mode="before")
+    @classmethod
+    def require_canonical_uuid(cls, value: object) -> object:
+        _require_canonical_service_id(value)
+        return value
+
+
+class ServiceDesignRequest(PublicDesignRequest):
+    """Extended durable-design request; legacy design intake remains unchanged."""
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
 class StorageSummary(PublicModel):
     """Safe storage metadata; a namespace is intentionally opaque to callers."""
 
@@ -114,11 +148,18 @@ class ServiceMetadata(PublicModel):
     storage: StorageSummary | None = None
 
 
+class ServiceListResult(PublicModel):
+    """Ordered, principal-scoped service projections without pagination metadata."""
+
+    services: list[ServiceMetadata]
+
+
 class ServerFeatures(PublicModel):
     server_info: bool = True
     manifest_v2_validation: bool = True
     legacy_v1_importer: bool = True
     stdio_preflight: bool = True
+    registry_lifecycle: bool = False
 
 
 class ServerInfo(PublicModel):
@@ -131,10 +172,10 @@ class ServerInfo(PublicModel):
     operational_statuses: list[Literal["active"]] = Field(default_factory=lambda: ["active"])
 
 
-def public_server_info() -> ServerInfo:
+def public_server_info(*, registry_lifecycle: bool = False) -> ServerInfo:
     """Return a safe, snapshot-testable capability document."""
 
-    return ServerInfo()
+    return ServerInfo(features=ServerFeatures(registry_lifecycle=registry_lifecycle))
 
 
 def parse_public_design(payload: object) -> PublicDesignRequest:
@@ -176,6 +217,74 @@ def parse_public_design(payload: object) -> PublicDesignRequest:
         return PublicDesignRequest.model_validate(payload)
     except ValidationError as error:
         raise error_from_validation(error) from None
+
+
+def parse_service_design(payload: object) -> ServiceDesignRequest:
+    """Parse durable design input with frozen compatibility-error precedence."""
+
+    _validate_design_prefix(payload)
+    try:
+        return ServiceDesignRequest.model_validate(payload)
+    except ValidationError as error:
+        raise error_from_validation(error) from None
+
+
+def parse_service_seed(payload: object) -> ServiceSeedRequest:
+    return _parse_strict(ServiceSeedRequest, payload)
+
+
+def parse_service_list(payload: object) -> ServiceListRequest:
+    return _parse_strict(ServiceListRequest, payload)
+
+
+def parse_service_inspect(payload: object) -> ServiceInspectRequest:
+    if not isinstance(payload, Mapping):
+        raise AipcsContractError(ErrorCode.INVALID_REQUEST, "Request input must be a JSON object.")
+    if "service_id" in payload:
+        _require_canonical_service_id(payload["service_id"])
+    return _parse_strict(ServiceInspectRequest, payload)
+
+
+def _parse_strict[T: PublicModel](model: type[T], payload: object) -> T:
+    if not isinstance(payload, Mapping):
+        raise AipcsContractError(ErrorCode.INVALID_REQUEST, "Request input must be a JSON object.")
+    try:
+        return model.model_validate(payload)
+    except ValidationError as error:
+        raise error_from_validation(error) from None
+
+
+def _validate_design_prefix(payload: object) -> None:
+    if not isinstance(payload, Mapping):
+        raise AipcsContractError(ErrorCode.INVALID_REQUEST, "Design input must be a JSON object.")
+    if "service_id" in payload:
+        _require_canonical_service_id(payload["service_id"])
+    _reject_retired_fields(payload)
+    schema = payload.get("schema")
+    if isinstance(schema, Mapping):
+        manifest_version = schema.get("manifest_version")
+        if manifest_version == 1:
+            raise AipcsContractError(
+                ErrorCode.LEGACY_IMPORT_REQUIRED,
+                "Manifest version 1 is private legacy input; use the explicit legacy importer.",
+            )
+        if manifest_version != 2:
+            raise AipcsContractError(
+                ErrorCode.MANIFEST_VERSION_UNSUPPORTED,
+                "Public design intake supports manifest_version 2 only.",
+            )
+
+
+def _require_canonical_service_id(value: object) -> None:
+    try:
+        canonical = str(UUID(value)) if isinstance(value, str) else None
+    except ValueError:
+        canonical = None
+    if canonical != value or canonical == str(UUID(int=0)):
+        raise AipcsContractError(
+            ErrorCode.INVALID_IDENTIFIER,
+            "service_id must be a non-zero lowercase canonical UUID.",
+        )
 
 
 def validate_stdio_only(

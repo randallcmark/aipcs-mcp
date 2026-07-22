@@ -1,35 +1,39 @@
 # Application boundary
 
 The application boundary is an internal construction seam. It separates stdio
-MCP and CLI adapters from use cases, and keeps future storage mechanics outside
-the application layer. It does not add a storage backend, persistent service or
-record operation, lifecycle operation, MCP tool, CLI command, or public adapter
-extension mechanism.
+MCP and CLI adapters from registry lifecycle use cases and keeps storage
+mechanics outside the application layer. It is not a public adapter extension
+mechanism or a standalone administration API.
 
 ## Principal context
 
-Every future application use case receives an explicit opaque `principal_id`
-and `created_via` context from its transport adapter. It must not infer identity,
-ownership, or authority from environment values, filesystem state, connection
-details, or a storage backend. This keeps ownership checks testable and allows
-future authentication work to remain a transport concern.
+Every lifecycle use case receives an explicit opaque `principal_id` and
+`created_via` context from its transport adapter. The SQLite stdio transport
+uses one configured principal for its full process lifetime and fixes
+`created_via` to `mcp`. Neither value is request-controlled or publicly
+observable. The application must not infer identity, ownership, or authority
+from environment values, filesystem state, connection details, or a storage
+backend. This keeps ownership checks testable and allows future authentication
+work to remain a transport concern.
 
 ## Unit of work ownership
 
-A service mutation, its idempotency-ledger outcome, and its audit entry belong
-to the same unit of work. The application use case owns the requested operation
-and its business outcome; the adapter owns transaction scope, rollback, and
-durable commit. A failed ledger or audit write must fail the mutation rather
-than leave an unaccounted state change.
+A service seed or initial-design mutation, its idempotency-ledger outcome, and
+its metadata-only audit entry belong to the same unit of work. The application
+use case owns the requested operation and business outcome; the adapter owns
+transaction scope, rollback, and durable commit. A failed ledger or audit write
+must fail the mutation rather than leave an unaccounted state change.
 
-This boundary does not yet provide a concrete production unit of work or audit
-store. A successfully acquired unit is always closed exactly once. `commit()`
-and `rollback()` terminate its transaction attempt; `close()` releases
-resources and performs adapter-safe cleanup of an unterminated attempt. The
-application preserves the original failure when rollback or close also fail. A
-close failure after an otherwise successful operation is a bounded internal
-failure. A commit failure has indeterminate durable outcome, so callers retry
-through idempotency rather than assuming a rollback erased it.
+The SQLite registry provides the current production unit of work, mutation
+ledger, and metadata-only audit store for seed and initial-design operations.
+It does not provide a service-store or record unit of work. A successfully
+acquired unit is always closed exactly once. `commit()` and `rollback()`
+terminate its transaction attempt; `close()` releases resources and performs
+adapter-safe cleanup of an unterminated attempt. The application preserves the
+original failure when rollback or close also fail. A close failure after an
+otherwise successful operation is a bounded internal failure. A commit failure
+has indeterminate durable outcome, so callers retry through idempotency rather
+than assuming a rollback erased it.
 
 ## Independent versions
 
@@ -47,10 +51,10 @@ durable operation/recovery record.
 
 ## Migration and serving rule
 
-A future adapter applies its required migrations before it reports itself ready
-to serve. Migration failure prevents serving. Read operations must not execute
-DDL, and opening a record or branch connection must not opportunistically alter
-storage layout.
+A SQLite adapter applies its required registry migration once before it reports
+the process ready to serve. Migration failure prevents MCP construction. Read
+operations do not execute DDL, and opening a unit of work does not
+opportunistically alter storage layout.
 
 The application layer requests behavior through its boundary; it never creates
 tables, parses storage locations, opens database connections, or selects a
@@ -61,8 +65,11 @@ vocabulary and migration-state boundary.
 
 ## Current capability
 
-The current stateless server still exposes only aipcs_server_info over stdio.
-Storage, service and record operations, schema application, lifecycle,
-export/import, administration, and persistent configuration profiles remain unavailable.
+Stateless exposes only `aipcs_server_info` over stdio. A ready SQLite profile
+adds seed, list, inspect, and design. Design validates and stores an initial
+manifest but does not apply it to physical tables: a resulting service remains
+`seeded`, has no storage projection, and cannot hold records. There is no
+standalone lifecycle/admin CLI, service store, materialisation, record API,
+export/import, PostgreSQL, remote transport, or adapter discovery mechanism.
 
 See [compatibility](compatibility.md) and [security](security.md).

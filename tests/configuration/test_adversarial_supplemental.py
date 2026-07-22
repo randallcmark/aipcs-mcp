@@ -241,8 +241,7 @@ def test_missing_non_utf8_oversize_no_discovery_and_no_storage_creation(
     config = resolve(
         overrides=ConfigOverrides(profile="sqlite", principal_id="p", sqlite_data_root=str(root))
     )
-    with pytest.raises(ConfigurationError):
-        require_runnable(config)
+    require_runnable(config)
     assert not root.exists()
 
 
@@ -331,10 +330,10 @@ def test_cli_redacts_and_validate_serve_stop_before_server(
         'config_version=1\nprofile="sqlite"\n[identity]\nprincipal_id="hidden"\n',
     )
     monkeypatch.setattr(
-        cli, "create_server", lambda: (_ for _ in ()).throw(AssertionError("server started"))
+        cli, "compose_server", lambda _: (_ for _ in ()).throw(AssertionError("server started"))
     )
     assert cli.main(["config", "show", "--config", str(unavailable)]) == 0
-    assert cli.main(["config", "validate", "--config", str(unavailable)]) == 2
+    assert cli.main(["config", "validate", "--config", str(unavailable)]) == 0
     assert cli.main(["serve", "--config", str(unavailable)]) == 2
 
 
@@ -370,23 +369,15 @@ def test_cli_uses_one_environment_snapshot_for_preflight_and_resolution(
 
 def test_serve_logging_configuration_is_stderr_only(monkeypatch: pytest.MonkeyPatch) -> None:
     config = resolve(overrides=ConfigOverrides(log_level="debug"))
-    configured: dict[str, object] = {}
     root_logger = cli.logging.getLogger()
     previous_level = root_logger.level
-
-    monkeypatch.setattr(
-        cli.logging,
-        "basicConfig",
-        lambda **kwargs: configured.update(kwargs),
-    )
     try:
         cli._configure_stderr_logging(config)
-        assert configured == {
-            "level": cli.logging.DEBUG,
-            "stream": cli.sys.stderr,
-            "force": True,
-        }
-        assert root_logger.level == cli.logging.DEBUG
+        assert root_logger.level > cli.logging.CRITICAL
+        logger = cli.logging.getLogger("aipcs_mcp")
+        assert logger.propagate is False
+        assert len(logger.handlers) == 1
+        assert logger.handlers[0].stream is cli.sys.stderr
     finally:
         root_logger.setLevel(previous_level)
 
@@ -405,7 +396,8 @@ def test_listener_preflight_precedes_resolution(
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "transport_not_supported"
 
 
-def test_configuration_has_not_added_a_second_mcp_tool() -> None:
+def test_configuration_uses_low_level_finite_tool_registration() -> None:
     source = Path(mcp_server.__file__).read_text(encoding="utf-8")
-    assert source.count("@server.tool(") == 1
-    assert 'name="aipcs_server_info"' in source
+    assert "@server.call_tool(validate_input=False)" in source
+    assert "@server.list_tools()" in source
+    assert '"aipcs_service_seed"' in source

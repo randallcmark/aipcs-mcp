@@ -4,9 +4,9 @@ AIPCS resolves configuration once for each CLI invocation. The resolved snapshot
 is immutable and is passed to runtime wiring; application use cases do not read
 configuration files or environment variables.
 
-The configuration vocabulary describes V1-06B behavior. It does not create
-storage, select an adapter implementation, connect to a database, or add MCP
-tools.
+Configuration selects a fixed V1 runtime shape. Resolution itself never creates
+storage, connects to a database, or migrates an adapter. `serve` is the only
+command that evaluates live SQLite readiness.
 
 ## Commands
 
@@ -14,10 +14,13 @@ tools.
     aipcs config validate [--config PATH] [overrides]
     aipcs serve [--config PATH] [overrides]
 
-`config show` prints one redacted JSON success envelope and may inspect an
-unavailable profile. `config validate` and `serve` require a runnable profile.
-Configuration commands do not construct an MCP server. `serve` emits no
-configuration report on stdout because stdout belongs to the stdio MCP protocol.
+`config show` prints one redacted JSON success envelope and may inspect a
+profile that cannot run on the current platform. `config validate` confirms a
+structurally runnable profile; it does not probe the configured path or
+database. `serve` requires a runnable profile and is the sole command that
+constructs storage, performs the single startup migration, and starts MCP.
+`serve` emits no configuration report on stdout because stdout belongs to the
+stdio MCP protocol.
 
 The supported non-secret overrides are `--profile`, `--transport`,
 `--principal-id`, `--sqlite-data-root`, `--postgres-dsn-env`, and `--log-level`.
@@ -58,8 +61,8 @@ Before resolution, the stdio safety guard also rejects non-stdio values in
 
 `--config PATH` is the only configuration-file selector. There is no environment
 selector, implicit project file, current-working-directory search, package
-directory search, or home-directory search. This makes editor and uvx stdio
-launches reproducible.
+directory search, or home-directory search. This makes editor and stdio launches
+reproducible.
 
 ## TOML document
 
@@ -92,22 +95,31 @@ or `error`.
 
 ## Profiles and availability
 
-| Profile | V1-06B state | Validate or serve |
+| Profile | Structural availability | `serve` behavior |
 | --- | --- | --- |
-| stateless | Available and runnable | Succeeds over stdio. |
-| sqlite | Recognised, unavailable | Returns unsupported_operation. |
-| postgresql | Recognised, unavailable | Returns unsupported_operation. |
+| stateless | Available | Starts a server-info-only stdio process. |
+| sqlite on Linux or macOS | Available | Performs the sole explicit registry migration, then starts the five-tool lifecycle server only if storage is ready. |
+| sqlite on Windows | Unavailable | Rejected before server construction. |
+| postgresql | Unavailable | Rejected before server construction. |
 
 Persistent profiles require an explicit printable `principal_id` of at most 128
 characters. Stateless mode may omit
 it. This remains true when `config show` inspects an unavailable persistent
-profile. AIPCS does not derive an identity from the operating-system user, host,
-or current directory.
+profile. AIPCS does not derive it from the operating-system user, host, current
+directory, or MCP client. It is an opaque local process principal, not an
+authentication or tenancy mechanism.
 
-An unavailable profile is not connected, ready, or serving. It does not change
-server-info, construct a driver, or create storage. SQLite's private adapter
-may be exercised only by internal composition/tests; the profile remains
-unavailable in this slice.
+The reports' `available` and `runnable` fields state structural profile support,
+not live store readiness. Missing parents, unsafe permissions, inaccessible
+locations, database incompatibility, and migration state are deliberately not
+probed by configuration commands. They can only cause `serve` to fail safely
+before MCP starts.
+
+For a SQLite process, either supply an absolute `sqlite_data_root` or use the
+redacted platform default described above. The root is a local POSIX directory;
+use a single active writer and do not treat the profile as network-filesystem,
+multi-writer, or Windows support. PostgreSQL fields remain recognised only for
+future configuration compatibility and do not select an adapter.
 
 ## Safe reports and failures
 
@@ -117,21 +129,27 @@ configured/not-configured booleans, and field source labels. It never prints
 principal values, file names, paths, DSN-reference names, credentials, endpoints,
 raw TOML, or untrusted environment values.
 
-`config validate` succeeds only for a structurally valid runnable profile. Invalid
-configuration returns the existing `validation_failed` error envelope. Listener
-requests return `transport_not_supported`. Unavailable profiles return
-`unsupported_operation`. Failures are one public envelope on stderr and return
-exit status 2; successful config commands return one JSON success envelope on
-stdout and exit 0.
+`config validate` succeeds only for a structurally valid runnable profile.
+Invalid configuration returns the existing `validation_failed` error envelope.
+Listener requests return `transport_not_supported`; unavailable Windows SQLite
+and PostgreSQL profiles return `unsupported_operation`. Failures are one public
+envelope on stderr and return exit status 2; successful config commands return
+one JSON success envelope on stdout and exit 0. A storage/startup failure from
+`serve` is one bounded `internal_error` envelope on stderr; it does not start
+MCP or expose a path, database name, principal, driver, or migration detail.
 
 There is no dotenv loading, configuration inheritance, include mechanism,
 secret-file support, remote configuration, profile plugin system, automatic
-reload, database probe, or directory creation.
+reload, database probe by configuration commands, or directory creation by
+`config show`/`config validate`. There is no database URL, raw SQL, adapter
+plugin, retry, or standalone administration command.
 
 ## Development use
 
-The checkout command below is a development smoke only, not a released install:
+The checkout commands below are development invocations, not a released install:
 
-    uvx --from . aipcs config validate
+    uv run aipcs config validate
+    uv run aipcs serve --profile sqlite --principal-id local-agent \
+      --sqlite-data-root /absolute/operator-owned/aipcs-data
 
 See [security](security.md) and [compatibility](compatibility.md).

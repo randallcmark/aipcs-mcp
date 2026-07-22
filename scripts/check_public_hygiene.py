@@ -98,8 +98,11 @@ def content_violations(relative: PurePosixPath, data: bytes) -> list[str]:
     if data.startswith(SQLITE_MAGIC):
         return ["SQLite file magic"]
     if b"\0" in data:
-        return []
-    text = data.decode("utf-8", errors="replace")
+        return ["unexpected binary content"]
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return ["unexpected non-UTF-8 content"]
     problems: list[str] = []
     if CREDENTIAL.search(text):
         problems.append("likely credential")

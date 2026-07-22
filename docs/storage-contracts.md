@@ -1,13 +1,21 @@
 # Storage contracts
 
-V1-06A defines pure, backend-neutral contracts. V1-06B adds a private SQLite
-registry reference adapter behind those unchanged contracts; it does not make a
-storage profile runnable or add a public storage capability report.
+The storage layer defines pure, backend-neutral contracts. The current SQLite
+registry adapter implements the registry portion and is composed only by the
+local stdio runtime. It is not a general adapter plugin API, a service-store
+implementation, or a PostgreSQL implementation.
 
 The reference adapter is certified only for local POSIX filesystems on Linux
 and macOS, one host and one active writer. It uses a descriptor-anchored `0700`
 root and `0600` registry file, rejects WAL/SHM, allows native rollback-journal
-recovery only during explicit migration, and fails closed on Windows.
+recovery only during the explicit startup migration, and fails closed on
+Windows. It is not supported on network filesystems or as a multi-writer store.
+
+`aipcs serve --profile sqlite` is the sole public composition path: it obtains
+the opaque location from resolved configuration, calls `migrate()` once before
+MCP construction, and proceeds only at the exact ready revision. `config show`
+and `config validate` do not construct an adapter, open the registry, create a
+directory, or migrate. A failed startup does not start a partial MCP server.
 
 `ServiceStoreLocator` is an opaque logical identifier for a future
 materialised service store. It is exactly `svc_` followed by the lowercase
@@ -32,8 +40,9 @@ migration does not repair either state. Revisions are not package, MCP,
 manifest, schema, record, or export versions.
 
 `inspect_migration()` is observation only. `migrate()` is the sole explicit
-initialisation or layout-changing operation. Their concrete I/O and safe
-operator diagnostics are deferred to the adapter slices.
+initialisation or layout-changing operation. The public runtime uses migration
+only at SQLite startup; no tool call retries or opportunistically changes the
+layout. Safe operator diagnostics remain intentionally bounded.
 
 Registry unit-of-work callers close every successfully acquired unit exactly
 once. A successful commit or rollback ends its transaction attempt, then close
@@ -49,9 +58,15 @@ They must not retain a connection-backed cursor or a mutable reference to
 durable adapter state after the unit of work closes.
 
 A registry adapter's information includes `registry`, and its migration state
-is always for that component. A service-store catalog declares its backend and
-`service_store` ownership; allocated locators use that backend, foreign-backend
-locators fail safely, and its migration state is always service-store state.
+is always for that component. The current public lifecycle persists registry
+metadata, idempotency outcomes, and metadata-only audit information within one
+unit of work. Audit data and principal identity are never projected by MCP.
+
+A service-store catalog would declare its backend and `service_store` ownership;
+allocated locators would use that backend, foreign-backend locators would fail
+safely, and its migration state would always be service-store state. No
+service-store catalog, allocation, materialisation, record operation,
+PostgreSQL adapter, repair, recovery, or cross-store transaction exists yet.
 
 The reusable test-only conformance cases in `tests/storage_contracts/` assert
 application behaviour and UoW traces without SQL, storage layout, connection,

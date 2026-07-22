@@ -38,6 +38,8 @@ def test_path_and_binary_probes_are_rejected() -> None:
     assert "local data path" in reasons("examples/.data-old/note.txt")
     assert "database or likely credential filename" in reasons("state/service.sqlite")
     assert "SQLite file magic" in reasons("state/cache.bin", b"SQLite format 3" + b"\x00")
+    assert "unexpected binary content" in reasons("assets/archive.bin", b"PK\x03\x04\x00")
+    assert "unexpected non-UTF-8 content" in reasons("assets/opaque.bin", b"\xff\xfe")
     assert "captured transcript path" in reasons("captures/agent-session.txt")
     assert "private agent/archive/plan path" in reasons("docs/exec-plans/plan.md")
     assert "private preservation path" in reasons("docs/private-artifact-report.md")

@@ -26,6 +26,7 @@ def test_server_info_is_safe_and_capability_versioned() -> None:
             "manifest_v2_validation": True,
             "legacy_v1_importer": True,
             "stdio_preflight": True,
+            "registry_lifecycle": False,
         },
         "operational_statuses": ["active"],
     }

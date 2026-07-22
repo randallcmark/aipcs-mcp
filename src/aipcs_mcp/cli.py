@@ -9,6 +9,8 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import anyio
+
 from .configuration.errors import to_contract_error
 from .configuration.models import ConfigOverrides, ResolvedConfiguration
 from .configuration.reporting import (
@@ -17,8 +19,9 @@ from .configuration.reporting import (
 )
 from .configuration.resolver import require_runnable, resolve_configuration
 from .contracts import validate_stdio_only
-from .errors import AipcsContractError, success
-from .mcp_server import create_server
+from .errors import AipcsContractError, ErrorCode, success
+from .mcp_server import run_stdio
+from .runtime import compose_server
 
 
 def _add_configuration_options(parser: argparse.ArgumentParser) -> None:
@@ -26,7 +29,9 @@ def _add_configuration_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--profile", help="Execution profile override.")
     parser.add_argument("--transport", help="Public v1 accepts stdio only.")
     parser.add_argument("--principal-id", help="Principal identity override.")
-    parser.add_argument("--sqlite-data-root", help="Future SQLite data-root descriptor.")
+    parser.add_argument(
+        "--sqlite-data-root", help="SQLite data-root override (redacted in output)."
+    )
     parser.add_argument("--postgres-dsn-env", help="Future PostgreSQL DSN environment reference.")
     parser.add_argument("--log-level", help="Stderr logging level override.")
 
@@ -115,16 +120,28 @@ def _configure_stderr_logging(config: ResolvedConfiguration) -> None:
     """Apply the resolved runtime threshold while keeping protocol stdout untouched."""
 
     level = getattr(logging, config.log_level.upper())
-    logging.basicConfig(level=level, stream=sys.stderr, force=True)
-    logging.getLogger().setLevel(level)
+    root = logging.getLogger()
+    root.handlers[:] = [logging.NullHandler()]
+    root.setLevel(logging.CRITICAL + 1)
+    logger = logging.getLogger("aipcs_mcp")
+    logger.handlers[:] = [logging.StreamHandler(sys.stderr)]
+    logger.handlers[0].setLevel(level)
+    logger.setLevel(level)
+    logger.propagate = False
 
 
 def _run_serve(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     _preflight(args, environ)
     resolved = _resolve(args, runnable=True, environ=environ)
     _configure_stderr_logging(resolved)
-    server = create_server()
-    server.run(transport="stdio")
+    try:
+        server = compose_server(resolved)
+        anyio.run(run_stdio, server)
+    except Exception:
+        _write_contract_error(
+            AipcsContractError(ErrorCode.INTERNAL_ERROR, "Server could not be started safely.")
+        )
+        return 2
     return 0
 
 
