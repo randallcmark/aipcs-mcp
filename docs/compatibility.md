@@ -62,13 +62,45 @@ registry state; public materialisation remains gated on V1-08 recoverable
 cross-store coordination. See the [private relational
 boundary](private-relational-boundary.md).
 
+## Frozen future V1-08 contract
+
+This section freezes planned compatibility meaning; it does not add a current tool, capability, or
+storage path. Future materialise requires `service_id`, `expected_service_revision`,
+`expected_schema_version`, and `idempotency_key`. Future evolve requires those inputs and one
+complete, deeply validated adjacent manifest-v2 target, never SQL, a schema delta, or migration
+history prose. `schema_version`, future server-owned `service_revision`, later per-record
+`record_version`, and adapter migration revisions remain independent.
+
+For either future operation, validation/detachment and the canonical principal-scoped fingerprint
+precede lookup of the current expected revisions. An existing exact completed claim replays its
+stored result even after the operation incremented `service_revision`; a changed-fingerprint claim
+conflicts; an exact prepared claim resumes reconciliation; and an exact recovery-required claim
+returns the same terminal bounded result. Only a new key may check current revisions and prepare a
+durable intent. The registry remains the only current manifest/recovery authority: an immutable
+target snapshot is operation evidence, not a service-store ledger or second manifest.
+
+For this frozen future contract, malformed input, unsupported transition, stale expected revision,
+changed-fingerprint reuse, recovery-required, storage-unavailable, and generic internal failure are
+non-retryable. Storage-busy, different-key operation-in-progress, and operation-uncertain are
+retryable. An exact same-key prepared claim resumes reconciliation rather than returning
+operation-in-progress.
+
+V1-08E, not this current release, will expose the bounded projection
+`recovery_state: clear | pending | recovery_required` with `service_revision`. It will expose no
+operation identifier, fingerprint, idempotency key, target snapshot, storage path, fault text, or
+repair procedure. `recovery_required` remains non-auto-repaired through V1-08; verified
+export/import/restore or explicit purge belong to V1-10, and the administration CLI belongs to
+V1-11.
+
 ## Not yet compatible
 
 The project does not provide PostgreSQL, public service-store allocation or
 materialisation, records, branches, search, export/import, recovery,
 multi-writer guarantees, administration CLI, remote transport, or deployment
-interface. Their future compatibility commitments will be documented when they
-exist.
+interface. V1-08 is sequenced as contract (A), durable intent (B), SQLite WAL/busy policy (C),
+internal coordinator (D), public lifecycle (E), record runtime (F), and discovery/topology (G);
+PostgreSQL begins only after V1-08G. Their future compatibility commitments will be documented when
+they exist.
 
 The contract identifier is currently `1.0`. Although earlier planning described
 it as SemVer, no version increment policy is defined yet. Support windows,

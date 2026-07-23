@@ -1315,6 +1315,417 @@ def run_installed_relational_contract_smoke(
     )
 
 
+def _lifecycle_contract_smoke_program() -> str:
+    """Standalone installed proof for the pure V1-08A lifecycle contract."""
+
+    return r'''
+from __future__ import annotations
+
+from copy import deepcopy
+from itertools import product
+from pathlib import Path
+import site
+import sqlite3
+from uuid import UUID
+
+cwd = Path.cwd()
+before = tuple(cwd.iterdir())
+assert before == (), before
+
+import aipcs_mcp.lifecycle as lifecycle_module
+import aipcs_mcp.manifest_v2 as manifest_module
+from aipcs_mcp.lifecycle import (
+    DeferredResult,
+    DomainObservation,
+    EvolveCommand,
+    EvolveRecoveryObservation,
+    FoundationObservation,
+    LifecycleAdmission,
+    LifecycleAdmissionStatus,
+    LifecycleClaim,
+    LifecycleClaimStatus,
+    LifecycleContractError,
+    LifecyclePhase,
+    LifecycleResultCategory,
+    MaterialiseCommand,
+    MaterialiseRecoveryObservation,
+    RecoveryAction,
+    canonical_lifecycle_json,
+    lifecycle_fingerprint,
+    lifecycle_result_retryable,
+    plan_recovery,
+    prepare_intent,
+)
+from aipcs_mcp.manifest_v2 import ManifestV2
+
+sites = tuple(Path(value).resolve() for value in site.getsitepackages())
+for module in (lifecycle_module, manifest_module):
+    origin = Path(module.__file__).resolve()
+    assert any(origin.is_relative_to(value) for value in sites), origin
+
+def blocked_connect(*_args, **_kwargs):
+    raise AssertionError("pure lifecycle contract must not open SQLite")
+
+sqlite3.connect = blocked_connect
+
+managed = [
+    {"name": "id", "type": "uuid", "required": True, "primary_key": True},
+    {"name": "owner_id", "type": "string", "required": True},
+    {"name": "created_at", "type": "datetime", "required": True},
+    {"name": "updated_at", "type": "datetime", "required": True},
+    {"name": "created_via", "type": "string", "required": True},
+    {"name": "record_version", "type": "integer", "required": True},
+]
+
+def manifest(version=1):
+    payload = {
+        "manifest_version": 2,
+        "schema_version": version,
+        "entities": [{"name": "project", "attributes": deepcopy(managed) + [
+            {"name": "title", "type": "string", "required": True},
+        ]}],
+        "relationships": [],
+        "indices": [{"name": "project_owner_idx", "entity": "project", "fields": ["owner_id"]}],
+        "query_patterns": ["Find projects by owner."],
+        "discovery_facets": [{"entity": "project", "field": "owner_id"}],
+        "retrieval_guidance": "Use exact owner filters before listing.",
+        "migration_history": [
+            {
+                "from_schema_version": prior,
+                "to_schema_version": prior + 1,
+                "operations": [f"advance schema to version {prior + 1}"],
+            }
+            for prior in range(1, version)
+        ],
+    }
+    return ManifestV2.model_validate(payload)
+
+service_id = UUID("5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23")
+materialise = MaterialiseCommand(
+    principal_id="principal-a",
+    created_via="mcp",
+    service_id=service_id,
+    expected_service_revision=7,
+    expected_schema_version=1,
+    idempotency_key="materialise-1",
+)
+target = manifest(2)
+evolve = EvolveCommand(
+    principal_id="principal-a",
+    created_via="mcp",
+    service_id=service_id,
+    expected_service_revision=8,
+    expected_schema_version=1,
+    idempotency_key="evolve-1",
+    target_manifest=target,
+)
+
+known_json = (
+    '{"created_via":"mcp","expected_schema_version":1,'
+    '"expected_service_revision":7,"kind":"materialise",'
+    '"principal":"principal-a","service_id":"5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23"}'
+)
+assert canonical_lifecycle_json(materialise) == known_json
+assert lifecycle_fingerprint(materialise) == "49f31d4f8ae992243644fc2aa7bcb8eadabeb03c74040dae4d1b7b96bd679839"
+known_evolve_json = (
+    '{"created_via":"mcp","expected_schema_version":1,'
+    '"expected_service_revision":8,"kind":"evolve",'
+    '"principal":"principal-a","service_id":"5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23",'
+    '"target_manifest":{"discovery_facets":[{"entity":"project","field":"owner_id"}],'
+    '"entities":[{"attributes":['
+    '{"allowed_values":null,"description":null,"name":"id","primary_key":true,'
+    '"required":true,"retrieval_mode":null,"type":"uuid"},'
+    '{"allowed_values":null,"description":null,"name":"owner_id","primary_key":false,'
+    '"required":true,"retrieval_mode":null,"type":"string"},'
+    '{"allowed_values":null,"description":null,"name":"created_at","primary_key":false,'
+    '"required":true,"retrieval_mode":null,"type":"datetime"},'
+    '{"allowed_values":null,"description":null,"name":"updated_at","primary_key":false,'
+    '"required":true,"retrieval_mode":null,"type":"datetime"},'
+    '{"allowed_values":null,"description":null,"name":"created_via","primary_key":false,'
+    '"required":true,"retrieval_mode":null,"type":"string"},'
+    '{"allowed_values":null,"description":null,"name":"record_version","primary_key":false,'
+    '"required":true,"retrieval_mode":null,"type":"integer"},'
+    '{"allowed_values":null,"description":null,"name":"title","primary_key":false,'
+    '"required":true,"retrieval_mode":null,"type":"string"}],'
+    '"description":null,"name":"project"}],"indices":[{"entity":"project",'
+    '"fields":["owner_id"],"name":"project_owner_idx","unique":false}],"manifest_version":2,'
+    '"migration_history":[{"from_schema_version":1,"operations":['
+    '"advance schema to version 2"],"to_schema_version":2}],"query_patterns":['
+    '"Find projects by owner."],"relationships":[],'
+    '"retrieval_guidance":"Use exact owner filters before listing.","schema_version":2}}'
+)
+assert canonical_lifecycle_json(evolve) == known_evolve_json
+assert lifecycle_fingerprint(evolve) == "b22745fa5b9825dba2cca535c649931cda60da46f160d468814269d7ad9bad56"
+
+original_fingerprint = lifecycle_fingerprint(evolve)
+object.__setattr__(target, "schema_version", 1)
+target.entities[0].attributes[-1].name = "mutated_title"
+assert evolve.target_manifest.schema_version == 2
+assert evolve.target_manifest.entities[0].attributes[-1].name == "title"
+exposed_target = evolve.target_manifest
+exposed_target.entities[0].attributes[-1].name = "forged_title"
+assert evolve.target_manifest.entities[0].attributes[-1].name == "title"
+assert lifecycle_fingerprint(evolve) == original_fingerprint
+
+for forged in (
+    ManifestV2.model_construct(manifest_version=2, schema_version="bad"),
+    target,
+):
+    try:
+        EvolveCommand(
+            principal_id="principal-a",
+            created_via="mcp",
+            service_id=service_id,
+            expected_service_revision=8,
+            expected_schema_version=1,
+            idempotency_key="forged",
+            target_manifest=forged,
+        )
+    except LifecycleContractError:
+        pass
+    else:
+        raise AssertionError("forged or mutable target manifest was accepted")
+
+initial = manifest(1)
+materialise_intent = prepare_intent(materialise, initial)
+evolve_intent = prepare_intent(evolve, manifest(2))
+completed = materialise_intent.with_phase(LifecyclePhase.COMPLETED)
+recovery_required = materialise_intent.with_phase(LifecyclePhase.RECOVERY_REQUIRED)
+evolve_completed = evolve_intent.with_phase(LifecyclePhase.COMPLETED)
+evolve_recovery_required = evolve_intent.with_phase(LifecyclePhase.RECOVERY_REQUIRED)
+
+assert LifecycleClaim(LifecycleClaimStatus.NEW).intent is None
+assert LifecycleClaim(LifecycleClaimStatus.CONFLICT).intent is None
+assert LifecycleClaim(LifecycleClaimStatus.REPLAY_COMPLETE, completed).intent is completed
+assert LifecycleClaim(LifecycleClaimStatus.RESUME_PREPARED, materialise_intent).intent is materialise_intent
+assert LifecycleClaim(LifecycleClaimStatus.RECOVERY_REQUIRED, recovery_required).intent is recovery_required
+assert LifecycleAdmission(LifecycleAdmissionStatus.PREPARED, materialise_intent).intent is materialise_intent
+assert LifecycleAdmission(LifecycleAdmissionStatus.OPERATION_IN_PROGRESS, materialise_intent).intent is materialise_intent
+assert LifecycleAdmission(LifecycleAdmissionStatus.RECOVERY_REQUIRED, recovery_required).intent is recovery_required
+
+retryability = {
+    LifecycleResultCategory.MALFORMED_INPUT: False,
+    LifecycleResultCategory.UNSUPPORTED_TRANSITION: False,
+    LifecycleResultCategory.STALE_REVISION: False,
+    LifecycleResultCategory.CHANGED_FINGERPRINT: False,
+    LifecycleResultCategory.OPERATION_IN_PROGRESS: True,
+    LifecycleResultCategory.RECOVERY_REQUIRED: False,
+    LifecycleResultCategory.STORAGE_BUSY: True,
+    LifecycleResultCategory.OPERATION_UNCERTAIN: True,
+    LifecycleResultCategory.STORAGE_UNAVAILABLE: False,
+    LifecycleResultCategory.INTERNAL_FAILURE: False,
+}
+assert set(retryability) == set(LifecycleResultCategory)
+for category, retryable in retryability.items():
+    assert lifecycle_result_retryable(category) is retryable
+try:
+    lifecycle_result_retryable("storage_busy")
+except LifecycleContractError:
+    pass
+else:
+    raise AssertionError("untyped lifecycle result category was accepted")
+
+def assert_plan(intent, observation, action, deferred=None):
+    result = plan_recovery(intent, observation)
+    assert result.action is action
+    assert result.deferred_result is deferred
+    if action is RecoveryAction.RECOVERY_REQUIRED:
+        category = LifecycleResultCategory.RECOVERY_REQUIRED
+    elif action is RecoveryAction.DEFER_OBSERVATION:
+        category = {
+            DeferredResult.STORAGE_BUSY: LifecycleResultCategory.STORAGE_BUSY,
+            DeferredResult.OPERATION_UNCERTAIN: LifecycleResultCategory.OPERATION_UNCERTAIN,
+            DeferredResult.STORAGE_UNAVAILABLE: LifecycleResultCategory.STORAGE_UNAVAILABLE,
+        }[deferred]
+    else:
+        category = None
+    assert result.result_category is category
+    assert result.retryable is (category in {
+        LifecycleResultCategory.STORAGE_BUSY,
+        LifecycleResultCategory.OPERATION_UNCERTAIN,
+    })
+
+def deferred_expected(value):
+    return {
+        FoundationObservation.BUSY: DeferredResult.STORAGE_BUSY,
+        FoundationObservation.UNCERTAIN: DeferredResult.OPERATION_UNCERTAIN,
+        FoundationObservation.UNAVAILABLE: DeferredResult.STORAGE_UNAVAILABLE,
+        DomainObservation.BUSY: DeferredResult.STORAGE_BUSY,
+        DomainObservation.UNCERTAIN: DeferredResult.OPERATION_UNCERTAIN,
+        DomainObservation.UNAVAILABLE: DeferredResult.STORAGE_UNAVAILABLE,
+    }.get(value)
+
+def materialise_valid(phase, foundation, target):
+    return (
+        phase is not LifecyclePhase.PREPARED
+        and foundation is FoundationObservation.NOT_OBSERVED
+        and target is DomainObservation.NOT_OBSERVED
+    ) or (
+        phase is LifecyclePhase.PREPARED
+        and foundation is FoundationObservation.READY
+        and target is not DomainObservation.NOT_OBSERVED
+    ) or (
+        phase is LifecyclePhase.PREPARED
+        and foundation in {
+            FoundationObservation.UNINITIALISED,
+            FoundationObservation.DIRTY,
+            FoundationObservation.INCOMPATIBLE,
+            FoundationObservation.BUSY,
+            FoundationObservation.UNAVAILABLE,
+            FoundationObservation.UNCERTAIN,
+        }
+        and target is DomainObservation.NOT_OBSERVED
+    )
+
+def materialise_expected(phase, foundation, target):
+    if phase is LifecyclePhase.COMPLETED:
+        return RecoveryAction.REPLAY_COMPLETE, None
+    if phase is LifecyclePhase.RECOVERY_REQUIRED:
+        return RecoveryAction.RECOVERY_REQUIRED, None
+    deferred = deferred_expected(foundation) or deferred_expected(target)
+    if deferred is not None:
+        return RecoveryAction.DEFER_OBSERVATION, deferred
+    if foundation is FoundationObservation.UNINITIALISED:
+        return RecoveryAction.PREPARE_FOUNDATION, None
+    if foundation is FoundationObservation.READY:
+        if target is DomainObservation.UNMATERIALISED:
+            return RecoveryAction.APPLY_INITIAL_SCHEMA, None
+        if target is DomainObservation.READY:
+            return RecoveryAction.FINALIZE_REGISTRY, None
+    return RecoveryAction.RECOVERY_REQUIRED, None
+
+materialise_intents = {
+    LifecyclePhase.PREPARED: materialise_intent,
+    LifecyclePhase.COMPLETED: completed,
+    LifecyclePhase.RECOVERY_REQUIRED: recovery_required,
+}
+materialise_valid_count = 0
+for phase, foundation, target in product(
+    LifecyclePhase, FoundationObservation, DomainObservation
+):
+    valid = materialise_valid(phase, foundation, target)
+    if not valid:
+        try:
+            MaterialiseRecoveryObservation(phase, foundation, target)
+        except LifecycleContractError:
+            continue
+        raise AssertionError("invalid materialise recovery observation was accepted")
+    materialise_valid_count += 1
+    observation = MaterialiseRecoveryObservation(phase, foundation, target)
+    assert_plan(materialise_intents[phase], observation, *materialise_expected(phase, foundation, target))
+assert materialise_valid_count == 14
+
+def evolve_valid(phase, foundation, target, source):
+    terminal = (
+        phase is not LifecyclePhase.PREPARED
+        and foundation is FoundationObservation.NOT_OBSERVED
+        and target is DomainObservation.NOT_OBSERVED
+        and source is DomainObservation.NOT_OBSERVED
+    )
+    non_ready_foundation = (
+        phase is LifecyclePhase.PREPARED
+        and foundation is not FoundationObservation.READY
+        and foundation is not FoundationObservation.NOT_OBSERVED
+        and target is DomainObservation.NOT_OBSERVED
+        and source is DomainObservation.NOT_OBSERVED
+    )
+    ready_target = phase is LifecyclePhase.PREPARED and foundation is FoundationObservation.READY
+    ready_target = ready_target and (
+        (target in {
+            DomainObservation.READY,
+            DomainObservation.BUSY,
+            DomainObservation.UNAVAILABLE,
+            DomainObservation.UNCERTAIN,
+        } and source is DomainObservation.NOT_OBSERVED)
+        or (
+            target is DomainObservation.UNMATERIALISED
+            and source in {
+                DomainObservation.UNMATERIALISED,
+                DomainObservation.BUSY,
+                DomainObservation.UNAVAILABLE,
+                DomainObservation.UNCERTAIN,
+            }
+        )
+        or (
+            target is DomainObservation.INCOMPATIBLE
+            and source in {
+                DomainObservation.READY,
+                DomainObservation.INCOMPATIBLE,
+                DomainObservation.BUSY,
+                DomainObservation.UNAVAILABLE,
+                DomainObservation.UNCERTAIN,
+            }
+        )
+    )
+    return terminal or non_ready_foundation or ready_target
+
+def evolve_expected(phase, foundation, target, source):
+    if phase is LifecyclePhase.COMPLETED:
+        return RecoveryAction.REPLAY_COMPLETE, None
+    if phase is LifecyclePhase.RECOVERY_REQUIRED:
+        return RecoveryAction.RECOVERY_REQUIRED, None
+    deferred = deferred_expected(foundation) or deferred_expected(target) or deferred_expected(source)
+    if deferred is not None:
+        return RecoveryAction.DEFER_OBSERVATION, deferred
+    if foundation is not FoundationObservation.READY:
+        return RecoveryAction.RECOVERY_REQUIRED, None
+    if target is DomainObservation.READY:
+        return RecoveryAction.FINALIZE_REGISTRY, None
+    if target is DomainObservation.INCOMPATIBLE and source is DomainObservation.READY:
+        return RecoveryAction.APPLY_TRANSITION, None
+    return RecoveryAction.RECOVERY_REQUIRED, None
+
+evolve_intents = {
+    LifecyclePhase.PREPARED: evolve_intent,
+    LifecyclePhase.COMPLETED: evolve_completed,
+    LifecyclePhase.RECOVERY_REQUIRED: evolve_recovery_required,
+}
+evolve_valid_count = 0
+for phase, foundation, target, source in product(
+    LifecyclePhase, FoundationObservation, DomainObservation, DomainObservation
+):
+    valid = evolve_valid(phase, foundation, target, source)
+    if not valid:
+        try:
+            EvolveRecoveryObservation(phase, foundation, target, source)
+        except LifecycleContractError:
+            continue
+        raise AssertionError("invalid evolve recovery observation was accepted")
+    evolve_valid_count += 1
+    observation = EvolveRecoveryObservation(phase, foundation, target, source)
+    assert_plan(
+        evolve_intents[phase], observation, *evolve_expected(phase, foundation, target, source)
+    )
+assert evolve_valid_count == 21
+
+assert tuple(cwd.iterdir()) == before
+'''
+
+
+def run_installed_lifecycle_contract_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Run the V1-08A pure-contract proof from an empty external cwd."""
+
+    client = workspace / f"{name}-lifecycle-contract-smoke.py"
+    client.write_text(_lifecycle_contract_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"{name}-lifecycle-contract-cwd"
+    cwd.mkdir(mode=0o700)
+    run_stage(
+        f"installed {name} lifecycle contract smoke",
+        [python, "-I", client],
+        cwd=cwd,
+        environment=environment,
+        timeout=SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+
+
 def run_wheel_restart_principal_smoke(
     python: Path,
     workspace: Path,
@@ -1595,6 +2006,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_lifecycle_contract_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_wheel_restart_principal_smoke(
             wheel_python,
             workspace,
@@ -1634,6 +2052,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             redaction_roots=redaction_roots,
         )
         run_installed_relational_contract_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_lifecycle_contract_smoke(
             sdist_python,
             workspace,
             "sdist",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -405,6 +406,32 @@ def test_embedded_relational_client_exercises_the_source_contract(
     exec(compile(program, "installed_relational_contract_smoke.py", "exec"), {})
 
 
+def test_embedded_lifecycle_client_exercises_the_source_contract(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    program = verifier._lifecycle_contract_smoke_program()
+    compile(program, "installed_lifecycle_contract_smoke.py", "exec")
+    assert "aipcs_mcp.lifecycle" in program
+    assert "49f31d4f8ae992243644fc2aa7bcb8eadabeb03c74040dae4d1b7b96bd679839" in program
+    assert "b22745fa5b9825dba2cca535c649931cda60da46f160d468814269d7ad9bad56" in program
+    assert "ManifestV2.model_construct" in program
+    assert "FoundationObservation.UNAVAILABLE" in program
+    assert "LifecycleResultCategory.OPERATION_IN_PROGRESS" in program
+    assert "lifecycle_result_retryable(category) is retryable" in program
+    assert "for phase, foundation, target in product(" in program
+    assert "for phase, foundation, target, source in product(" in program
+    assert "assert materialise_valid_count == 14" in program
+    assert "assert evolve_valid_count == 21" in program
+    assert "assert result.result_category is category" in program
+    assert "tuple(cwd.iterdir()) == before" in program
+
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
+    monkeypatch.setattr(sqlite3, "connect", sqlite3.connect)
+    monkeypatch.chdir(tmp_path)
+    exec(compile(program, "installed_lifecycle_contract_smoke.py", "exec"), {})
+    assert tuple(tmp_path.iterdir()) == ()
+
+
 def test_catalog_smoke_uses_each_installed_interpreter_and_external_cwd(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -523,6 +550,37 @@ def test_relational_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert all(args[1] == "-I" for _, args, _ in calls)
     assert calls[0][2] == tmp_path / "wheel-relational-contract-cwd"
     assert calls[1][2] == tmp_path / "sdist-relational-contract-cwd"
+    assert calls[0][2] != calls[1][2]
+
+
+def test_lifecycle_smoke_uses_each_installed_interpreter_and_external_cwd(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name in ("wheel", "sdist"):
+        verifier.run_installed_lifecycle_contract_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [label for label, _, _ in calls] == [
+        "installed wheel lifecycle contract smoke",
+        "installed sdist lifecycle contract smoke",
+    ]
+    assert calls[0][1][0].endswith("wheel-venv/bin/python")
+    assert calls[1][1][0].endswith("sdist-venv/bin/python")
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][2] == tmp_path / "wheel-lifecycle-contract-cwd"
+    assert calls[1][2] == tmp_path / "sdist-lifecycle-contract-cwd"
     assert calls[0][2] != calls[1][2]
 
 

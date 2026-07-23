@@ -40,6 +40,15 @@ that storage is unsafe, dirty, incompatible, newer, or not ready. Do not use
 this boundary as a network-filesystem, multi-writer, remote, or PostgreSQL
 deployment mechanism.
 
+V1-08A freezes a future storage-policy boundary without changing this current behavior. V1-08C must
+replace the rollback-journal envelope with a secured WAL/busy policy before V1-08D composes the
+cross-store coordinator: WAL and SHM sidecars must be contained regular single-link,
+same-owner, non-symlink files with adapter-controlled permissions and identity checks; only
+startup/migration owns recovery and checkpoint verification; and one bounded typed busy policy maps
+to a safe retryable result. WAL does not extend support to network filesystems or Windows SQLite.
+V1-08D must rerun its full coordinator reconciliation/fault matrix under that final policy before
+V1-08E can expose lifecycle operations.
+
 Filesystem validation is a local same-effective-user boundary, not isolation
 from a malicious process running as that user. Descriptor-anchored operations
 reject unsafe ancestors, containers, links, file types, modes, sidecars, and
@@ -75,6 +84,18 @@ The opaque `svc_` locator namespace is a non-secret logical identifier.
 Physical data-root and database paths remain private: they are not locator
 fields and must not appear in responses, capabilities, errors, logs, audit
 records, or representations.
+
+When V1-08E later adds lifecycle recovery projection, it may expose only
+`service_revision` and `recovery_state: clear | pending | recovery_required`. It must not expose
+an idempotency key, fingerprint, operation identifier, target snapshot, phase timestamp, fault
+text, repair procedure, SQL, locator, path, principal, or audit content. A recovery-required state
+is deterministic and non-auto-repaired through V1-08; no repair command is implied.
+
+The future error envelope freezes retryability without exposing backend detail: malformed input,
+unsupported transition, stale expected revision, changed-fingerprint reuse, recovery-required,
+storage-unavailable, and generic internal failure are non-retryable; storage-busy, different-key
+operation-in-progress, and operation-uncertain are retryable. An exact same-key prepared claim
+resumes reconciliation rather than returning operation-in-progress.
 
 ## Test data and operational boundary
 

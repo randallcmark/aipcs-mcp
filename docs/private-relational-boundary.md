@@ -50,6 +50,21 @@ external deletion of all domain objects is consequently indistinguishable from
 never materialising them; partial deletion remains incompatible. Do not try to
 repair or infer history from this seam.
 
+V1-08A freezes the future coordinator consequence without composing it here. The registry holds
+the sole current manifest and may hold one immutable admitted target snapshot as lifecycle evidence;
+the service database remains free of a manifest, schema-version row, fingerprint, operation record,
+provenance seal, or domain ledger. Therefore, within the contained same-operating-system-owner store
+boundary, an exact physical target that predates a prepared intent is indistinguishable from a
+target committed immediately before a crash and may be adopted by target-first finalisation. This
+does not permit repair: any partial, extra, altered, incompatible, or unexpectedly deleted state is
+recovery-required. The rule is future coordinator behavior, not a direct-private-seam workflow.
+
+The future coordinator also preserves the frozen result contract: malformed input, unsupported
+transition, stale expected revision, changed-fingerprint reuse, recovery-required,
+storage-unavailable, and generic internal failure are non-retryable; storage-busy, different-key
+operation-in-progress, and operation-uncertain are retryable. An exact same-key prepared claim
+resumes reconciliation rather than returning operation-in-progress.
+
 ## Public boundary
 
 The public runtime starts only the registry adapter. A ready SQLite server
@@ -60,6 +75,8 @@ state reporting remain unavailable.
 
 V1-08 owns the missing lifecycle work: cross-store materialisation/evolution
 idempotency and revision coordination, registry/store reconciliation, recovery,
-and eventual public composition.
+and eventual public composition. Its sequence is lifecycle contract (A), durable intent (B),
+SQLite WAL/busy policy (C), internal coordinator (D), public lifecycle composition (E), generic
+records (F), and structured discovery/topology (G); PostgreSQL begins only after V1-08G.
 Until then, use the supported public lifecycle only and treat this private seam
 as an internal test and release boundary.

@@ -42,17 +42,21 @@ than assuming a rollback erased it.
 
 ## Independent versions
 
-Three version dimensions remain separate:
+The current application keeps version dimensions separate. The frozen V1-08A contract extends that
+separation without adding a current runtime path:
 
-- Schema version describes the agent-defined manifest and its supported
-  evolution.
-- Adapter migration version describes physical storage layout and adapter-owned
-  migration state.
-- Operation state describes the future progress and recovery status of work that
-  crosses independently committed stores.
+- `manifest_version` describes the schema-document interpretation; normal public design input is
+  manifest v2.
+- `schema_version` describes agent-defined additive evolution and is a future lifecycle concurrency
+  input, not a manifest or MCP compatibility version.
+- A future server-owned `service_revision` is the lifecycle compare-and-swap revision; a successful
+  design/materialise/evolve/operational transition increments it once, while exact replay does not.
+- A future `record_version` is a per-record mutation revision reserved for V1-08F.
+- Adapter migration revisions describe physical storage layout and adapter-owned migration state.
 
-A schema change is not an adapter migration, and neither is a substitute for a
-durable operation/recovery record.
+Future cross-store operation state (`prepared`, `completed`, or `recovery_required`) is distinct
+from all of these values. A schema change is not an adapter migration, and neither is a substitute
+for a durable operation/recovery record.
 
 The uncomposed service-store catalog demonstrates that separation: its private
 revision 1 can make adapter metadata ready without reading a manifest or
@@ -65,6 +69,30 @@ immutable, backend-neutral projection supplied by the registry-authoritative
 manifest at the point a future adapter needs comparison. No schema ledger,
 manifest copy, schema-version row, or fingerprint is introduced into a service
 store by this boundary.
+
+## Frozen future lifecycle boundary
+
+V1-08A documents, but does not compose, future materialise/evolve use cases. Materialise will
+require `service_id`, `expected_service_revision`, `expected_schema_version`, and an idempotency
+key. Evolve will require the same inputs plus a complete, deeply validated adjacent manifest-v2
+target; it will not accept SQL, a migration delta, or history prose. Admission will validate and
+detach the request, compute the principal-scoped fingerprint, and resolve any existing idempotency
+claim before reading current expected revisions. Exact completed claims replay even after their
+successful operation incremented the service revision.
+
+The future registry intent is the only cross-store recovery and transition-lock authority. It may
+retain one immutable admitted target snapshot, but that evidence never becomes a second current
+manifest. A coordinator will adopt an exact contained physical target only within the documented
+same-operating-system-owner boundary, because no domain provenance seal exists to distinguish a prior
+exact target from a crash-completed one. It must report recovery-required rather than infer or
+repair deleted, partial, extra, altered, or incompatible state. These are future V1-08B-D rules;
+they do not create a public operation, storage I/O path, or recovery command.
+
+Their frozen future result meaning is also exact: malformed input, unsupported transition, stale
+expected revision, changed-fingerprint reuse, recovery-required, storage-unavailable, and generic
+internal failure are non-retryable; storage-busy, different-key operation-in-progress, and
+operation-uncertain are retryable. An exact same-key prepared claim resumes reconciliation rather
+than returning operation-in-progress.
 
 ## Migration and serving rule
 
