@@ -10,15 +10,23 @@ from typing import Any
 from uuid import UUID
 
 from aipcs_mcp.application.models import Service
+from aipcs_mcp.application.registry_authority import (
+    ReceiptKind,
+    TransferReceipt,
+)
 from aipcs_mcp.storage.codecs import (
+    decode_result,
     decode_service,
     decode_time,
     encode_time,
-    validate_audit_row,
     validate_r2_mutation_row,
 )
 from aipcs_mcp.storage.contracts import MigrationState
 from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
+from aipcs_mcp.storage.registry_authority_codecs import (
+    validate_registry_authority_claim_row,
+    validate_transfer_receipt_row,
+)
 
 from .registry_migrations import (
     ADAPTER_ID,
@@ -35,6 +43,21 @@ from .registry_migrations import (
     INDEX_PREDICATES,
     INDEX_SIGNATURES,
     MIGRATION_ID,
+    R1_CHECK_EXPRESSION_DIGEST,
+    R1_CHECK_TOKENS,
+    R1_CHECKSUM,
+    R1_CONSTRAINT_KEYS,
+    R1_CONSTRAINT_TYPES,
+    R1_INDEX_COLLATIONS,
+    R1_INDEX_COLUMNS,
+    R1_INDEX_OPCLASSES,
+    R1_INDEX_OPTIONS,
+    R1_INDEX_PREDICATE_TOKENS,
+    R1_INDEX_PREDICATES,
+    R1_INDEX_SIGNATURES,
+    R1_MIGRATION_ID,
+    R1_SEQUENCES,
+    R1_TABLE_COLUMNS,
     SCHEMA,
     SEQUENCES,
     TABLE_COLUMNS,
@@ -42,6 +65,46 @@ from .registry_migrations import (
 )
 
 _TABLES = frozenset(TABLE_COLUMNS)
+
+
+def _expectations(revision: int) -> tuple[object, ...] | None:
+    if revision == 1:
+        return (
+            R1_TABLE_COLUMNS,
+            R1_CONSTRAINT_TYPES,
+            R1_CONSTRAINT_KEYS,
+            R1_INDEX_SIGNATURES,
+            R1_SEQUENCES,
+            R1_INDEX_COLUMNS,
+            R1_INDEX_OPTIONS,
+            R1_INDEX_OPCLASSES,
+            R1_INDEX_COLLATIONS,
+            R1_CHECK_TOKENS,
+            R1_INDEX_PREDICATE_TOKENS,
+            R1_INDEX_PREDICATES,
+            R1_CHECK_EXPRESSION_DIGEST,
+            R1_MIGRATION_ID,
+            R1_CHECKSUM,
+        )
+    if revision == TARGET_REVISION:
+        return (
+            TABLE_COLUMNS,
+            CONSTRAINT_TYPES,
+            CONSTRAINT_KEYS,
+            INDEX_SIGNATURES,
+            SEQUENCES,
+            INDEX_COLUMNS,
+            INDEX_OPTIONS,
+            INDEX_OPCLASSES,
+            INDEX_COLLATIONS,
+            CHECK_TOKENS,
+            INDEX_PREDICATE_TOKENS,
+            INDEX_PREDICATES,
+            CHECK_EXPRESSION_DIGEST,
+            MIGRATION_ID,
+            CHECKSUM,
+        )
+    return None
 
 
 def inspect_registry(connection: object) -> MigrationState:
@@ -109,21 +172,56 @@ def inspect_registry(connection: object) -> MigrationState:
             return _state(0, "incompatible")
         relation_map[row[0]] = row[1]
     revision_hint = _revision_hint(connection, relation_map)
+    expectations = _expectations(revision_hint)
+    if expectations is None:
+        return _state(revision_hint, "incompatible")
+    (
+        table_columns,
+        constraint_types,
+        constraint_keys,
+        index_signatures,
+        sequences,
+        index_columns,
+        index_options,
+        index_opclasses,
+        index_collations,
+        check_tokens,
+        index_predicate_tokens,
+        index_predicates,
+        check_expression_digest,
+        _migration_id,
+        _checksum,
+    ) = expectations
     expected_relations = {
-        **{name: "r" for name in _TABLES},
-        **{name: "i" for name in INDEX_SIGNATURES},
-        **{name: "S" for name in SEQUENCES},
+        **{name: "r" for name in table_columns},
+        **{name: "i" for name in index_signatures},
+        **{name: "S" for name in sequences},
     }
     if not schema_secure or relation_map != expected_relations:
         return _state(revision_hint, "incompatible")
-    if not _relation_acls_match(connection):
+    if not _relation_acls_match(connection, frozenset(table_columns), sequences):
         return _state(revision_hint, "incompatible")
 
-    if not _columns_match(connection):
+    if not _columns_match(connection, table_columns):
         return _state(revision_hint, "incompatible")
-    if not _constraints_match(connection):
+    if not _constraints_match(
+        connection,
+        constraint_types,
+        constraint_keys,
+        check_tokens,
+        check_expression_digest,
+    ):
         return _state(revision_hint, "incompatible")
-    if not _indexes_match(connection):
+    if not _indexes_match(
+        connection,
+        index_signatures,
+        index_columns,
+        index_options,
+        index_opclasses,
+        index_collations,
+        index_predicate_tokens,
+        index_predicates,
+    ):
         return _state(revision_hint, "incompatible")
 
     meta = _execute(
@@ -147,29 +245,38 @@ def inspect_registry(connection: object) -> MigrationState:
         return _state(0, "incompatible")
     if dirty:
         return _state(revision, "dirty")
-    if revision != TARGET_REVISION:
-        status = "outdated" if 0 < revision < TARGET_REVISION else "incompatible"
-        return _state(revision, status)
+    if revision != revision_hint:
+        return _state(revision, "incompatible")
 
     history = _execute(
         connection,
         'SELECT "component","revision","migration_id","checksum","applied_at" '
         'FROM "aipcs_registry"."aipcs_registry_migration" ORDER BY "revision"',
     ).fetchall()
-    if len(history) != 1 or len(history[0]) != 5:
+    expected_history = 1 if revision == 1 else TARGET_REVISION
+    if len(history) != expected_history or any(len(row) != 5 for row in history):
         return _state(revision, "incompatible")
-    h_component, h_revision, migration_id, checksum, applied_at = history[0]
-    try:
-        decode_time(_canonical_time(applied_at))
-    except StorageMigrationError:
-        return _state(revision, "incompatible")
-    if (
-        h_component != "registry"
-        or h_revision != TARGET_REVISION
-        or migration_id != MIGRATION_ID
-        or checksum != CHECKSUM
+    expected_history_rows = ((1, R1_MIGRATION_ID, R1_CHECKSUM),)
+    if revision == TARGET_REVISION:
+        expected_history_rows += ((TARGET_REVISION, MIGRATION_ID, CHECKSUM),)
+    for row, (expected_revision, expected_migration_id, expected_checksum) in zip(
+        history, expected_history_rows, strict=True
     ):
-        return _state(revision, "incompatible")
+        h_component, h_revision, migration_id, checksum, applied_at = row
+        try:
+            decode_time(_canonical_time(applied_at))
+        except StorageMigrationError:
+            return _state(revision, "incompatible")
+        if (
+            h_component != "registry"
+            or h_revision != expected_revision
+            or migration_id != expected_migration_id
+            or checksum != expected_checksum
+        ):
+            return _state(revision, "incompatible")
+
+    if revision != TARGET_REVISION:
+        return _state(revision, "outdated")
 
     try:
         _validate_registry_rows(connection)
@@ -210,7 +317,9 @@ def canonical_rows(cursor: object, rows: object) -> list[dict[str, Any]]:
     return [canonical_row(cursor, row) for row in rows]
 
 
-def _columns_match(connection: object) -> bool:
+def _columns_match(
+    connection: object, table_columns: Mapping[str, tuple[tuple[object, ...], ...]]
+) -> bool:
     rows = _execute(
         connection,
         "SELECT c.relname,a.attname,"
@@ -231,12 +340,18 @@ def _columns_match(connection: object) -> bool:
         actual.setdefault(row[0], []).append(tuple(row[1:]))
     expected = {
         table: tuple((*column, "C" if column[1] == "text" else "") for column in columns)
-        for table, columns in TABLE_COLUMNS.items()
+        for table, columns in table_columns.items()
     }
     return {name: tuple(values) for name, values in actual.items()} == expected
 
 
-def _constraints_match(connection: object) -> bool:
+def _constraints_match(
+    connection: object,
+    constraint_types: Mapping[str, Mapping[str, str]],
+    constraint_keys: Mapping[str, tuple[object, ...]],
+    check_tokens: Mapping[str, tuple[str, ...]],
+    check_expression_digest: str,
+) -> bool:
     rows = _constraint_evidence(connection)
     names: set[str] = set()
     check_expressions: dict[str, str] = {}
@@ -273,7 +388,7 @@ def _constraints_match(connection: object) -> bool:
             return False
         names.add(name)
         if kind == "c":
-            tokens = CHECK_TOKENS.get(name)
+            tokens = check_tokens.get(name)
             if (
                 tokens is None
                 or type(expression) is not str
@@ -282,7 +397,7 @@ def _constraints_match(connection: object) -> bool:
                 return False
             check_expressions[name] = expression
             continue
-        expected = CONSTRAINT_KEYS.get(name)
+        expected = constraint_keys.get(name)
         if expected is None:
             return False
         (
@@ -312,15 +427,17 @@ def _constraints_match(connection: object) -> bool:
         elif reference_schema is not None:
             return False
     expected_names = {
-        name for constraints in CONSTRAINT_TYPES.values() for name in constraints
+        name for constraints in constraint_types.values() for name in constraints
     }
+    if names != expected_names:
+        return False
     expression_digest = hashlib.sha256(
         "\n".join(
             f"{name}\0{expression}"
             for name, expression in sorted(check_expressions.items())
         ).encode()
     ).hexdigest()
-    return names == expected_names and expression_digest == CHECK_EXPRESSION_DIGEST
+    return expression_digest == check_expression_digest
 
 
 def _constraint_evidence(connection: object) -> list[tuple[object, ...]]:
@@ -356,7 +473,16 @@ def _constraint_evidence(connection: object) -> list[tuple[object, ...]]:
     return [tuple(row) for row in rows]
 
 
-def _indexes_match(connection: object) -> bool:
+def _indexes_match(
+    connection: object,
+    index_signatures: Mapping[str, tuple[str, bool, bool, bool]],
+    index_columns: Mapping[str, tuple[str, ...]],
+    index_options: Mapping[str, tuple[int, ...]],
+    index_opclasses: Mapping[str, tuple[str, ...]],
+    index_collations: Mapping[str, tuple[str, ...]],
+    index_predicate_tokens: Mapping[str, tuple[str, ...]],
+    index_predicates: Mapping[str, str],
+) -> bool:
     rows = _execute(
         connection,
         """SELECT t.relname,i.relname,x.indisunique,x.indisprimary,
@@ -404,28 +530,30 @@ def _indexes_match(connection: object) -> bool:
         ):
             return False
         if (
-            _catalog_columns(row[5]) != INDEX_COLUMNS.get(row[1])
-            or _catalog_integers(row[6]) != INDEX_OPTIONS.get(row[1])
+            _catalog_columns(row[5]) != index_columns.get(row[1])
+            or _catalog_integers(row[6]) != index_options.get(row[1])
             or row[8] != "btree"
-            or _catalog_columns(row[9]) != INDEX_OPCLASSES.get(row[1])
-            or _catalog_columns(row[10]) != INDEX_COLLATIONS.get(row[1])
+            or _catalog_columns(row[9]) != index_opclasses.get(row[1])
+            or _catalog_columns(row[10]) != index_collations.get(row[1])
         ):
             return False
-        predicate_tokens = INDEX_PREDICATE_TOKENS.get(row[1])
+        predicate_tokens = index_predicate_tokens.get(row[1])
         if predicate_tokens is None:
             if row[7] is not None:
                 return False
         elif (
             type(row[7]) is not str
-            or row[7] != INDEX_PREDICATES.get(row[1])
+            or row[7] != index_predicates.get(row[1])
             or not _contains_tokens(row[7], predicate_tokens)
         ):
             return False
         actual[row[1]] = (row[0], row[2], row[3], row[4])
-    return actual == INDEX_SIGNATURES
+    return actual == index_signatures
 
 
-def _relation_acls_match(connection: object) -> bool:
+def _relation_acls_match(
+    connection: object, tables: frozenset[str], sequences: frozenset[str]
+) -> bool:
     rows = _execute(
         connection,
         """SELECT c.relname,
@@ -448,7 +576,7 @@ def _relation_acls_match(connection: object) -> bool:
         ORDER BY c.relname""",
         (SCHEMA,),
     ).fetchall()
-    expected = _TABLES | SEQUENCES
+    expected = tables | sequences
     if len(rows) != len(expected):
         return False
     names: set[str] = set()
@@ -501,11 +629,20 @@ def _catalog_integers(value: object) -> tuple[int, ...] | None:
 
 def _contains_tokens(expression: str, tokens: tuple[str, ...]) -> bool:
     normalised = expression.casefold().replace('"', "")
-    return all(token.casefold().replace('"', "") in normalised for token in tokens)
+    for token in tokens:
+        expected = token.casefold().replace('"', "")
+        if expected in normalised:
+            continue
+        if expected.startswith((">= ", "<= ")):
+            bound = expected[3:]
+            if f"between {bound} and" in normalised or f"and {bound}" in normalised:
+                continue
+        return False
+    return True
 
 
 def _validate_registry_rows(connection: object) -> None:
-    service_values: dict[tuple[str, str], Service] = {}
+    service_values: dict[str, Service] = {}
     services = _execute(
         connection,
         'SELECT * FROM "aipcs_registry"."aipcs_registry_service" '
@@ -513,53 +650,128 @@ def _validate_registry_rows(connection: object) -> None:
     )
     for row in canonical_rows(services, services.fetchall()):
         service = decode_service(row)
-        service_values[(service.principal_id, str(service.service_id))] = service
+        service_values[str(service.service_id)] = service
 
-    mutations = _execute(
+    identities = _execute(
         connection,
-        'SELECT * FROM "aipcs_registry"."aipcs_registry_mutation" '
+        'SELECT * FROM "aipcs_registry"."aipcs_registry_identity" '
+        'ORDER BY "service_id"',
+    )
+    identities_by_service: dict[str, dict[str, Any]] = {}
+    for row in canonical_rows(identities, identities.fetchall()):
+        service_id = row.get("service_id")
+        state = row.get("identity_state")
+        principal_id = row.get("principal_id")
+        namespace = row.get("storage_namespace")
+        if (
+            type(service_id) is not str
+            or type(state) is not str
+            or type(principal_id) is not str
+            or type(namespace) is not str
+            or service_id in identities_by_service
+        ):
+            raise StorageMigrationError()
+        if not _valid_identity_basics(row):
+            raise StorageMigrationError()
+        if state == "live":
+            service = service_values.get(service_id)
+            if (
+                service is None
+                or service.principal_id != principal_id
+                or service.domain_name != row.get("domain_name")
+                or row.get("claim_idempotency_key") is not None
+                or row.get("lifecycle_at") is not None
+                or row.get("storage_backend")
+                != (None if service.storage is None else service.storage.backend)
+                or row.get("storage_namespace")
+                != f"svc_{service.service_id.hex}"
+            ):
+                raise StorageMigrationError()
+        elif state == "import_prepared":
+            if service_id in service_values:
+                raise StorageMigrationError()
+        elif state == "tombstoned":
+            if service_id in service_values or row.get("domain_name") is not None:
+                raise StorageMigrationError()
+        else:
+            raise StorageMigrationError()
+        identities_by_service[service_id] = row
+    if set(service_values) != {
+        service_id
+        for service_id, row in identities_by_service.items()
+        if row["identity_state"] == "live"
+    }:
+        raise StorageMigrationError()
+
+    claims = _execute(
+        connection,
+        'SELECT * FROM "aipcs_registry"."aipcs_registry_claim" '
         'ORDER BY "principal_id","idempotency_key"',
     )
-    for row in canonical_rows(mutations, mutations.fetchall()):
-        intent, completion = validate_r2_mutation_row(row)
-        if intent is not None:
-            current = service_values.get((intent.principal_id, str(intent.service_id)))
-            if (
-                current is None
-                or current.schema_version is None
-                or intent.expected_service_revision > current.service_revision
-                or intent.expected_schema_version > current.schema_version
-            ):
-                raise StorageMigrationError()
-        if completion is not None:
-            current = service_values.get(
-                (completion.principal_id, str(completion.service_id))
-            )
-            if (
-                current is None
-                or _immutable_service_identity(completion)
-                != _immutable_service_identity(current)
-                or completion.service_revision > current.service_revision
-                or completion.updated_at > current.updated_at
-                or (
-                    completion.schema_version is not None
-                    and (
-                        current.schema_version is None
-                        or completion.schema_version > current.schema_version
+    claims_by_key: dict[tuple[str, str], tuple[dict[str, Any], object]] = {}
+    for row in canonical_rows(claims, claims.fetchall()):
+        claim = _validated_claim(row)
+        if row["operation_kind"] in {"legacy", "seed", "design", "materialise", "evolve"}:
+            intent, completion = validate_r2_mutation_row(_legacy_claim_row(row))
+            if intent is not None:
+                current = service_values.get(str(intent.service_id))
+                if (
+                    current is None
+                    or current.schema_version is None
+                    or intent.expected_service_revision > current.service_revision
+                    or intent.expected_schema_version > current.schema_version
+                ):
+                    raise StorageMigrationError()
+            if completion is not None:
+                current = service_values.get(str(completion.service_id))
+                if (
+                    current is None
+                    or _immutable_service_identity(completion)
+                    != _immutable_service_identity(current)
+                    or completion.service_revision > current.service_revision
+                    or completion.updated_at > current.updated_at
+                    or (
+                        completion.schema_version is not None
+                        and (
+                            current.schema_version is None
+                            or completion.schema_version > current.schema_version
+                        )
                     )
-                )
-                or (
-                    row["operation_kind"] != "legacy"
-                    and completion.service_revision == current.service_revision
-                    and completion != current
-                )
-                or (
-                    row["operation_kind"] in {"materialise", "evolve"}
-                    and (completion.materialised_at, completion.storage)
-                    != (current.materialised_at, current.storage)
-                )
+                    or (
+                        row["operation_kind"] != "legacy"
+                        and completion.service_revision == current.service_revision
+                        and completion != current
+                    )
+                    or (
+                        row["operation_kind"] in {"materialise", "evolve"}
+                        and (completion.materialised_at, completion.storage)
+                        != (current.materialised_at, current.storage)
+                    )
+                ):
+                    raise StorageMigrationError()
+        key = (row["principal_id"], row["idempotency_key"])
+        if key in claims_by_key:
+            raise StorageMigrationError()
+        if type(claim) is Service:
+            current = service_values.get(str(claim.service_id))
+            if (
+                current is None
+                or claim.principal_id != current.principal_id
+                or claim.domain_name != current.domain_name
             ):
                 raise StorageMigrationError()
+        claims_by_key[key] = (row, claim)
+
+    _validate_identity_claim_pairings(identities_by_service, claims_by_key)
+
+    receipts = _execute(
+        connection,
+        'SELECT * FROM "aipcs_registry"."aipcs_registry_receipt" '
+        'ORDER BY "service_id","bundle_root_sha256","receipt_kind"',
+    )
+    for row in canonical_rows(receipts, receipts.fetchall()):
+        if not _valid_receipt_row(row, claims_by_key, service_values):
+            raise StorageMigrationError()
 
     audits = _execute(
         connection,
@@ -567,7 +779,8 @@ def _validate_registry_rows(connection: object) -> None:
         'ORDER BY "principal_id","audit_id"',
     )
     for row in canonical_rows(audits, audits.fetchall()):
-        validate_audit_row(row)
+        if not _valid_audit_row(row):
+            raise StorageMigrationError()
     over_cap = _execute(
         connection,
         'SELECT 1 FROM "aipcs_registry"."aipcs_registry_audit" '
@@ -575,6 +788,51 @@ def _validate_registry_rows(connection: object) -> None:
     ).fetchone()
     if over_cap is not None:
         raise StorageMigrationError()
+
+
+def _validated_claim(row: Mapping[str, Any]) -> object:
+    phase = row.get("phase")
+    intent = row.get("intent_json")
+    result = row.get("result_json")
+    recovery = row.get("recovery_category")
+    if (
+        type(row.get("principal_id")) is not str
+        or type(row.get("idempotency_key")) is not str
+        or type(row.get("fingerprint")) is not str
+        or type(row.get("service_id")) is not str
+        or type(row.get("operation_kind")) is not str
+        or phase not in {"prepared", "completed", "recovery_required", "tombstoned"}
+    ):
+        raise StorageMigrationError()
+    if len(row["fingerprint"]) != 64 or any(
+        char not in "0123456789abcdef" for char in row["fingerprint"]
+    ):
+        raise StorageMigrationError()
+    operation_kind = row["operation_kind"]
+    if phase == "tombstoned":
+        if intent is not None or result is not None or recovery is not None:
+            raise StorageMigrationError()
+        if operation_kind == "purge":
+            raise StorageMigrationError()
+        return row
+    if operation_kind in {"suspend", "resume", "archive", "restore", "export", "import", "purge"}:
+        return _validated_authority_claim(row)
+    if operation_kind not in {"legacy", "seed", "design", "materialise", "evolve"}:
+        raise StorageMigrationError()
+    if operation_kind in {"legacy", "seed", "design"} and phase != "completed":
+        raise StorageMigrationError()
+    if type(intent) is not str or not _is_json_object(intent):
+        if operation_kind not in {"legacy", "seed", "design"}:
+            raise StorageMigrationError()
+    if phase == "completed":
+        if type(result) is not str or not _is_json_object(result) or recovery is not None:
+            raise StorageMigrationError()
+        return decode_result(result, row["principal_id"], row["service_id"])
+    if result is not None or (
+        recovery is not None if phase == "prepared" else recovery != "recovery_required"
+    ):
+        raise StorageMigrationError()
+    return row
 
 
 def _immutable_service_identity(service: Service) -> tuple[object, ...]:
@@ -586,6 +844,187 @@ def _immutable_service_identity(service: Service) -> tuple[object, ...]:
         service.intent_description,
         service.created_at,
     )
+
+
+def _validated_authority_claim(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the frozen physical claim columns without opening a UOW."""
+
+    try:
+        intent = json.loads(row["intent_json"])
+        if type(intent) is not dict:
+            raise ValueError
+        value = validate_registry_authority_claim_row(row)
+    except (TypeError, ValueError, json.JSONDecodeError, StorageMigrationError):
+        raise StorageMigrationError() from None
+    return {"intent": intent, "result_json": row["result_json"], "value": value}
+
+
+def _legacy_claim_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one R2 shared claim back through the frozen R1 mutation validator."""
+
+    result = dict(row)
+    operation_kind = row["operation_kind"]
+    if operation_kind in {"legacy", "seed", "design"}:
+        result.update(
+            expected_service_revision=None,
+            expected_schema_version=None,
+            target_manifest_json=None,
+        )
+        return result
+    try:
+        intent = json.loads(row["intent_json"])
+        if type(intent) is not dict or set(intent) != {
+            "created_via",
+            "expected_schema_version",
+            "expected_service_revision",
+            "kind",
+            "principal",
+            "service_id",
+            "target_manifest",
+        }:
+            raise ValueError
+        if (
+            intent["created_via"] != row["created_via"]
+            or intent["kind"] != operation_kind
+            or intent["principal"] != row["principal_id"]
+            or intent["service_id"] != row["service_id"]
+        ):
+            raise ValueError
+        result.update(
+            expected_service_revision=intent["expected_service_revision"],
+            expected_schema_version=intent["expected_schema_version"],
+            target_manifest_json=json.dumps(
+                intent["target_manifest"],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ),
+        )
+        return result
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise StorageMigrationError() from None
+
+
+def _valid_identity_basics(row: Mapping[str, Any]) -> bool:
+    try:
+        service_id = UUID(row["service_id"])
+        if service_id.int == 0 or row["storage_namespace"] != f"svc_{service_id.hex}":
+            return False
+        if row["identity_state"] not in {"live", "import_prepared", "tombstoned"}:
+            return False
+        if row["storage_backend"] not in {None, "sqlite", "postgresql"}:
+            return False
+        lifecycle_at = row["lifecycle_at"]
+        if lifecycle_at is not None:
+            decode_time(lifecycle_at)
+        return True
+    except (KeyError, TypeError, ValueError, StorageMigrationError):
+        return False
+
+
+def _validate_identity_claim_pairings(
+    identities: Mapping[str, Mapping[str, Any]],
+    claims: Mapping[tuple[str, str], tuple[Mapping[str, Any], object]],
+) -> None:
+    for service_id, identity in identities.items():
+        state = identity["identity_state"]
+        key = identity["claim_idempotency_key"]
+        if state == "live":
+            continue
+        if type(key) is not str:
+            raise StorageMigrationError()
+        pairing = claims.get((identity["principal_id"], key))
+        if pairing is None:
+            raise StorageMigrationError()
+        claim_row, claim = pairing
+        if claim_row["service_id"] != service_id:
+            raise StorageMigrationError()
+        if state == "import_prepared":
+            if claim_row["operation_kind"] != "import" or claim_row["phase"] not in {
+                "prepared",
+                "recovery_required",
+            }:
+                raise StorageMigrationError()
+            intent = claim.get("intent") if isinstance(claim, dict) else None
+            imported_identity = None if not isinstance(intent, dict) else intent.get("identity")
+            if (
+                not isinstance(imported_identity, dict)
+                or identity["domain_name"] != imported_identity.get("domain_name")
+                or identity["storage_namespace"] != imported_identity.get("logical_namespace")
+                or identity["storage_backend"] != intent.get("destination_backend")
+            ):
+                raise StorageMigrationError()
+        elif state == "tombstoned":
+            if claim_row["operation_kind"] != "purge" or claim_row["phase"] != "completed":
+                raise StorageMigrationError()
+        else:
+            raise StorageMigrationError()
+
+
+def _valid_receipt_row(
+    row: Mapping[str, Any],
+    claims: Mapping[tuple[str, str], tuple[Mapping[str, Any], object]],
+    services: Mapping[str, Service],
+) -> bool:
+    try:
+        receipt = validate_transfer_receipt_row(row)
+        claim_row, claim = claims[(receipt.principal_id, row["idempotency_key"])]
+        return (
+            claim_row["service_id"] == str(receipt.service_id)
+            and claim_row["operation_kind"] == receipt.kind.value
+            and claim_row["phase"] == "completed"
+            and _receipt_matches_completion(receipt, claim, services)
+        )
+    except (KeyError, TypeError, ValueError, StorageMigrationError):
+        return False
+
+
+def _receipt_matches_completion(
+    receipt: TransferReceipt,
+    claim: object,
+    services: Mapping[str, Service],
+) -> bool:
+    if not isinstance(claim, dict):
+        return False
+    value = claim.get("value")
+    if receipt.kind is ReceiptKind.EXPORT:
+        return value == receipt
+    if receipt.kind is not ReceiptKind.IMPORT or type(value) is not Service:
+        return False
+    intent = claim.get("intent")
+    if type(intent) is not dict:
+        return False
+    registered = services.get(str(receipt.service_id))
+    return (
+        intent.get("type") == "portable"
+        and intent.get("kind") == "import"
+        and intent.get("bundle_root_sha256") == receipt.bundle_root_sha256
+        and intent.get("destination_backend") == receipt.storage_backend.value
+        and value == registered
+        and value.principal_id == receipt.principal_id
+        and value.service_id == receipt.service_id
+        and value.service_revision == receipt.service_revision
+        and value.operational_status == receipt.operational_status
+        and (
+            value.storage is None
+            or value.storage.backend == receipt.storage_backend.value
+        )
+    )
+
+
+def _valid_audit_row(row: Mapping[str, Any]) -> bool:
+    return all(
+        type(row.get(name)) is str
+        for name in ("action", "outcome", "service_id", "principal_id", "created_via", "at")
+    )
+
+
+def _is_json_object(value: str) -> bool:
+    try:
+        return type(json.loads(value)) is dict
+    except (TypeError, ValueError):
+        return False
 
 
 def _canonical_value(value: object) -> Any:

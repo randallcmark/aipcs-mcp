@@ -244,7 +244,7 @@ def test_mutation_result_principal_must_match_ledger_principal(tmp_path: Path) -
     with pytest.raises(StorageMigrationError) as captured:
         uow.complete_non_lifecycle("seed", "other-principal", "key", "0" * 64, _service())
     _assert_bounded(captured.value)
-    count = uow._connection.execute('SELECT count(*) FROM "aipcs_registry_mutation"').fetchone()[0]
+    count = uow._connection.execute('SELECT count(*) FROM "aipcs_registry_claim"').fetchone()[0]
     assert count == 0
     uow.rollback()
     uow.close()

@@ -27,9 +27,26 @@ from aipcs_mcp.application.models import (
     StaleRevision,
     UnsupportedTransition,
 )
+from aipcs_mcp.application.operational_lifecycle import SuspendCommand
+from aipcs_mcp.application.registry_authority import (
+    CompletedRegistryClaim,
+    ExportCommand,
+    ImportCommand,
+    ImportIdentity,
+    PreparedRegistryClaim,
+    ReceiptKind,
+    ReceiptVerification,
+    RecoveryRequiredRegistryClaim,
+    RegistryIdentityCollision,
+    RegistryOperationInProgress,
+    RegistryUnsupportedTransition,
+    StorageBackend,
+    TransferReceipt,
+)
 from aipcs_mcp.lifecycle import (
     MAX_SERVICE_REVISION,
     EvolveCommand,
+    LifecyclePhase,
     MaterialiseCommand,
     RecoveryState,
     lifecycle_fingerprint,
@@ -41,6 +58,7 @@ from aipcs_mcp.storage.errors import StorageMigrationError
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 from aipcs_mcp.storage.sqlite import uow as uow_module
 from aipcs_mcp.storage.sqlite.codecs import decode_lifecycle_intent, encode_manifest, encode_result
+from aipcs_mcp.storage.sqlite.uow import _encode_legacy_lifecycle_intent
 
 _START = datetime(2026, 7, 23, tzinfo=UTC)
 _PRINCIPAL = "principal-a"
@@ -205,7 +223,7 @@ def _registry_snapshot(database: Path) -> tuple[list[tuple[object, ...]], ...]:
             connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
             for table in (
                 "aipcs_registry_service",
-                "aipcs_registry_mutation",
+            "aipcs_registry_claim",
                 "aipcs_registry_audit",
             )
         )
@@ -219,7 +237,7 @@ class _ExistingKeyReadGuard:
 
     def execute(self, sql: str, parameters: tuple[object, ...] = ()) -> sqlite3.Cursor:
         if 'FROM "aipcs_registry_service"' in sql or (
-            'FROM "aipcs_registry_mutation"' in sql and 'AND "service_id"=?' in sql
+            'FROM "aipcs_registry_claim"' in sql and 'AND "service_id"=?' in sql
         ):
             raise AssertionError("existing-key resolution touched service/blocker state")
         return self._wrapped.execute(sql, parameters)
@@ -274,7 +292,7 @@ def test_stale_and_unsupported_new_keys_never_insert_prepared_intent(tmp_path: P
     assert isinstance(unsupported, UnsupportedTransition)
 
     with sqlite3.connect(tmp_path / "registry" / "registry.sqlite") as connection:
-        assert connection.execute('SELECT count(*) FROM "aipcs_registry_mutation"').fetchone() == (0,)
+        assert connection.execute('SELECT count(*) FROM "aipcs_registry_claim"').fetchone() == (0,)
 
 
 def test_relationally_unsupported_materialise_creates_no_lifecycle_evidence(
@@ -290,7 +308,7 @@ def test_relationally_unsupported_materialise_creates_no_lifecycle_evidence(
     assert isinstance(_admit(adapter, _materialise()), UnsupportedTransition)
 
     with sqlite3.connect(_database(tmp_path)) as connection:
-        assert connection.execute('SELECT count(*) FROM "aipcs_registry_mutation"').fetchone() == (0,)
+        assert connection.execute('SELECT count(*) FROM "aipcs_registry_claim"').fetchone() == (0,)
         assert connection.execute('SELECT count(*) FROM "aipcs_registry_audit"').fetchone() == (0,)
 
 
@@ -425,7 +443,7 @@ def test_ready_r2_evolve_replay_preserves_materialisation_identity(
     database = _database(tmp_path)
     with sqlite3.connect(database) as connection:
         connection.execute(
-            'UPDATE "aipcs_registry_mutation" SET "result_json"=? '
+            'UPDATE "aipcs_registry_claim" SET "result_json"=? '
             'WHERE "principal_id"=? AND "idempotency_key"=?',
             (encode_result(forged), _PRINCIPAL, "evolve-1"),
         )
@@ -454,15 +472,15 @@ def test_ready_r2_completed_lifecycle_revision_cannot_be_ahead_of_current_servic
     assert isinstance(completed, CompletedLifecycleClaim)
     forged_command = _materialise(key="materialise-1", expected_service_revision=99)
     forged_result = replace(completed.service, service_revision=100)
+    forged_intent = prepare_intent(forged_command, _manifest())
     database = _database(tmp_path)
     with sqlite3.connect(database) as connection:
         connection.execute(
-            'UPDATE "aipcs_registry_mutation" SET "fingerprint"=?,'
-            '"expected_service_revision"=?,"result_json"=? '
+            'UPDATE "aipcs_registry_claim" SET "fingerprint"=?,"intent_json"=?,"result_json"=? '
             'WHERE "principal_id"=? AND "idempotency_key"=?',
             (
                 lifecycle_fingerprint(forged_command),
-                99,
+                _encode_legacy_lifecycle_intent(forged_intent),
                 encode_result(forged_result),
                 _PRINCIPAL,
                 "materialise-1",
@@ -494,13 +512,14 @@ def test_ready_r2_current_revision_completion_must_equal_current_snapshot(
     forged_manifest = _manifest()
     forged_manifest.retrieval_guidance = "Forged but structurally valid guidance."
     forged_result = replace(completed.service, manifest=forged_manifest)
+    forged_intent = prepare_intent(_materialise(), forged_manifest)
     database = _database(tmp_path)
     with sqlite3.connect(database) as connection:
         connection.execute(
-            'UPDATE "aipcs_registry_mutation" SET "target_manifest_json"=?,'
+            'UPDATE "aipcs_registry_claim" SET "intent_json"=?,'
             '"result_json"=? WHERE "principal_id"=? AND "idempotency_key"=?',
             (
-                encode_manifest(forged_manifest),
+                _encode_legacy_lifecycle_intent(forged_intent),
                 encode_result(forged_result),
                 _PRINCIPAL,
                 "materialise-1",
@@ -540,16 +559,15 @@ def test_ready_r2_prepared_lifecycle_schema_cannot_be_ahead_of_current_service(
         idempotency_key="evolve-1",
         target_manifest=target,
     )
+    forged_intent = prepare_intent(forged_command, target)
     database = _database(tmp_path)
     with sqlite3.connect(database) as connection:
         connection.execute(
-            'UPDATE "aipcs_registry_mutation" SET "fingerprint"=?,'
-            '"expected_schema_version"=?,"target_manifest_json"=? '
+            'UPDATE "aipcs_registry_claim" SET "fingerprint"=?,"intent_json"=? '
             'WHERE "principal_id"=? AND "idempotency_key"=?',
             (
                 lifecycle_fingerprint(forged_command),
-                64,
-                encode_manifest(target),
+                _encode_legacy_lifecycle_intent(forged_intent),
                 _PRINCIPAL,
                 "evolve-1",
             ),
@@ -662,9 +680,7 @@ def test_mutation_table_rejects_invalid_kind_phase_and_evidence_combinations(
         "operation_kind": "materialise",
         "phase": "prepared",
         "created_via": intent.created_via,
-        "expected_service_revision": 1,
-        "expected_schema_version": 1,
-        "target_manifest_json": encode_manifest(intent.target_manifest),
+        "intent_json": _encode_legacy_lifecycle_intent(intent),
         "result_json": None,
         "recovery_category": None,
     }
@@ -680,24 +696,18 @@ def test_mutation_table_rejects_invalid_kind_phase_and_evidence_combinations(
             "result_json": "{}",
             "recovery_category": "recovery_required",
         },
-        {"operation_kind": "materialise", "expected_schema_version": None},
-        {"operation_kind": "materialise", "expected_schema_version": 2},
-        {"operation_kind": "evolve", "expected_schema_version": None},
-        {"operation_kind": "evolve", "expected_schema_version": 65},
         {
             "operation_kind": "seed",
             "phase": "prepared",
             "created_via": None,
-            "expected_service_revision": None,
-            "expected_schema_version": None,
-            "target_manifest_json": None,
+            "intent_json": None,
             "result_json": "{}",
         },
     )
     columns = tuple(base)
     placeholders = ",".join("?" for _ in columns)
     quoted_columns = ",".join(f'"{column}"' for column in columns)
-    sql = f'INSERT INTO "aipcs_registry_mutation" ({quoted_columns}) VALUES ({placeholders})'
+    sql = f'INSERT INTO "aipcs_registry_claim" ({quoted_columns}) VALUES ({placeholders})'
     with sqlite3.connect(_database(tmp_path)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         for index, overrides in enumerate(invalid_overrides):
@@ -709,7 +719,7 @@ def test_mutation_table_rejects_invalid_kind_phase_and_evidence_combinations(
             else:
                 pytest.fail(f"invalid mutation shape was accepted: {overrides!r}")
         assert connection.execute(
-            'SELECT count(*) FROM "aipcs_registry_mutation"'
+            'SELECT count(*) FROM "aipcs_registry_claim"'
         ).fetchone() == (0,)
 
 
@@ -724,22 +734,17 @@ def test_noncanonical_target_and_malformed_fingerprint_fail_bounded_codec_replay
 
     with sqlite3.connect(database) as connection:
         row = connection.execute(
-            'SELECT * FROM "aipcs_registry_mutation" WHERE "idempotency_key"=?',
+            'SELECT * FROM "aipcs_registry_claim" WHERE "idempotency_key"=?',
             (command.idempotency_key,),
         ).fetchone()
         assert row is not None
         columns = [description[0] for description in connection.execute(
-            'SELECT * FROM "aipcs_registry_mutation" LIMIT 0'
+            'SELECT * FROM "aipcs_registry_claim" LIMIT 0'
         ).description]
         codec_row = dict(zip(columns, row, strict=True))
-        codec_row["fingerprint"] = "not-a-fingerprint"
-        with pytest.raises(StorageMigrationError) as malformed:
-            decode_lifecycle_intent(codec_row)
-        assert malformed.value.__cause__ is None and malformed.value.__context__ is None
-
-        canonical = json.loads(codec_row["target_manifest_json"])
+        canonical = json.loads(codec_row["intent_json"])
         connection.execute(
-            'UPDATE "aipcs_registry_mutation" SET "target_manifest_json"=? '
+            'UPDATE "aipcs_registry_claim" SET "intent_json"=? '
             'WHERE "idempotency_key"=?',
             (json.dumps(canonical, indent=2), command.idempotency_key),
         )
@@ -811,13 +816,14 @@ def test_invalid_completion_values_and_corrupt_target_do_not_mutate_registry(tmp
     assert _registry_snapshot(database) == before
 
     with sqlite3.connect(database) as connection:
-        target = json.loads(encode_manifest(prepared.intent.target_manifest))
+        intent_json = json.loads(_encode_legacy_lifecycle_intent(prepared.intent))
+        target = intent_json["target_manifest"]
         target["schema_version"] = 2
         connection.execute(
-            'UPDATE "aipcs_registry_mutation" SET "target_manifest_json"=? '
+            'UPDATE "aipcs_registry_claim" SET "intent_json"=? '
             'WHERE "idempotency_key"=?',
             (
-                json.dumps(target, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+                json.dumps(intent_json, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
                 command.idempotency_key,
             ),
         )
@@ -898,7 +904,229 @@ def test_audit_keeps_highest_thousand_ids_per_principal_and_never_prunes_mutatio
             assert len(audit_ids) == 1_000
             assert audit_ids == list(range(audit_ids[0], audit_ids[-1] + 1, 2))
         assert connection.execute(
-            'SELECT "phase" FROM "aipcs_registry_mutation" '
+            'SELECT "phase" FROM "aipcs_registry_claim" '
             'WHERE "principal_id"=? AND "idempotency_key"=?',
             (_PRINCIPAL, "retained-intent"),
         ).fetchone() == ("prepared",)
+
+
+def test_shared_claim_authority_completes_operational_state_and_reserves_import_identity(
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter(tmp_path)
+    _add(adapter, _service())
+    command = SuspendCommand(_PRINCIPAL, "registry-test", _SERVICE_ID, 1, "suspend-authority")
+    prepared = _write(adapter, lambda uow: uow.authority.resolve_or_prepare(command))
+    assert isinstance(prepared, PreparedRegistryClaim)
+    completed = _write(
+        adapter,
+        lambda uow: uow.authority.finalize_operational(prepared.intent, _START + timedelta(seconds=1)),
+    )
+    assert isinstance(completed, CompletedRegistryClaim)
+    assert _write(adapter, lambda uow: uow.authority.resolve_or_prepare(command)) == completed
+
+    imported_id = UUID("7b5d0b6a-976c-4e32-b4d2-cc0a64e3ee25")
+    identity = ImportIdentity(_PRINCIPAL, imported_id, "imported_notes", f"svc_{imported_id.hex}")
+    import_command = ImportCommand(
+        _PRINCIPAL, "registry-test", identity, StorageBackend.SQLITE, "a" * 64, "import-authority"
+    )
+    reserved = _write(adapter, lambda uow: uow.authority.resolve_or_prepare(import_command))
+    assert isinstance(reserved, PreparedRegistryClaim)
+    collision = _write(adapter, lambda uow: uow.authority.resolve_or_prepare(import_command))
+    assert collision == reserved
+    different_key = ImportCommand(
+        _PRINCIPAL, "registry-test", identity, StorageBackend.SQLITE, "a" * 64, "import-authority-2"
+    )
+    assert isinstance(
+        _write(adapter, lambda uow: uow.authority.resolve_or_prepare(different_key)),
+        RegistryIdentityCollision,
+    )
+
+
+def test_cross_family_active_claims_are_typed_blockers_and_recovery_aggregate(
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter(tmp_path)
+    _add(adapter, _service())
+    lifecycle = _admit(adapter, _materialise(key="lifecycle-first"))
+    assert isinstance(lifecycle, PreparedLifecycleClaim)
+    assert _recovery_state(adapter) is RecoveryState.PENDING
+
+    blocked_authority = _write(
+        adapter,
+        lambda uow: uow.authority.resolve_or_prepare(
+            SuspendCommand(_PRINCIPAL, "registry-test", _SERVICE_ID, 1, "suspend-blocked")
+        ),
+    )
+    assert isinstance(blocked_authority, RegistryOperationInProgress)
+    assert blocked_authority.intent == lifecycle.intent
+
+    lifecycle_recovery = _write(
+        adapter,
+        lambda uow: uow.mutations.finalize_recovery_required(
+            lifecycle.intent, _START + timedelta(seconds=1)
+        ),
+    )
+    assert isinstance(lifecycle_recovery, RecoveryRequiredLifecycleClaim)
+    assert _recovery_state(adapter) is RecoveryState.RECOVERY_REQUIRED
+    blocked_recovery = _write(
+        adapter,
+        lambda uow: uow.authority.resolve_or_prepare(
+            SuspendCommand(_PRINCIPAL, "registry-test", _SERVICE_ID, 1, "suspend-recovery")
+        ),
+    )
+    assert isinstance(blocked_recovery, RecoveryRequiredRegistryClaim)
+    assert blocked_recovery.intent == lifecycle.intent.with_phase(LifecyclePhase.RECOVERY_REQUIRED)
+
+    _add(adapter, _service(service_id=_SECOND_SERVICE_ID))
+    authority = _write(
+        adapter,
+        lambda uow: uow.authority.resolve_or_prepare(
+            SuspendCommand(
+                _PRINCIPAL, "registry-test", _SECOND_SERVICE_ID, 1, "authority-first"
+            )
+        ),
+    )
+    assert isinstance(authority, PreparedRegistryClaim)
+    assert _recovery_state(adapter, service_id=_SECOND_SERVICE_ID) is RecoveryState.PENDING
+    blocked_lifecycle = _admit(
+        adapter, _materialise(service_id=_SECOND_SERVICE_ID, key="materialise-blocked")
+    )
+    assert isinstance(blocked_lifecycle, OperationInProgress)
+
+    authority_recovery = _write(
+        adapter,
+        lambda uow: uow.authority.finalize_operational(
+            authority.intent, _START - timedelta(seconds=1)
+        ),
+    )
+    assert isinstance(authority_recovery, RecoveryRequiredRegistryClaim)
+    assert _recovery_state(adapter, service_id=_SECOND_SERVICE_ID) is RecoveryState.RECOVERY_REQUIRED
+    assert isinstance(
+        _admit(adapter, _materialise(service_id=_SECOND_SERVICE_ID, key="materialise-recovery")),
+        OperationInProgress,
+    )
+
+
+def test_import_receipt_is_bound_to_its_completed_claim_and_published_service(
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter(tmp_path)
+    imported_id = UUID("7b5d0b6a-976c-4e32-b4d2-cc0a64e3ee25")
+    identity = ImportIdentity(_PRINCIPAL, imported_id, "imported_notes", f"svc_{imported_id.hex}")
+    command = ImportCommand(
+        _PRINCIPAL, "registry-test", identity, StorageBackend.SQLITE, "a" * 64, "import-complete"
+    )
+    prepared = _write(adapter, lambda uow: uow.authority.resolve_or_prepare(command))
+    assert isinstance(prepared, PreparedRegistryClaim)
+    service = replace(_service(service_id=imported_id), domain_name=identity.domain_name)
+    receipt = TransferReceipt(
+        UUID("8b5d0b6a-976c-4e32-b4d2-cc0a64e3ee26"),
+        ReceiptKind.IMPORT,
+        _PRINCIPAL,
+        imported_id,
+        "a" * 64,
+        1,
+        StorageBackend.SQLITE,
+        service.service_revision,
+        service.operational_status,
+        ReceiptVerification.VERIFIED,
+        _START,
+    )
+    completed = _write(
+        adapter, lambda uow: uow.authority.publish_import(prepared.intent, service, receipt)
+    )
+    assert isinstance(completed, CompletedRegistryClaim)
+    assert adapter.inspect_migration().status == "ready"
+
+    with sqlite3.connect(_database(tmp_path)) as connection:
+        connection.execute(
+            'UPDATE "aipcs_registry_receipt" SET "bundle_root_sha256"=?', ("b" * 64,)
+        )
+    assert adapter.inspect_migration().status == "incompatible"
+
+
+def test_sqlite_authority_rejects_foreign_backends_and_uses_receipt_audit_time(
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter(tmp_path)
+    imported_id = UUID("9b5d0b6a-976c-4e32-b4d2-cc0a64e3ee27")
+    foreign_import = ImportCommand(
+        _PRINCIPAL,
+        "registry-test",
+        ImportIdentity(_PRINCIPAL, imported_id, "foreign_notes", f"svc_{imported_id.hex}"),
+        StorageBackend.POSTGRESQL,
+        "a" * 64,
+        "foreign-import",
+    )
+    assert isinstance(
+        _write(adapter, lambda uow: uow.authority.resolve_or_prepare(foreign_import)),
+        RegistryUnsupportedTransition,
+    )
+
+    _add(adapter, _service())
+    export = ExportCommand(_PRINCIPAL, "registry-test", _SERVICE_ID, 1, "foreign-export")
+    prepared_export = _write(adapter, lambda uow: uow.authority.resolve_or_prepare(export))
+    assert isinstance(prepared_export, PreparedRegistryClaim)
+    export_at = _START + timedelta(seconds=1)
+    foreign_receipt = TransferReceipt(
+        UUID("ab5d0b6a-976c-4e32-b4d2-cc0a64e3ee28"),
+        ReceiptKind.EXPORT,
+        _PRINCIPAL,
+        _SERVICE_ID,
+        "a" * 64,
+        1,
+        StorageBackend.POSTGRESQL,
+        1,
+        "active",
+        ReceiptVerification.VERIFIED,
+        export_at,
+    )
+    assert isinstance(
+        _write(adapter, lambda uow: uow.authority.complete_export(prepared_export.intent, foreign_receipt)),
+        RecoveryRequiredRegistryClaim,
+    )
+
+    import_id = UUID("bb5d0b6a-976c-4e32-b4d2-cc0a64e3ee29")
+    identity = ImportIdentity(_PRINCIPAL, import_id, "imported_sqlite", f"svc_{import_id.hex}")
+    command = ImportCommand(
+        _PRINCIPAL, "registry-test", identity, StorageBackend.SQLITE, "b" * 64, "sqlite-import"
+    )
+    prepared_import = _write(adapter, lambda uow: uow.authority.resolve_or_prepare(command))
+    assert isinstance(prepared_import, PreparedRegistryClaim)
+    receipt_at = _START + timedelta(seconds=2)
+    imported = replace(
+        _service(service_id=import_id),
+        domain_name=identity.domain_name,
+        design_state="materialised",
+        materialised_at=_START,
+        storage=MaterialisationStorage("postgresql", f"svc_{import_id.hex}"),
+    )
+    receipt = TransferReceipt(
+        UUID("cb5d0b6a-976c-4e32-b4d2-cc0a64e3ee30"),
+        ReceiptKind.IMPORT,
+        _PRINCIPAL,
+        import_id,
+        "b" * 64,
+        1,
+        StorageBackend.SQLITE,
+        imported.service_revision,
+        imported.operational_status,
+        ReceiptVerification.VERIFIED,
+        receipt_at,
+    )
+    assert isinstance(
+        _write(adapter, lambda uow: uow.authority.publish_import(prepared_import.intent, imported, receipt)),
+        RecoveryRequiredRegistryClaim,
+    )
+
+    with sqlite3.connect(_database(tmp_path)) as connection:
+        rows = connection.execute(
+            'SELECT "action","outcome","at" FROM "aipcs_registry_audit" '
+            'WHERE "principal_id"=? ORDER BY "audit_id"',
+            (_PRINCIPAL,),
+        ).fetchall()
+    assert rows[-2:] == [
+        ("export", "recovery_required", "2026-07-23T00:00:01.000000Z"),
+        ("import", "recovery_required", "2026-07-23T00:00:02.000000Z"),
+    ]

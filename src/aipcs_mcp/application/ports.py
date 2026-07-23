@@ -23,6 +23,12 @@ from .models import (
     Service,
     ServiceSaveResult,
 )
+from .registry_authority import (
+    RegistryAuthorityCommand,
+    RegistryAuthorityIntent,
+    RegistryAuthorityOutcome,
+    TransferReceipt,
+)
 
 DataOperation = Literal[
     "create_record",
@@ -120,10 +126,29 @@ class AuditRepository(Protocol):
     def append(self, event: AuditEvent) -> None: ...
 
 
+class RegistryAuthority(Protocol):
+    """Typed portable claims backed by the same global namespace as mutations."""
+
+    def resolve_or_prepare(self, command: RegistryAuthorityCommand) -> RegistryAuthorityOutcome: ...
+
+    def finalize_operational(self, prepared: RegistryAuthorityIntent, at: datetime) -> RegistryAuthorityOutcome: ...
+
+    def complete_export(
+        self, prepared: RegistryAuthorityIntent, receipt: TransferReceipt
+    ) -> RegistryAuthorityOutcome: ...
+
+    def publish_import(
+        self, prepared: RegistryAuthorityIntent, service: Service, receipt: TransferReceipt
+    ) -> RegistryAuthorityOutcome: ...
+
+    def finalize_purge(self, prepared: RegistryAuthorityIntent, at: datetime) -> RegistryAuthorityOutcome: ...
+
+
 class RegistryUnitOfWork(Protocol):
     services: ServiceRepository
     mutations: MutationRegistry
     audits: AuditRepository
+    authority: RegistryAuthority
 
     def commit(self) -> None: ...
     def rollback(self) -> None: ...

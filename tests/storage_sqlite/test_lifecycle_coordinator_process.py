@@ -285,7 +285,7 @@ def _service(service_id: UUID) -> Service:
 
 def _adapter(root: Path, *, busy_timeout_ms: int = 1_000) -> SQLiteRegistryAdapter:
     adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root), busy_timeout_ms=busy_timeout_ms)
-    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+    assert adapter.migrate() == MigrationState("registry", 4, 4, "ready")
     return adapter
 
 
@@ -344,7 +344,7 @@ def _seed_exact_clean_r2(root: Path, service_id: UUID) -> None:
 def _phase(root: Path, key: str) -> str | None:
     with sqlite3.connect(root / "registry.sqlite") as connection:
         row = connection.execute(
-            'SELECT "phase" FROM "aipcs_registry_mutation" WHERE "principal_id"=? '
+            'SELECT "phase" FROM "aipcs_registry_claim" WHERE "principal_id"=? '
             'AND "idempotency_key"=?',
             (_PRINCIPAL, key),
         ).fetchone()

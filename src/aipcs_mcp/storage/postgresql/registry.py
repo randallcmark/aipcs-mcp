@@ -22,6 +22,9 @@ from .registry_migrations import (
     CHECKSUM,
     DDL,
     MIGRATION_ID,
+    R1_CHECKSUM,
+    R1_MIGRATION_ID,
+    R2_DDL,
     SCHEMA,
     TARGET_REVISION,
 )
@@ -87,21 +90,43 @@ class PostgreSQLRegistryAdapter:
                 _close_strict(connection)
                 connection = None
                 return state
-            if state.status != "uninitialised":
+            if state.status not in {"uninitialised", "outdated"}:
                 _rollback(connection)
                 _close_strict(connection)
                 connection = None
                 return state
 
-            for statement in DDL:
+            statements = DDL if state.status == "uninitialised" else R2_DDL
+            for statement in statements:
                 _execute(connection, statement)
-            _execute(
-                connection,
-                'INSERT INTO "aipcs_registry"."aipcs_registry_meta" '
-                '("singleton","adapter_id","component","applied_revision","dirty") '
-                "VALUES (%s,%s,%s,%s,%s)",
-                (1, ADAPTER_ID, "registry", TARGET_REVISION, False),
-            )
+            if state.status == "uninitialised":
+                _execute(
+                    connection,
+                    'INSERT INTO "aipcs_registry"."aipcs_registry_meta" '
+                    '("singleton","adapter_id","component","applied_revision","dirty") '
+                    "VALUES (%s,%s,%s,%s,%s)",
+                    (1, ADAPTER_ID, "registry", TARGET_REVISION, False),
+                )
+                _execute(
+                    connection,
+                    'INSERT INTO "aipcs_registry"."aipcs_registry_migration" '
+                    '("component","revision","migration_id","checksum","applied_at") '
+                    "VALUES (%s,%s,%s,%s,%s)",
+                    (
+                        "registry",
+                        1,
+                        R1_MIGRATION_ID,
+                        R1_CHECKSUM,
+                        encode_time(datetime.now(UTC)),
+                    ),
+                )
+            else:
+                _execute(
+                    connection,
+                    'UPDATE "aipcs_registry"."aipcs_registry_meta" '
+                    'SET "applied_revision"=%s,"dirty"=%s WHERE "singleton"=1',
+                    (TARGET_REVISION, False),
+                )
             _execute(
                 connection,
                 'INSERT INTO "aipcs_registry"."aipcs_registry_migration" '

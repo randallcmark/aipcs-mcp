@@ -827,7 +827,7 @@ def test_spawned_application_calls_replay_one_idempotent_effect_and_conflict_on_
 
     assert len(_service_ids(adapter, "process-idempotency")) == 1
     with sqlite3.connect(root / "registry.sqlite") as connection:
-        assert connection.execute('SELECT count(*) FROM "aipcs_registry_mutation"').fetchone() == (1,)
+        assert connection.execute('SELECT count(*) FROM "aipcs_registry_claim"').fetchone() == (1,)
         assert connection.execute('SELECT count(*) FROM "aipcs_registry_audit"').fetchone() == (1,)
 
 

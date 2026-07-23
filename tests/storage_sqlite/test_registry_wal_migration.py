@@ -17,6 +17,7 @@ from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.errors import StorageBusy, StorageMigrationError, StorageUnavailable
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 from aipcs_mcp.storage.sqlite import adapter as adapter_module
+from aipcs_mcp.storage.sqlite.migrations import R4
 
 _R2_ID = "registry-0002-durable-intent"
 _R2_CHECKSUM = "b6190247d4f709728bab59cb4eb5fd149d4b7424472615f377b83f5191e0d8ea"
@@ -34,15 +35,19 @@ def _clean_r2_delete(root: Path) -> Path:
     """Create a clean predecessor with a row whose bytes/data must survive."""
 
     adapter = _adapter(root)
-    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+    anchored = adapter._acquire_for_migration()
+    connection = adapter._migration_connection(anchored)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        adapter_module._create_r1(connection)
+        adapter_module._upgrade_r1_to_r2(connection)
+        connection.commit()
+    finally:
+        connection.close()
+        anchored.close()
     database = root / "registry.sqlite"
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
-        connection.execute(f'DROP TABLE "{_POLICY}"')
-        connection.execute('DELETE FROM "aipcs_registry_migration" WHERE revision=3')
-        connection.execute(
-            'UPDATE "aipcs_registry_meta" SET applied_revision=2,dirty=0 WHERE singleton=1'
-        )
         connection.execute(
             'INSERT INTO "aipcs_registry_service" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (
@@ -86,17 +91,17 @@ def _assert_recoverable_or_ready(adapter: SQLiteRegistryAdapter, database: Path)
             "wal", 2, 1, (1, "aipcs.sqlite.wal.v1", _R3_CHECKSUM, "prepared"),
             (2, _R2_ID, _R2_CHECKSUM),
         )
-        assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+        assert adapter.migrate() == MigrationState("registry", 4, 4, "ready")
         state = adapter.inspect_migration()
     mode, revision, dirty, row, history = _raw_state(database)
     if state.status == "ready":
         assert (mode, revision, dirty, row, history[-1]) == (
-            "wal", 3, 0, (1, "aipcs.sqlite.wal.v1", _R3_CHECKSUM, "ready"),
-            (3, _R3_ID, _R3_CHECKSUM),
+            "wal", 4, 0, (1, "aipcs.sqlite.wal.v1", _R3_CHECKSUM, "ready"),
+            (4, R4.migration_id, R4.checksum),
         )
     else:
-        assert state == MigrationState("registry", 2, 3, "dirty") or state == MigrationState(
-            "registry", 2, 3, "incompatible"
+        assert state == MigrationState("registry", 2, 4, "dirty") or state == MigrationState(
+            "registry", 2, 4, "incompatible"
         )
         assert revision == 2
         if row is None:
@@ -104,7 +109,7 @@ def _assert_recoverable_or_ready(adapter: SQLiteRegistryAdapter, database: Path)
         else:
             assert (dirty, row) == (1, (1, "aipcs.sqlite.wal.v1", _R3_CHECKSUM, "prepared"))
             assert mode in {"delete", "wal"}
-    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+    assert adapter.migrate() == MigrationState("registry", 4, 4, "ready")
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             'SELECT intent_description FROM "aipcs_registry_service"'
@@ -260,7 +265,7 @@ def test_r3_adversarial_states_fail_closed(tmp_path: Path, mutation: str) -> Non
         elif mutation == "arbitrary_dirty":
             connection.execute('UPDATE "aipcs_registry_meta" SET dirty=1')
         elif mutation == "future_revision":
-            connection.execute('UPDATE "aipcs_registry_meta" SET applied_revision=4')
+            connection.execute('UPDATE "aipcs_registry_meta" SET applied_revision=5')
         else:
             connection.execute('UPDATE "aipcs_registry_migration" SET migration_id="altered" WHERE revision=3')
     before = _raw_state(database)

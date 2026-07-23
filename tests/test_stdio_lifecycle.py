@@ -621,7 +621,7 @@ def test_two_same_key_stdio_processes_resume_one_prepared_materialise_once(tmp_p
         ).fetchone()
         assert service == (3, "materialised")
         phase = connection.execute(
-            'SELECT "phase" FROM "aipcs_registry_mutation" '
+            'SELECT "phase" FROM "aipcs_registry_claim" '
             'WHERE "principal_id"=? AND "idempotency_key"=?',
             (principal, request_key),
         ).fetchone()
@@ -687,7 +687,7 @@ def test_different_key_stdio_request_is_blocked_before_service_store_work(tmp_pa
     assert not (root / "service-stores").exists()
     with sqlite3.connect(root / "registry.sqlite") as connection:
         claims = connection.execute(
-            'SELECT "idempotency_key", "phase" FROM "aipcs_registry_mutation" '
+            'SELECT "idempotency_key", "phase" FROM "aipcs_registry_claim" '
             'WHERE "principal_id"=? AND "service_id"=? '
             'AND "operation_kind"=\'materialise\' ORDER BY "idempotency_key"',
             (principal, service_id),

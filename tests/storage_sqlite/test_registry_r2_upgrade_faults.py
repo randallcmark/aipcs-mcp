@@ -14,7 +14,7 @@ from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.errors import StorageMigrationError
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 from aipcs_mcp.storage.sqlite import adapter as adapter_module
-from aipcs_mcp.storage.sqlite.migrations import R1
+from aipcs_mcp.storage.sqlite.migrations import R1, R2, R3, R4
 
 _AT = "2026-01-01T00:00:00.000000Z"
 _SERVICE_ID = "00000000-0000-0000-0000-000000000001"
@@ -105,7 +105,7 @@ def _adapter(root: Path) -> SQLiteRegistryAdapter:
 
 
 def _assert_exact_r1(adapter: SQLiteRegistryAdapter, database: Path) -> None:
-    assert adapter.inspect_migration() == MigrationState("registry", 1, 3, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 4, "incompatible")
     with sqlite3.connect(database) as connection:
         assert connection.execute('SELECT applied_revision,dirty FROM "aipcs_registry_meta"').fetchone() == (
             1,
@@ -117,6 +117,19 @@ def _assert_exact_r1(adapter: SQLiteRegistryAdapter, database: Path) -> None:
         assert connection.execute(
             "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%_r1'"
         ).fetchone() == (0,)
+
+
+def _assert_ready_r4_history(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            'SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" '
+            "ORDER BY revision"
+        ).fetchall() == [
+            (1, R1.migration_id, R1.checksum),
+            (2, R2.migration_id, R2.checksum),
+            (3, R3.migration_id, R3.checksum),
+            (4, R4.migration_id, R4.checksum),
+        ]
 
 
 def _statement(marker: str) -> Callable[[str], bool]:
@@ -209,7 +222,7 @@ _PRECOMMIT_MARKERS = (
 
 
 @pytest.mark.parametrize("marker", _PRECOMMIT_MARKERS)
-def test_r1_upgrade_faults_roll_back_to_exact_r1_and_explicit_retry_upgrades(
+def test_r1_upgrade_faults_roll_back_to_exact_r1_and_retry_upgrades_through_r4(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: str
 ) -> None:
     root = tmp_path / marker
@@ -226,7 +239,8 @@ def test_r1_upgrade_faults_roll_back_to_exact_r1_and_explicit_retry_upgrades(
     assert captured.value.__cause__ is None and captured.value.__context__ is None
     monkeypatch.setattr(adapter_module, "connect", real_connect)
     _assert_exact_r1(adapter, database)
-    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+    assert adapter.migrate() == MigrationState("registry", 4, 4, "ready")
+    _assert_ready_r4_history(database)
 
 
 def test_post_commit_upgrade_fault_reopens_clean_r2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,8 +257,9 @@ def test_post_commit_upgrade_fault_reopens_clean_r2(tmp_path: Path, monkeypatch:
         adapter.migrate()
     assert captured.value.__cause__ is None and captured.value.__context__ is None
     monkeypatch.setattr(adapter_module, "connect", real_connect)
-    assert adapter.inspect_migration() == MigrationState("registry", 2, 3, "dirty")
-    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+    assert adapter.inspect_migration() == MigrationState("registry", 2, 4, "dirty")
+    assert adapter.migrate() == MigrationState("registry", 4, 4, "ready")
+    _assert_ready_r4_history(root / "registry.sqlite")
 
 
 @pytest.mark.parametrize("primary_count", (999, 1000, 1001))
@@ -253,7 +268,8 @@ def test_r1_upgrade_retains_newest_1000_audits_per_principal(
 ) -> None:
     root = tmp_path / str(primary_count)
     database = _create_exact_r1(root, {"p": primary_count, "q": 1})
-    assert _adapter(root).migrate() == MigrationState("registry", 3, 3, "ready")
+    assert _adapter(root).migrate() == MigrationState("registry", 4, 4, "ready")
+    _assert_ready_r4_history(database)
     with sqlite3.connect(database) as connection:
         counts = connection.execute(
             'SELECT principal_id,count(*) FROM "aipcs_registry_audit" '

@@ -3124,7 +3124,7 @@ def run_installed_lifecycle_contract_smoke(
 
 
 def _registry_r2_smoke_program() -> str:
-    """Standalone installed registry R2-to-R3 migration and ledger proof."""
+    """Standalone installed registry R2-to-R4 migration and authority proof."""
 
     program = r'''
 from __future__ import annotations
@@ -3158,7 +3158,7 @@ from aipcs_mcp.lifecycle import LifecyclePhase, MaterialiseCommand
 from aipcs_mcp.manifest_v2 import ManifestV2
 from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
-from aipcs_mcp.storage.sqlite.migrations import R1, R2, R3
+from aipcs_mcp.storage.sqlite.migrations import R1, R2, R3, R4
 
 frozen_r1_ddl = __FROZEN_R1_DDL__
 frozen_r1_migration_id = "__FROZEN_R1_MIGRATION_ID__"
@@ -3285,9 +3285,9 @@ with sqlite3.connect(database) as connection:
     )
 
 adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
-assert adapter.inspect_migration() == MigrationState("registry", 1, 3, "incompatible")
-assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
-assert adapter.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+assert adapter.inspect_migration() == MigrationState("registry", 1, 4, "incompatible")
+assert adapter.migrate() == MigrationState("registry", 4, 4, "ready")
+assert adapter.inspect_migration() == MigrationState("registry", 4, 4, "ready")
 with sqlite3.connect(database) as connection:
     assert connection.execute(
         'SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" ORDER BY revision'
@@ -3295,6 +3295,7 @@ with sqlite3.connect(database) as connection:
         (1, frozen_r1_migration_id, frozen_r1_checksum),
         (2, frozen_r2_migration_id, frozen_r2_checksum),
         (3, R3.migration_id, R3.checksum),
+        (4, R4.migration_id, R4.checksum),
     ]
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert connection.execute(
@@ -3305,10 +3306,22 @@ with sqlite3.connect(database) as connection:
         (1, None, None, None),
     ]
     assert connection.execute(
-        'SELECT result_json FROM "aipcs_registry_mutation" '
+        'SELECT "operation_kind","phase","intent_json","result_json" '
+        'FROM "aipcs_registry_claim" '
         'WHERE "principal_id"=? AND "idempotency_key"=?',
         ("principal-a", "legacy-a"),
-    ).fetchone() == (result_a,)
+    ).fetchone() == ("legacy", "completed", None, result_a)
+    assert connection.execute(
+        'SELECT "identity_state","domain_name","storage_backend",'
+        '"storage_namespace","claim_idempotency_key","lifecycle_at" '
+        'FROM "aipcs_registry_identity" WHERE "service_id"=?',
+        (service_a,),
+    ).fetchone() == (
+        "live", "notes_a", None, f"svc_{UUID(service_a).hex}", None, None
+    )
+    assert connection.execute(
+        'SELECT count(*) FROM "aipcs_registry_receipt"'
+    ).fetchone() == (0,)
     assert connection.execute(
         'SELECT count(*),min(audit_id),max(audit_id) FROM "aipcs_registry_audit" '
         'WHERE "principal_id"=?',
@@ -3385,9 +3398,9 @@ def prove_under_cap_retention(count):
         )
     case_adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(case_root))
     assert case_adapter.inspect_migration() == MigrationState(
-        "registry", 1, 3, "incompatible"
+        "registry", 1, 4, "incompatible"
     )
-    assert case_adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+    assert case_adapter.migrate() == MigrationState("registry", 4, 4, "ready")
     with sqlite3.connect(case_database) as connection:
         assert connection.execute(
             'SELECT count(*),min(audit_id),max(audit_id) '
@@ -3502,18 +3515,17 @@ uow.close()
 with sqlite3.connect(database) as connection:
     phases = connection.execute(
         'SELECT "idempotency_key","phase","result_json","recovery_category" '
-        'FROM "aipcs_registry_mutation" WHERE "principal_id"=? '
+        'FROM "aipcs_registry_claim" WHERE "principal_id"=? '
         'ORDER BY "idempotency_key"',
         ("lifecycle-principal",),
     ).fetchall()
     invalid_insert = (
-        'INSERT INTO "aipcs_registry_mutation"('
+        'INSERT INTO "aipcs_registry_claim"('
         '"principal_id","idempotency_key","fingerprint","service_id","operation_kind",'
-        '"phase","created_via","expected_service_revision","expected_schema_version",'
-        '"target_manifest_json","result_json","recovery_category") '
+        '"phase","created_via","intent_json","result_json","recovery_category") '
         'SELECT "principal_id",?,"fingerprint","service_id",?,?,"created_via",'
-        '"expected_service_revision","expected_schema_version","target_manifest_json",?,? '
-        'FROM "aipcs_registry_mutation" WHERE "principal_id"=? AND "idempotency_key"=?'
+        '"intent_json",?,? '
+        'FROM "aipcs_registry_claim" WHERE "principal_id"=? AND "idempotency_key"=?'
     )
     invalid_rows = (
         ("invalid-kind-key", "unknown", "prepared", None, None),
@@ -3532,7 +3544,7 @@ with sqlite3.connect(database) as connection:
         else:
             raise AssertionError("invalid lifecycle kind/phase/evidence row was accepted")
     assert connection.execute(
-        'SELECT count(*) FROM "aipcs_registry_mutation" '
+        'SELECT count(*) FROM "aipcs_registry_claim" '
         'WHERE "idempotency_key" LIKE \'invalid-%\''
     ).fetchone() == (0,)
 assert [(row[0], row[1]) for row in phases] == [
@@ -3543,7 +3555,7 @@ assert [(row[0], row[1]) for row in phases] == [
 assert phases[0][2] is not None and phases[0][3] is None
 assert phases[1][2:] == (None, None)
 assert phases[2][2:] == (None, "recovery_required")
-assert adapter.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+assert adapter.inspect_migration() == MigrationState("registry", 4, 4, "ready")
 # A plain main-file copy must not omit committed WAL frames in this legacy corruption check.
 with sqlite3.connect(database) as connection:
     connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
@@ -3559,18 +3571,18 @@ def prove_corruption_fails_closed(name, statement, parameters=()):
     corrupt_before = corrupt_database.read_bytes()
     corrupt_adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(corrupt_root))
     assert corrupt_adapter.inspect_migration() == MigrationState(
-        "registry", 3, 3, "incompatible"
+        "registry", 4, 4, "incompatible"
     )
     assert corrupt_database.read_bytes() == corrupt_before
     assert corrupt_adapter.migrate() == MigrationState(
-        "registry", 3, 3, "incompatible"
+        "registry", 4, 4, "incompatible"
     )
     assert corrupt_database.read_bytes() == corrupt_before
 
 
 prove_corruption_fails_closed(
     "row",
-    'UPDATE "aipcs_registry_mutation" SET "result_json"=? '
+    'UPDATE "aipcs_registry_claim" SET "result_json"=? '
     'WHERE "principal_id"=? AND "idempotency_key"=?',
     ("{}", "lifecycle-principal", "completed-key"),
 )
@@ -4063,7 +4075,7 @@ def service_database(service_id):
     return root / "service-stores" / f"svc_{service_id.hex}.sqlite"
 
 if mode == "initial":
-    assert registry.migrate() == MigrationState("registry", 3, 3, "ready")
+    assert registry.migrate() == MigrationState("registry", 4, 4, "ready")
     uow = registry.open_uow()
     for item in (seeded(first_id), seeded(adopt_id), seeded(restart_id), seeded(recovery_id)):
         uow.services.add(item)
@@ -4121,7 +4133,7 @@ else:
     recovery_service = service(recovery_id)
     assert recovery_service.service_revision == 2 and recovery_service.design_state == "seeded"
 
-    assert registry.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+    assert registry.inspect_migration() == MigrationState("registry", 4, 4, "ready")
     for service_id in (first_id, adopt_id, restart_id):
         locator = catalog.allocate(service_id)
         assert catalog.inspect_migration(locator) == MigrationState(
@@ -4140,11 +4152,12 @@ else:
     with sqlite3.connect(root / "registry.sqlite") as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         terminal = connection.execute(
-            'SELECT "service_id","operation_kind","phase" FROM "aipcs_registry_mutation" '
+            'SELECT "service_id","operation_kind","phase","intent_json",'
+            '"result_json","recovery_category" FROM "aipcs_registry_claim" '
             'WHERE "principal_id"=? ORDER BY "service_id","idempotency_key"',
             (principal,),
         ).fetchall()
-        assert terminal == [
+        assert [row[:3] for row in terminal] == [
             (str(first_id), "evolve", "completed"),
             (str(first_id), "materialise", "completed"),
             (str(adopt_id), "materialise", "completed"),
@@ -4152,6 +4165,28 @@ else:
             (str(restart_id), "materialise", "completed"),
             (str(recovery_id), "materialise", "recovery_required"),
         ]
+        assert all(row[3] is not None for row in terminal)
+        assert all(row[4] is not None and row[5] is None for row in terminal[:-1])
+        assert terminal[-1][4:] == (None, "recovery_required")
+        identities = connection.execute(
+            'SELECT "service_id","identity_state","domain_name","storage_namespace",'
+            '"claim_idempotency_key","lifecycle_at" FROM "aipcs_registry_identity" '
+            'WHERE "principal_id"=? ORDER BY "service_id"',
+            (principal,),
+        ).fetchall()
+        assert [(row[0], row[1], row[2]) for row in identities] == [
+            (str(first_id), "live", f"domain_{first_id.int}"),
+            (str(adopt_id), "live", f"domain_{adopt_id.int}"),
+            (str(restart_id), "live", f"domain_{restart_id.int}"),
+            (str(recovery_id), "live", f"domain_{recovery_id.int}"),
+        ]
+        assert all(
+            row[3:] == (f"svc_{UUID(row[0]).hex}", None, None) for row in identities
+        )
+        assert connection.execute(
+            'SELECT count(*) FROM "aipcs_registry_receipt" WHERE "principal_id"=?',
+            (principal,),
+        ).fetchone() == (0,)
         audits = connection.execute(
             'SELECT "service_id","action","outcome",count(*) FROM "aipcs_registry_audit" '
             'WHERE "principal_id"=? GROUP BY "service_id","action","outcome" '

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import wraps
 from typing import Any
 from uuid import UUID
@@ -28,20 +29,55 @@ from aipcs_mcp.application.models import (
     StaleRevision,
     UnsupportedTransition,
 )
+from aipcs_mcp.application.operational_lifecycle import (
+    ArchiveCommand,
+    OperationalLifecycleIntent,
+    OperationalLifecyclePhase,
+    RestoreCommand,
+    ResumeCommand,
+    SuspendCommand,
+    transition_target_status,
+)
+from aipcs_mcp.application.registry_authority import (
+    CompletedRegistryClaim,
+    IdentityCollisionKind,
+    LocalRegistryEvent,
+    PortableIntent,
+    PortableOperationKind,
+    PreparedRegistryClaim,
+    PurgeAuthorityKind,
+    PurgeTombstone,
+    ReceiptKind,
+    ReceiptVerification,
+    RecoveryRequiredRegistryClaim,
+    RegistryAuthorityCommand,
+    RegistryAuthorityIntent,
+    RegistryAuthorityOutcome,
+    RegistryClaimConflict,
+    RegistryIdentityCollision,
+    RegistryOperationInProgress,
+    RegistryStaleRevision,
+    RegistryUnsupportedTransition,
+    StorageBackend,
+    TombstonedRegistryClaim,
+    TransferReceipt,
+    prepare_registry_intent,
+)
 from aipcs_mcp.lifecycle import (
     EvolveCommand,
     LifecycleCommand,
     LifecycleIntent,
+    LifecycleKind,
     LifecyclePhase,
     MaterialiseCommand,
     RecoveryState,
     lifecycle_fingerprint,
     prepare_intent,
 )
+from aipcs_mcp.manifest_v2 import ManifestV2
 from aipcs_mcp.relational import RelationalContractError, classify_transition, compile_manifest
 from aipcs_mcp.storage.codecs import (
     decode_legacy_result,
-    decode_lifecycle_intent,
     decode_result,
     decode_service,
     encode_manifest,
@@ -50,13 +86,22 @@ from aipcs_mcp.storage.codecs import (
     encode_time,
 )
 from aipcs_mcp.storage.errors import StorageBusy, StorageMigrationError, StorageUnavailable
+from aipcs_mcp.storage.registry_authority_codecs import (
+    decode_registry_authority_intent,
+    decode_registry_authority_result,
+    encode_registry_authority_intent,
+    encode_registry_authority_result,
+    validate_registry_authority_claim_row,
+)
 
 from .registry_inspection import canonical_row, canonical_rows
 from .result_codes import is_postgresql_busy
 
 _SCHEMA = '"aipcs_registry"'
 _SERVICE = f'{_SCHEMA}."aipcs_registry_service"'
-_MUTATION = f'{_SCHEMA}."aipcs_registry_mutation"'
+_CLAIM = f'{_SCHEMA}."aipcs_registry_claim"'
+_IDENTITY = f'{_SCHEMA}."aipcs_registry_identity"'
+_RECEIPT = f'{_SCHEMA}."aipcs_registry_receipt"'
 _AUDIT = f'{_SCHEMA}."aipcs_registry_audit"'
 
 
@@ -103,6 +148,7 @@ class PostgreSQLRegistryUnitOfWork:
         self.services = self
         self.mutations = self
         self.audits = self
+        self.authority = self
 
     def __repr__(self) -> str:
         return "PostgreSQLRegistryUnitOfWork(<redacted>)"
@@ -170,8 +216,9 @@ class PostgreSQLRegistryUnitOfWork:
     def recovery_state(self, principal_id: str, service_id: UUID) -> RecoveryState:
         self._read()
         cursor = self._execute(
-            f'SELECT * FROM {_MUTATION} WHERE "principal_id"=%s AND "service_id"=%s '
-            'AND "operation_kind" IN (\'materialise\',\'evolve\') '
+            f'SELECT * FROM {_CLAIM} WHERE "principal_id"=%s AND "service_id"=%s '
+            'AND "operation_kind" IN (\'materialise\',\'evolve\',\'suspend\',\'resume\','
+            '\'archive\',\'restore\',\'export\',\'import\',\'purge\') '
             'AND "phase" IN (\'prepared\',\'recovery_required\')',
             (principal_id, str(service_id)),
         )
@@ -180,10 +227,16 @@ class PostgreSQLRegistryUnitOfWork:
             return RecoveryState.CLEAR
         if len(rows) != 1:
             raise StorageMigrationError()
-        intent = decode_lifecycle_intent(rows[0])
-        if intent.phase is LifecyclePhase.PREPARED:
+        row = rows[0]
+        if row["operation_kind"] in {"materialise", "evolve"}:
+            phase = _decode_legacy_lifecycle_intent(row).phase.value
+        else:
+            phase = decode_registry_authority_intent(
+                _canonical_claim_row(row)["intent_json"]
+            ).phase.value
+        if phase == "prepared":
             return RecoveryState.PENDING
-        if intent.phase is LifecyclePhase.RECOVERY_REQUIRED:
+        if phase == "recovery_required":
             return RecoveryState.RECOVERY_REQUIRED
         raise StorageMigrationError()
 
@@ -195,6 +248,7 @@ class PostgreSQLRegistryUnitOfWork:
             "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             encode_service_values(service),
         )
+        self._insert_live_identity(service)
 
     @_bounded_uow
     def save(self, service: Service, expected_service_revision: int) -> ServiceSaveResult:
@@ -216,6 +270,7 @@ class PostgreSQLRegistryUnitOfWork:
             values[2:] + values[:2] + (expected_service_revision,),
         )
         if cursor.rowcount == 1:
+            self._update_live_identity(service)
             return "saved"
         if cursor.rowcount == 0:
             return "stale_revision"
@@ -232,7 +287,7 @@ class PostgreSQLRegistryUnitOfWork:
         self._write()
         if kind not in {"seed", "design"}:
             raise ValueError
-        self._lock("non-lifecycle", principal_id, idempotency_key)
+        self._lock("claim", principal_id, idempotency_key)
         row = self._claim_row(principal_id, idempotency_key)
         if row is None:
             return NewClaim()
@@ -257,12 +312,12 @@ class PostgreSQLRegistryUnitOfWork:
         self._write()
         if kind not in {"seed", "design"} or service.principal_id != principal_id:
             raise ValueError
+        self._lock("claim", principal_id, idempotency_key)
         self._execute(
-            f'INSERT INTO {_MUTATION}('
+            f'INSERT INTO {_CLAIM}('
             '"principal_id","idempotency_key","fingerprint","service_id","operation_kind",'
-            '"phase","created_via","expected_service_revision","expected_schema_version",'
-            '"target_manifest_json","result_json","recovery_category") '
-            "VALUES (%s,%s,%s,%s,%s,'completed',NULL,NULL,NULL,NULL,%s,NULL)",
+            '"phase","created_via","intent_json","result_json","recovery_category") '
+            "VALUES (%s,%s,%s,%s,%s,'completed',NULL,NULL,%s::jsonb,NULL)",
             (
                 principal_id,
                 idempotency_key,
@@ -278,6 +333,7 @@ class PostgreSQLRegistryUnitOfWork:
         self._write()
         if type(command) not in {MaterialiseCommand, EvolveCommand}:
             raise ValueError
+        self._lock("claim", command.principal_id, command.idempotency_key)
         self._lock("lifecycle", command.principal_id, str(command.service_id))
         fingerprint = lifecycle_fingerprint(command)
         row = self._claim_row(command.principal_id, command.idempotency_key)
@@ -298,14 +354,19 @@ class PostgreSQLRegistryUnitOfWork:
             return UnsupportedTransition()
 
         cursor = self._execute(
-            f'SELECT * FROM {_MUTATION} WHERE "principal_id"=%s AND "service_id"=%s '
-            'AND "operation_kind" IN (\'materialise\',\'evolve\') '
+            f'SELECT * FROM {_CLAIM} WHERE "principal_id"=%s AND "service_id"=%s '
+            'AND "operation_kind" IN (\'materialise\',\'evolve\',\'suspend\',\'resume\','
+            '\'archive\',\'restore\',\'export\',\'import\',\'purge\') '
             'AND "phase" IN (\'prepared\',\'recovery_required\') LIMIT 1',
             (command.principal_id, str(command.service_id)),
         )
         blocker = cursor.fetchone()
         if blocker is not None:
-            intent = decode_lifecycle_intent(canonical_row(cursor, blocker))
+            row = _canonical_claim_row(canonical_row(cursor, blocker))
+            if row["operation_kind"] not in {"materialise", "evolve"}:
+                decode_registry_authority_intent(row["intent_json"])
+                return OperationInProgress()
+            intent = _decode_legacy_lifecycle_intent(row)
             if intent.phase is LifecyclePhase.RECOVERY_REQUIRED:
                 return RecoveryRequiredLifecycleClaim(intent)
             return OperationInProgress()
@@ -332,6 +393,7 @@ class PostgreSQLRegistryUnitOfWork:
         if type(completion) not in {MaterialiseCompletion, EvolveCompletion}:
             raise ValueError
         intent = completion.prepared_intent
+        self._lock("claim", intent.principal_id, intent.idempotency_key)
         self._lock("lifecycle", intent.principal_id, str(intent.service_id))
         existing = self._terminal_or_prepared(intent)
         if type(existing) in {CompletedLifecycleClaim, RecoveryRequiredLifecycleClaim}:
@@ -348,7 +410,7 @@ class PostgreSQLRegistryUnitOfWork:
 
         terminal_intent = intent.with_phase(LifecyclePhase.COMPLETED)
         cursor = self._execute(
-            f'UPDATE {_MUTATION} SET "phase"=\'completed\',"result_json"=%s '
+            f'UPDATE {_CLAIM} SET "phase"=\'completed\',"result_json"=%s::jsonb '
             'WHERE "principal_id"=%s AND "idempotency_key"=%s AND "fingerprint"=%s '
             'AND "phase"=\'prepared\'',
             (
@@ -369,6 +431,7 @@ class PostgreSQLRegistryUnitOfWork:
     ) -> CompletedLifecycleClaim | RecoveryRequiredLifecycleClaim:
         self._write()
         encode_time(at)
+        self._lock("claim", prepared_intent.principal_id, prepared_intent.idempotency_key)
         self._lock(
             "lifecycle",
             prepared_intent.principal_id,
@@ -381,12 +444,12 @@ class PostgreSQLRegistryUnitOfWork:
 
     def _claim_row(self, principal_id: str, idempotency_key: str) -> dict[str, Any] | None:
         cursor = self._execute(
-            f'SELECT * FROM {_MUTATION} '
+            f'SELECT * FROM {_CLAIM} '
             'WHERE "principal_id"=%s AND "idempotency_key"=%s',
             (principal_id, idempotency_key),
         )
         row = cursor.fetchone()
-        return None if row is None else canonical_row(cursor, row)
+        return None if row is None else _canonical_claim_row(canonical_row(cursor, row))
 
     def _service(self, principal_id: str, service_id: UUID) -> Service | None:
         cursor = self._execute(
@@ -421,7 +484,7 @@ class PostgreSQLRegistryUnitOfWork:
     ) -> LifecycleRegistryOutcome:
         if row["fingerprint"] != fingerprint or row["operation_kind"] != command.kind.value:
             return ConflictClaim()
-        intent = decode_lifecycle_intent(row)
+        intent = _decode_legacy_lifecycle_intent(row)
         if intent.phase is LifecyclePhase.PREPARED:
             return PreparedLifecycleClaim(intent)
         if intent.phase is LifecyclePhase.RECOVERY_REQUIRED:
@@ -431,11 +494,10 @@ class PostgreSQLRegistryUnitOfWork:
 
     def _insert_prepared(self, intent: LifecycleIntent) -> None:
         self._execute(
-            f'INSERT INTO {_MUTATION}('
+            f'INSERT INTO {_CLAIM}('
             '"principal_id","idempotency_key","fingerprint","service_id","operation_kind",'
-            '"phase","created_via","expected_service_revision","expected_schema_version",'
-            '"target_manifest_json","result_json","recovery_category") '
-            "VALUES (%s,%s,%s,%s,%s,'prepared',%s,%s,%s,%s,NULL,NULL)",
+            '"phase","created_via","intent_json","result_json","recovery_category") '
+            "VALUES (%s,%s,%s,%s,%s,'prepared',%s,%s::jsonb,NULL,NULL)",
             (
                 intent.principal_id,
                 intent.idempotency_key,
@@ -443,9 +505,7 @@ class PostgreSQLRegistryUnitOfWork:
                 str(intent.service_id),
                 intent.kind.value,
                 intent.created_via,
-                intent.expected_service_revision,
-                intent.expected_schema_version,
-                encode_manifest(intent.target_manifest),
+                _encode_legacy_lifecycle_intent(intent),
             ),
         )
 
@@ -460,7 +520,7 @@ class PostgreSQLRegistryUnitOfWork:
         row = self._claim_row(prepared_intent.principal_id, prepared_intent.idempotency_key)
         if row is None or row["fingerprint"] != prepared_intent.fingerprint:
             raise ValueError
-        stored = decode_lifecycle_intent(row)
+        stored = _decode_legacy_lifecycle_intent(row)
         if stored.kind is not prepared_intent.kind:
             raise ValueError
         if stored.phase is LifecyclePhase.PREPARED:
@@ -537,7 +597,7 @@ class PostgreSQLRegistryUnitOfWork:
     ) -> RecoveryRequiredLifecycleClaim:
         encode_time(at)
         cursor = self._execute(
-            f'UPDATE {_MUTATION} SET "phase"=\'recovery_required\','
+            f'UPDATE {_CLAIM} SET "phase"=\'recovery_required\','
             '"recovery_category"=\'recovery_required\' WHERE "principal_id"=%s '
             'AND "idempotency_key"=%s AND "fingerprint"=%s AND "phase"=\'prepared\'',
             (intent.principal_id, intent.idempotency_key, intent.fingerprint),
@@ -558,6 +618,395 @@ class PostgreSQLRegistryUnitOfWork:
                 created_via=intent.created_via,
                 at=at,
             )
+        )
+
+    @_bounded_uow
+    def resolve_or_prepare(self, command: RegistryAuthorityCommand) -> RegistryAuthorityOutcome:
+        self._write()
+        intent = prepare_registry_intent(command)
+        self._lock("claim", intent.principal_id, intent.idempotency_key)
+        # Service-scoped locks serialize state transitions; import additionally
+        # locks its global identity and principal/domain allocation below.
+        self._lock("service", intent.principal_id, str(intent.service_id))
+        row = self._claim_row(intent.principal_id, intent.idempotency_key)
+        if row is not None:
+            return self._existing_authority_claim(row, intent)
+        if type(intent) is PortableIntent and intent.kind is PortableOperationKind.IMPORT:
+            if intent.destination_backend is not StorageBackend.POSTGRESQL:
+                return RegistryUnsupportedTransition()
+            assert intent.identity is not None
+            self._lock("identity", "service", str(intent.service_id))
+            self._lock("identity", intent.identity.principal_id, intent.identity.domain_name)
+            collision = self._import_collision(intent)
+            if collision is not None:
+                return collision
+            self._insert_authority_prepared(intent)
+            self._execute(
+                f'INSERT INTO {_IDENTITY}("service_id","principal_id","domain_name",'
+                '"storage_backend","storage_namespace","identity_state",'
+                '"claim_idempotency_key","lifecycle_at") '
+                "VALUES (%s,%s,%s,%s,%s,'import_prepared',%s,%s)",
+                (str(intent.service_id), intent.principal_id, intent.identity.domain_name,
+                 intent.destination_backend.value if intent.destination_backend is not None else None,
+                 intent.identity.logical_namespace, intent.idempotency_key, encode_time(datetime.now(UTC))),
+            )
+            return PreparedRegistryClaim(intent)
+        service = self._service(intent.principal_id, intent.service_id)
+        if service is None or intent.expected_service_revision is None:
+            return RegistryStaleRevision()
+        if service.service_revision != intent.expected_service_revision:
+            return RegistryStaleRevision()
+        blocker = self._authority_blocker(intent.principal_id, intent.service_id)
+        if blocker is not None:
+            return blocker
+        if type(intent) is OperationalLifecycleIntent:
+            try:
+                transition_target_status(_operational_command(intent), service.design_state, service.operational_status)
+            except Exception:
+                return RegistryUnsupportedTransition()
+        elif intent.kind is PortableOperationKind.EXPORT:
+            if service.design_state == "materialised" and service.operational_status == "active":
+                return RegistryUnsupportedTransition()
+        elif intent.kind is PortableOperationKind.PURGE:
+            if service.operational_status != "archived" or not self._purge_receipt_is_valid(intent):
+                return RegistryUnsupportedTransition()
+        self._insert_authority_prepared(intent)
+        return PreparedRegistryClaim(intent)
+
+    @_bounded_uow
+    def finalize_operational(self, prepared: RegistryAuthorityIntent, at: datetime) -> RegistryAuthorityOutcome:
+        self._write()
+        if type(prepared) is not OperationalLifecycleIntent:
+            raise ValueError
+        self._lock("claim", prepared.principal_id, prepared.idempotency_key)
+        self._lock("service", prepared.principal_id, str(prepared.service_id))
+        existing = self._authority_prepared_or_terminal(prepared)
+        if type(existing) is not PreparedRegistryClaim:
+            return existing
+        service = self._service(prepared.principal_id, prepared.service_id)
+        try:
+            if service is None or service.service_revision != prepared.expected_service_revision or at < service.updated_at:
+                raise ValueError
+            target = transition_target_status(
+                _operational_command(prepared), service.design_state, service.operational_status
+            )
+            terminal_service = replace(
+                service, operational_status=target, updated_at=at, last_activity_at=at,
+                service_revision=service.service_revision + 1,
+            )
+            if self.save(terminal_service, prepared.expected_service_revision) != "saved":
+                raise ValueError
+        except Exception:
+            return self._mark_authority_recovery(prepared, at)
+        return self._complete_authority(prepared, terminal_service, at)
+
+    @_bounded_uow
+    def complete_export(self, prepared: RegistryAuthorityIntent, receipt: TransferReceipt) -> RegistryAuthorityOutcome:
+        self._write()
+        if type(prepared) is not PortableIntent or prepared.kind is not PortableOperationKind.EXPORT:
+            raise ValueError
+        self._lock("claim", prepared.principal_id, prepared.idempotency_key)
+        self._lock("service", prepared.principal_id, str(prepared.service_id))
+        existing = self._authority_prepared_or_terminal(prepared)
+        if type(existing) is not PreparedRegistryClaim:
+            return existing
+        service = self._service(prepared.principal_id, prepared.service_id)
+        if (
+            service is None or service.service_revision != prepared.expected_service_revision
+            or receipt.kind is not ReceiptKind.EXPORT or receipt.verification is not ReceiptVerification.VERIFIED
+            or receipt.storage_backend is not StorageBackend.POSTGRESQL
+            or receipt.principal_id != prepared.principal_id or receipt.service_id != prepared.service_id
+            or receipt.service_revision != prepared.expected_service_revision
+            or receipt.operational_status != service.operational_status
+            or (service.storage is not None and receipt.storage_backend.value != service.storage.backend)
+            or self._receipt_exists(receipt.receipt_id)
+        ):
+            return self._mark_authority_recovery(prepared, receipt.created_at)
+        self._insert_receipt(prepared, receipt)
+        return self._complete_authority(prepared, receipt, receipt.created_at)
+
+    @_bounded_uow
+    def publish_import(
+        self, prepared: RegistryAuthorityIntent, service: Service, receipt: TransferReceipt
+    ) -> RegistryAuthorityOutcome:
+        self._write()
+        if type(prepared) is not PortableIntent or prepared.kind is not PortableOperationKind.IMPORT:
+            raise ValueError
+        self._lock("claim", prepared.principal_id, prepared.idempotency_key)
+        self._lock("service", prepared.principal_id, str(prepared.service_id))
+        existing = self._authority_prepared_or_terminal(prepared)
+        if type(existing) is not PreparedRegistryClaim:
+            return existing
+        identity = prepared.identity
+        cursor = self._execute(f'SELECT * FROM {_IDENTITY} WHERE "service_id"=%s', (str(prepared.service_id),))
+        raw = cursor.fetchone()
+        reservation = None if raw is None else canonical_row(cursor, raw)
+        if (
+            identity is None or reservation is None
+            or reservation["identity_state"] != "import_prepared"
+            or reservation["principal_id"] != identity.principal_id
+            or reservation["domain_name"] != identity.domain_name
+            or reservation["storage_namespace"] != identity.logical_namespace
+            or reservation["claim_idempotency_key"] != prepared.idempotency_key
+            or self._service(identity.principal_id, identity.service_id) is not None
+            or service.principal_id != identity.principal_id or service.service_id != identity.service_id
+            or service.domain_name != identity.domain_name
+            or (service.storage is not None and service.storage.namespace != identity.logical_namespace)
+            or (
+                service.storage is not None
+                and (
+                    prepared.destination_backend is None
+                    or service.storage.backend != prepared.destination_backend.value
+                )
+            )
+            or receipt.kind is not ReceiptKind.IMPORT or receipt.verification is not ReceiptVerification.VERIFIED
+            or receipt.principal_id != identity.principal_id or receipt.service_id != identity.service_id
+            or receipt.bundle_root_sha256 != prepared.bundle_root_sha256
+            or receipt.storage_backend is not prepared.destination_backend
+            or prepared.destination_backend is not StorageBackend.POSTGRESQL
+            or receipt.service_revision != service.service_revision or receipt.operational_status != service.operational_status
+            or self._receipt_exists(receipt.receipt_id)
+        ):
+            return self._mark_authority_recovery(prepared, receipt.created_at)
+        cursor = self._execute(
+            f"INSERT INTO {_SERVICE} VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            encode_service_values(service),
+        )
+        if cursor.rowcount != 1:
+            raise StorageMigrationError()
+        cursor = self._execute(
+            f'UPDATE {_IDENTITY} SET "identity_state"=\'live\',"storage_backend"=%s,'
+            '"claim_idempotency_key"=NULL,"lifecycle_at"=NULL '
+            'WHERE "service_id"=%s AND "identity_state"=\'import_prepared\'',
+            (service.storage.backend if service.storage is not None else None, str(service.service_id)),
+        )
+        if cursor.rowcount != 1:
+            raise StorageMigrationError()
+        self._insert_receipt(prepared, receipt)
+        return self._complete_authority(prepared, service, receipt.created_at)
+
+    @_bounded_uow
+    def finalize_purge(self, prepared: RegistryAuthorityIntent, at: datetime) -> RegistryAuthorityOutcome:
+        self._write()
+        if type(prepared) is not PortableIntent or prepared.kind is not PortableOperationKind.PURGE:
+            raise ValueError
+        self._lock("claim", prepared.principal_id, prepared.idempotency_key)
+        self._lock("service", prepared.principal_id, str(prepared.service_id))
+        existing = self._authority_prepared_or_terminal(prepared)
+        if type(existing) is not PreparedRegistryClaim:
+            return existing
+        service = self._service(prepared.principal_id, prepared.service_id)
+        if (
+            service is None or service.service_revision != prepared.expected_service_revision
+            or service.operational_status != "archived" or at < service.updated_at
+            or not self._purge_receipt_is_valid(prepared)
+        ):
+            return self._mark_authority_recovery(prepared, at)
+        assert prepared.purge_authority is not None
+        tombstone = PurgeTombstone(
+            service.principal_id, service.service_id, f"svc_{service.service_id.hex}", prepared.created_via,
+            at, prepared.purge_authority, prepared.purge_authority.receipt_id,
+        )
+        self._execute(
+            f'UPDATE {_CLAIM} SET "phase"=\'tombstoned\',"created_via"=NULL,'
+            '"intent_json"=NULL,"result_json"=NULL,"recovery_category"=NULL '
+            'WHERE "principal_id"=%s AND "service_id"=%s AND "idempotency_key"<>%s',
+            (prepared.principal_id, str(prepared.service_id), prepared.idempotency_key),
+        )
+        cursor = self._execute(
+            f'DELETE FROM {_SERVICE} WHERE "principal_id"=%s AND "service_id"=%s',
+            (prepared.principal_id, str(prepared.service_id)),
+        )
+        if cursor.rowcount != 1:
+            raise StorageMigrationError()
+        cursor = self._execute(
+            f'UPDATE {_IDENTITY} SET "identity_state"=\'tombstoned\',"domain_name"=NULL,'
+            '"storage_backend"=NULL,"claim_idempotency_key"=%s,"lifecycle_at"=%s '
+            'WHERE "service_id"=%s',
+            (prepared.idempotency_key, encode_time(at), str(prepared.service_id)),
+        )
+        if cursor.rowcount != 1:
+            raise StorageMigrationError()
+        return self._complete_authority(prepared, tombstone, at)
+
+    def _insert_live_identity(self, service: Service) -> None:
+        self._execute(
+            f'INSERT INTO {_IDENTITY}("service_id","principal_id","domain_name",'
+            '"storage_backend","storage_namespace","identity_state",'
+            '"claim_idempotency_key","lifecycle_at") '
+            "VALUES (%s,%s,%s,%s,%s,'live',NULL,NULL)",
+            (str(service.service_id), service.principal_id, service.domain_name,
+             service.storage.backend if service.storage is not None else None,
+             f"svc_{service.service_id.hex}"),
+        )
+
+    def _update_live_identity(self, service: Service) -> None:
+        cursor = self._execute(
+            f'UPDATE {_IDENTITY} SET "domain_name"=%s,"storage_backend"=%s '
+            'WHERE "service_id"=%s AND "principal_id"=%s AND "identity_state"=\'live\'',
+            (service.domain_name, service.storage.backend if service.storage is not None else None,
+             str(service.service_id), service.principal_id),
+        )
+        if cursor.rowcount != 1:
+            raise StorageMigrationError()
+
+    def _existing_authority_claim(
+        self, row: Mapping[str, Any], intent: RegistryAuthorityIntent
+    ) -> RegistryAuthorityOutcome:
+        if row["operation_kind"] in {"legacy", "seed", "design", "materialise", "evolve"}:
+            return RegistryClaimConflict()
+        row = _canonical_claim_row(row)
+        if row["phase"] == "tombstoned":
+            value = validate_registry_authority_claim_row(row)
+            if type(value) is not TombstonedRegistryClaim:
+                raise StorageMigrationError()
+            if value.fingerprint == intent.fingerprint and value.operation_kind == intent.kind.value and value.service_id == intent.service_id:
+                return value
+            return RegistryClaimConflict()
+        stored = decode_registry_authority_intent(row["intent_json"])
+        if type(stored) is not type(intent) or stored.kind != intent.kind or stored.fingerprint != intent.fingerprint:
+            return RegistryClaimConflict()
+        value = validate_registry_authority_claim_row(row)
+        if stored.phase is OperationalLifecyclePhase.PREPARED:
+            if value != stored:
+                raise StorageMigrationError()
+            return PreparedRegistryClaim(stored)
+        if stored.phase is OperationalLifecyclePhase.RECOVERY_REQUIRED:
+            if value != stored:
+                raise StorageMigrationError()
+            return RecoveryRequiredRegistryClaim(stored)
+        return CompletedRegistryClaim(stored, decode_registry_authority_result(row["result_json"], stored))
+
+    def _authority_prepared_or_terminal(
+        self, prepared: RegistryAuthorityIntent
+    ) -> PreparedRegistryClaim | CompletedRegistryClaim | RecoveryRequiredRegistryClaim:
+        if prepared.phase is not OperationalLifecyclePhase.PREPARED:
+            raise ValueError
+        row = self._claim_row(prepared.principal_id, prepared.idempotency_key)
+        if row is None:
+            raise ValueError
+        current = self._existing_authority_claim(row, prepared)
+        if type(current) in {RegistryClaimConflict, TombstonedRegistryClaim}:
+            raise ValueError
+        return current
+
+    def _authority_blocker(self, principal_id: str, service_id: UUID) -> RegistryAuthorityOutcome | None:
+        cursor = self._execute(
+            f'SELECT * FROM {_CLAIM} WHERE "principal_id"=%s AND "service_id"=%s '
+            'AND "operation_kind" IN (\'materialise\',\'evolve\',\'suspend\',\'resume\','
+            '\'archive\',\'restore\',\'export\',\'import\',\'purge\') '
+            'AND "phase" IN (\'prepared\',\'recovery_required\') LIMIT 1',
+            (principal_id, str(service_id)),
+        )
+        raw = cursor.fetchone()
+        if raw is None:
+            return None
+        row = _canonical_claim_row(canonical_row(cursor, raw))
+        if row["operation_kind"] in {"materialise", "evolve"}:
+            legacy = _decode_legacy_lifecycle_intent(row)
+            if legacy.phase is LifecyclePhase.RECOVERY_REQUIRED:
+                return RecoveryRequiredRegistryClaim(legacy)
+            return RegistryOperationInProgress(legacy)
+        stored = decode_registry_authority_intent(row["intent_json"])
+        if stored.phase is OperationalLifecyclePhase.RECOVERY_REQUIRED:
+            return RecoveryRequiredRegistryClaim(stored)
+        return RegistryOperationInProgress(stored)
+
+    def _insert_authority_prepared(self, intent: RegistryAuthorityIntent) -> None:
+        self._execute(
+            f'INSERT INTO {_CLAIM}("principal_id","idempotency_key","fingerprint","service_id",'
+            '"operation_kind","phase","created_via","intent_json","result_json","recovery_category") '
+            "VALUES (%s,%s,%s,%s,%s,'prepared',%s,%s::jsonb,NULL,NULL)",
+            (intent.principal_id, intent.idempotency_key, intent.fingerprint, str(intent.service_id),
+             intent.kind.value, intent.created_via, encode_registry_authority_intent(intent)),
+        )
+
+    def _complete_authority(
+        self, prepared: RegistryAuthorityIntent, result: object, at: datetime
+    ) -> CompletedRegistryClaim:
+        terminal = prepared.with_phase(OperationalLifecyclePhase.COMPLETED)
+        cursor = self._execute(
+            f'UPDATE {_CLAIM} SET "phase"=\'completed\',"intent_json"=%s::jsonb,'
+            '"result_json"=%s::jsonb '
+            'WHERE "principal_id"=%s AND "idempotency_key"=%s AND "fingerprint"=%s '
+            'AND "phase"=\'prepared\'',
+            (encode_registry_authority_intent(terminal), encode_registry_authority_result(result),
+             prepared.principal_id,
+             prepared.idempotency_key, prepared.fingerprint),
+        )
+        if cursor.rowcount != 1:
+            raise StorageMigrationError()
+        completed = CompletedRegistryClaim(terminal, result)
+        self._append_local_event(terminal, "completed", at)
+        return completed
+
+    def _mark_authority_recovery(
+        self, prepared: RegistryAuthorityIntent, at: datetime
+    ) -> RecoveryRequiredRegistryClaim:
+        terminal = prepared.with_phase(OperationalLifecyclePhase.RECOVERY_REQUIRED)
+        cursor = self._execute(
+            f'UPDATE {_CLAIM} SET "phase"=\'recovery_required\',"intent_json"=%s::jsonb,'
+            '"recovery_category"=\'recovery_required\' '
+            'WHERE "principal_id"=%s AND "idempotency_key"=%s AND "fingerprint"=%s AND "phase"=\'prepared\'',
+            (encode_registry_authority_intent(terminal), prepared.principal_id,
+             prepared.idempotency_key, prepared.fingerprint),
+        )
+        if cursor.rowcount != 1:
+            raise StorageMigrationError()
+        self._append_local_event(terminal, "recovery_required", at)
+        return RecoveryRequiredRegistryClaim(terminal)
+
+    def _append_local_event(self, intent: RegistryAuthorityIntent, outcome: str, at: datetime) -> None:
+        event = LocalRegistryEvent(intent.kind.value, outcome, intent.service_id, intent.principal_id, intent.created_via, at)
+        self.append(AuditEvent(event.action, event.outcome, event.service_id, event.principal_id, event.created_via, event.at))
+
+    def _import_collision(self, intent: PortableIntent) -> RegistryIdentityCollision | None:
+        assert intent.identity is not None
+        cursor = self._execute(f'SELECT "identity_state" FROM {_IDENTITY} WHERE "service_id"=%s', (str(intent.service_id),))
+        by_service = cursor.fetchone()
+        if by_service is not None:
+            state = by_service[0]
+            return RegistryIdentityCollision(IdentityCollisionKind.TOMBSTONE if state == "tombstoned" else IdentityCollisionKind.SERVICE_ID)
+        cursor = self._execute(
+            f'SELECT 1 FROM {_IDENTITY} WHERE "principal_id"=%s AND "domain_name"=%s '
+            'AND "identity_state" IN (\'live\',\'import_prepared\')',
+            (intent.identity.principal_id, intent.identity.domain_name),
+        )
+        return RegistryIdentityCollision(IdentityCollisionKind.DOMAIN) if cursor.fetchone() is not None else None
+
+    def _receipt_exists(self, receipt_id: UUID) -> bool:
+        return self._execute(f'SELECT 1 FROM {_RECEIPT} WHERE "receipt_id"=%s', (str(receipt_id),)).fetchone() is not None
+
+    def _insert_receipt(self, intent: PortableIntent, receipt: TransferReceipt) -> None:
+        self._execute(
+            f'INSERT INTO {_RECEIPT}("receipt_id","principal_id","idempotency_key","service_id",'
+            '"receipt_kind","bundle_root_sha256","export_format_version","storage_backend",'
+            '"service_revision","operational_status","verification","created_at") '
+            'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+            (str(receipt.receipt_id), receipt.principal_id, intent.idempotency_key, str(receipt.service_id),
+             receipt.kind.value, receipt.bundle_root_sha256, receipt.export_format_version,
+             receipt.storage_backend.value, receipt.service_revision, receipt.operational_status,
+             receipt.verification.value, encode_time(receipt.created_at)),
+        )
+
+    def _purge_receipt_is_valid(self, intent: PortableIntent) -> bool:
+        if intent.purge_authority is None:
+            return False
+        if intent.purge_authority.kind is PurgeAuthorityKind.EXPLICIT_OVERRIDE:
+            return True
+        receipt_id = intent.purge_authority.receipt_id
+        if receipt_id is None:
+            return False
+        cursor = self._execute(f'SELECT * FROM {_RECEIPT} WHERE "receipt_id"=%s', (str(receipt_id),))
+        raw = cursor.fetchone()
+        if raw is None:
+            return False
+        row = canonical_row(cursor, raw)
+        return (
+            row["receipt_kind"] == "export" and row["verification"] == "verified"
+            and row["principal_id"] == intent.principal_id and str(row["service_id"]) == str(intent.service_id)
+            and row["service_revision"] == intent.expected_service_revision and row["operational_status"] == "archived"
         )
 
     @_bounded_uow
@@ -643,6 +1092,80 @@ class PostgreSQLRegistryUnitOfWork:
         if not callable(execute):
             raise StorageMigrationError()
         return execute(sql, params)
+
+
+def _canonical_json(value: object) -> str:
+    """Recover the exact codec representation from PostgreSQL jsonb values."""
+
+    if type(value) is str:
+        value = json.loads(value)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def _canonical_claim_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(row)
+    for key in ("intent_json", "result_json"):
+        if result.get(key) is not None:
+            result[key] = _canonical_json(result[key])
+    return result
+
+
+def _encode_legacy_lifecycle_intent(intent: LifecycleIntent) -> str:
+    """Keep R1 lifecycle evidence valid after the claim-ledger migration."""
+
+    value = {
+        "created_via": intent.created_via,
+        "expected_schema_version": intent.expected_schema_version,
+        "expected_service_revision": intent.expected_service_revision,
+        "kind": intent.kind.value,
+        "principal": intent.principal_id,
+        "service_id": str(intent.service_id),
+        "target_manifest": json.loads(encode_manifest(intent.target_manifest)),
+    }
+    return _canonical_json(value)
+
+
+def _decode_legacy_lifecycle_intent(row: Mapping[str, Any]) -> LifecycleIntent:
+    try:
+        if row["operation_kind"] not in {"materialise", "evolve"}:
+            raise ValueError
+        raw = json.loads(_canonical_json(row["intent_json"]))
+        if set(raw) != {
+            "created_via", "expected_schema_version", "expected_service_revision",
+            "kind", "principal", "service_id", "target_manifest",
+        }:
+            raise ValueError
+        intent = LifecycleIntent(
+            kind=LifecycleKind(raw["kind"]), phase=LifecyclePhase(row["phase"]),
+            principal_id=raw["principal"], created_via=raw["created_via"],
+            service_id=UUID(raw["service_id"]),
+            expected_service_revision=raw["expected_service_revision"],
+            expected_schema_version=raw["expected_schema_version"],
+            idempotency_key=row["idempotency_key"], fingerprint=row["fingerprint"],
+            target_manifest=ManifestV2.model_validate(raw["target_manifest"]),
+        )
+        if (
+            intent.principal_id != row["principal_id"]
+            or str(intent.service_id) != str(row["service_id"])
+            or intent.kind.value != row["operation_kind"]
+        ):
+            raise ValueError
+        return intent
+    except Exception:
+        raise StorageMigrationError() from None
+
+
+def _operational_command(intent: OperationalLifecycleIntent):
+    command_types = {
+        "suspend": SuspendCommand,
+        "resume": ResumeCommand,
+        "archive": ArchiveCommand,
+        "restore": RestoreCommand,
+    }
+    return command_types[intent.kind.value](
+        intent.principal_id, intent.created_via, intent.service_id,
+        intent.expected_service_revision, intent.idempotency_key,
+    )
 
 
 def _is_connection_error(error: BaseException) -> bool:

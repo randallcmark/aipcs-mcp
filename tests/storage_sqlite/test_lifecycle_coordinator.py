@@ -96,7 +96,7 @@ def _evolved(current: ManifestV2) -> ManifestV2:
 
 def _adapter(root: Path) -> SQLiteRegistryAdapter:
     adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
-    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+    assert adapter.migrate() == MigrationState("registry", 4, 4, "ready")
     return adapter
 
 
@@ -195,7 +195,7 @@ def _audit_rows(root: Path) -> list[tuple[str, str, str]]:
 def _mutation_phase(root: Path, key: str) -> str:
     with sqlite3.connect(root / "registry.sqlite") as connection:
         row = connection.execute(
-            'SELECT "phase" FROM "aipcs_registry_mutation" '
+            'SELECT "phase" FROM "aipcs_registry_claim" '
             'WHERE "principal_id"=? AND "idempotency_key"=?',
             (_PRINCIPAL, key),
         ).fetchone()

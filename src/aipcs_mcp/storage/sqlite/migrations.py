@@ -1,4 +1,4 @@
-"""Immutable compiled SQLite registry migration descriptors through R3."""
+"""Immutable compiled SQLite registry migration descriptors through R4."""
 
 from __future__ import annotations
 
@@ -534,6 +534,473 @@ R3_FOREIGN_KEYS = {**R2_FOREIGN_KEYS, R3_POLICY_TABLE: ()}
 R3_INDEX_LIST = {**R2_INDEX_LIST, R3_POLICY_TABLE: ()}
 R3_INDEX_XINFO = R2_INDEX_XINFO
 
+
+R4_MIGRATION_ID = "registry-0004-portable-lifecycle"
+R4_DDL = (
+    """CREATE TABLE "aipcs_registry_claim" (
+    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),
+    "idempotency_key" TEXT NOT NULL CHECK (length("idempotency_key") BETWEEN 1 AND 128),
+    "fingerprint" TEXT NOT NULL CHECK (
+        length("fingerprint") = 64 AND "fingerprint" = lower("fingerprint")
+        AND "fingerprint" NOT GLOB '*[^0-9a-f]*'
+    ),
+    "service_id" TEXT NOT NULL CHECK (
+        length("service_id") = 36 AND "service_id" = lower("service_id")
+        AND substr("service_id", 9, 1) = '-' AND substr("service_id", 14, 1) = '-'
+        AND substr("service_id", 19, 1) = '-' AND substr("service_id", 24, 1) = '-'
+        AND replace("service_id", '-', '') NOT GLOB '*[^0-9a-f]*'
+        AND length(replace("service_id", '-', '')) = 32
+        AND replace("service_id", '-', '') != '00000000000000000000000000000000'
+    ),
+    "operation_kind" TEXT NOT NULL CHECK (
+        "operation_kind" IN (
+            'legacy', 'seed', 'design', 'materialise', 'evolve',
+            'suspend', 'resume', 'archive', 'restore', 'export', 'import', 'purge'
+        )
+    ),
+    "phase" TEXT NOT NULL CHECK (
+        "phase" IN ('prepared', 'completed', 'recovery_required', 'tombstoned')
+    ),
+    "created_via" TEXT CHECK (
+        "created_via" IS NULL OR length("created_via") BETWEEN 1 AND 64
+    ),
+    "intent_json" TEXT,
+    "result_json" TEXT,
+    "recovery_category" TEXT CHECK (
+        "recovery_category" IS NULL OR "recovery_category" = 'recovery_required'
+    ),
+    PRIMARY KEY ("principal_id", "idempotency_key"),
+    UNIQUE ("principal_id", "idempotency_key", "service_id"),
+    CHECK (
+        (
+            "phase" = 'tombstoned' AND "operation_kind" != 'purge'
+            AND "created_via" IS NULL AND "intent_json" IS NULL
+            AND "result_json" IS NULL AND "recovery_category" IS NULL
+        )
+        OR (
+            "phase" = 'prepared'
+            AND "operation_kind" NOT IN ('legacy', 'seed', 'design')
+            AND "created_via" IS NOT NULL AND "intent_json" IS NOT NULL
+            AND "result_json" IS NULL AND "recovery_category" IS NULL
+        )
+        OR (
+            "phase" = 'completed'
+            AND (
+                (
+                    "operation_kind" IN ('legacy', 'seed', 'design')
+                    AND "created_via" IS NULL AND "intent_json" IS NULL
+                )
+                OR (
+                    "operation_kind" NOT IN ('legacy', 'seed', 'design')
+                    AND "created_via" IS NOT NULL AND "intent_json" IS NOT NULL
+                )
+            )
+            AND "result_json" IS NOT NULL AND "recovery_category" IS NULL
+        )
+        OR (
+            "phase" = 'recovery_required'
+            AND "operation_kind" NOT IN ('legacy', 'seed', 'design')
+            AND "created_via" IS NOT NULL AND "intent_json" IS NOT NULL
+            AND "result_json" IS NULL AND "recovery_category" IS NOT NULL
+            AND "recovery_category" = 'recovery_required'
+        )
+    )
+) STRICT""",
+    """CREATE TABLE "aipcs_registry_identity" (
+    "service_id" TEXT PRIMARY KEY NOT NULL CHECK (
+        length("service_id") = 36 AND "service_id" = lower("service_id")
+        AND substr("service_id", 9, 1) = '-' AND substr("service_id", 14, 1) = '-'
+        AND substr("service_id", 19, 1) = '-' AND substr("service_id", 24, 1) = '-'
+        AND replace("service_id", '-', '') NOT GLOB '*[^0-9a-f]*'
+        AND length(replace("service_id", '-', '')) = 32
+        AND replace("service_id", '-', '') != '00000000000000000000000000000000'
+    ),
+    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),
+    "identity_state" TEXT NOT NULL CHECK (
+        "identity_state" IN ('live', 'import_prepared', 'tombstoned')
+    ),
+    "domain_name" TEXT CHECK (
+        "domain_name" IS NULL OR length("domain_name") BETWEEN 1 AND 63
+    ),
+    "storage_backend" TEXT CHECK (
+        "storage_backend" IS NULL OR "storage_backend" IN ('sqlite', 'postgresql')
+    ),
+    "storage_namespace" TEXT NOT NULL CHECK (
+        length("storage_namespace") = 36
+        AND substr("storage_namespace", 1, 4) = 'svc_'
+        AND substr("storage_namespace", 5) NOT GLOB '*[^0-9a-f]*'
+        AND substr("storage_namespace", 5) = replace("service_id", '-', '')
+    ),
+    "claim_idempotency_key" TEXT CHECK (
+        "claim_idempotency_key" IS NULL
+        OR length("claim_idempotency_key") BETWEEN 1 AND 128
+    ),
+    "lifecycle_at" TEXT CHECK (
+        "lifecycle_at" IS NULL OR (
+            length("lifecycle_at") = 27 AND substr("lifecycle_at", 11, 1) = 'T'
+            AND substr("lifecycle_at", 20, 1) = '.'
+            AND substr("lifecycle_at", 27, 1) = 'Z'
+        )
+    ),
+    UNIQUE ("storage_namespace"),
+    FOREIGN KEY ("principal_id", "claim_idempotency_key", "service_id")
+        REFERENCES "aipcs_registry_claim" (
+            "principal_id", "idempotency_key", "service_id"
+        )
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK (
+        (
+            "identity_state" = 'live' AND "domain_name" IS NOT NULL
+            AND "claim_idempotency_key" IS NULL AND "lifecycle_at" IS NULL
+        )
+        OR (
+            "identity_state" = 'import_prepared' AND "domain_name" IS NOT NULL
+            AND "storage_backend" IS NOT NULL
+            AND "claim_idempotency_key" IS NOT NULL AND "lifecycle_at" IS NOT NULL
+        )
+        OR (
+            "identity_state" = 'tombstoned' AND "domain_name" IS NULL
+            AND "storage_backend" IS NULL
+            AND "claim_idempotency_key" IS NOT NULL AND "lifecycle_at" IS NOT NULL
+        )
+    )
+) STRICT""",
+    """CREATE TABLE "aipcs_registry_receipt" (
+    "receipt_id" TEXT PRIMARY KEY NOT NULL CHECK (
+        length("receipt_id") = 36 AND "receipt_id" = lower("receipt_id")
+        AND substr("receipt_id", 9, 1) = '-' AND substr("receipt_id", 14, 1) = '-'
+        AND substr("receipt_id", 19, 1) = '-' AND substr("receipt_id", 24, 1) = '-'
+        AND replace("receipt_id", '-', '') NOT GLOB '*[^0-9a-f]*'
+        AND length(replace("receipt_id", '-', '')) = 32
+        AND replace("receipt_id", '-', '') != '00000000000000000000000000000000'
+    ),
+    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),
+    "idempotency_key" TEXT NOT NULL CHECK (length("idempotency_key") BETWEEN 1 AND 128),
+    "service_id" TEXT NOT NULL,
+    "receipt_kind" TEXT NOT NULL CHECK ("receipt_kind" IN ('export', 'import')),
+    "bundle_root_sha256" TEXT NOT NULL CHECK (
+        length("bundle_root_sha256") = 64
+        AND "bundle_root_sha256" = lower("bundle_root_sha256")
+        AND "bundle_root_sha256" NOT GLOB '*[^0-9a-f]*'
+    ),
+    "export_format_version" INTEGER NOT NULL CHECK ("export_format_version" = 1),
+    "storage_backend" TEXT NOT NULL CHECK (
+        "storage_backend" IN ('sqlite', 'postgresql')
+    ),
+    "service_revision" INTEGER NOT NULL CHECK (
+        "service_revision" BETWEEN 1 AND 9223372036854775807
+    ),
+    "operational_status" TEXT NOT NULL CHECK (
+        "operational_status" IN ('active', 'suspended', 'archived')
+    ),
+    "verification" TEXT NOT NULL CHECK (
+        "verification" IN ('unverified', 'verified')
+    ),
+    "created_at" TEXT NOT NULL CHECK (
+        length("created_at") = 27 AND substr("created_at", 11, 1) = 'T'
+        AND substr("created_at", 20, 1) = '.' AND substr("created_at", 27, 1) = 'Z'
+    ),
+    UNIQUE ("principal_id", "idempotency_key"),
+    FOREIGN KEY ("principal_id", "idempotency_key", "service_id")
+        REFERENCES "aipcs_registry_claim" (
+            "principal_id", "idempotency_key", "service_id"
+        )
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+) STRICT""",
+    """CREATE TABLE "aipcs_registry_audit" (
+    "audit_id" INTEGER PRIMARY KEY,
+    "action" TEXT NOT NULL CHECK (
+        "action" IN (
+            'seed', 'design', 'materialise', 'evolve',
+            'suspend', 'resume', 'archive', 'restore', 'export', 'import', 'purge'
+        )
+    ),
+    "outcome" TEXT NOT NULL CHECK (
+        "outcome" IN (
+            'created', 'duplicate', 'accepted', 'completed', 'recovery_required'
+        )
+    ),
+    "service_id" TEXT NOT NULL CHECK (
+        length("service_id") = 36 AND "service_id" = lower("service_id")
+        AND substr("service_id", 9, 1) = '-' AND substr("service_id", 14, 1) = '-'
+        AND substr("service_id", 19, 1) = '-' AND substr("service_id", 24, 1) = '-'
+        AND replace("service_id", '-', '') NOT GLOB '*[^0-9a-f]*'
+        AND length(replace("service_id", '-', '')) = 32
+        AND replace("service_id", '-', '') != '00000000000000000000000000000000'
+    ),
+    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),
+    "created_via" TEXT NOT NULL CHECK (length("created_via") BETWEEN 1 AND 64),
+    "at" TEXT NOT NULL CHECK (
+        length("at") = 27 AND substr("at", 11, 1) = 'T'
+        AND substr("at", 20, 1) = '.' AND substr("at", 27, 1) = 'Z'
+    ),
+    CHECK (
+        ("action" = 'seed' AND "outcome" IN ('created', 'duplicate'))
+        OR ("action" = 'design' AND "outcome" = 'accepted')
+        OR (
+            "action" IN (
+                'materialise', 'evolve', 'suspend', 'resume',
+                'archive', 'restore', 'export', 'import', 'purge'
+            )
+            AND "outcome" IN ('completed', 'recovery_required')
+        )
+    )
+) STRICT""",
+    """CREATE INDEX "aipcs_registry_claim_service"
+    ON "aipcs_registry_claim" ("principal_id", "service_id")""",
+    """CREATE UNIQUE INDEX "aipcs_registry_claim_active_service"
+    ON "aipcs_registry_claim" ("principal_id", "service_id")
+    WHERE "operation_kind" IN (
+        'materialise', 'evolve', 'suspend', 'resume',
+        'archive', 'restore', 'export', 'import', 'purge'
+    )
+      AND "phase" IN ('prepared', 'recovery_required')""",
+    """CREATE UNIQUE INDEX "aipcs_registry_identity_live_domain"
+    ON "aipcs_registry_identity" ("principal_id", "domain_name")
+    WHERE "identity_state" IN ('live', 'import_prepared')""",
+    """CREATE INDEX "aipcs_registry_receipt_service"
+    ON "aipcs_registry_receipt" ("principal_id", "service_id", "created_at" DESC)""",
+    """CREATE INDEX "aipcs_registry_audit_principal"
+    ON "aipcs_registry_audit" ("principal_id", "audit_id" DESC)""",
+)
+R4_CHECKSUM = hashlib.sha256("\n".join(R4_DDL).encode()).hexdigest()
+R4_EXPECTED_SQL = {
+    **{
+        name: R3_EXPECTED_SQL[name]
+        for name in (
+            "aipcs_registry_meta",
+            "aipcs_registry_migration",
+            "aipcs_registry_service",
+            "aipcs_registry_service_list",
+            R3_POLICY_TABLE,
+        )
+    },
+    **dict(
+        zip(
+            (
+                "aipcs_registry_claim",
+                "aipcs_registry_identity",
+                "aipcs_registry_receipt",
+                "aipcs_registry_audit",
+                "aipcs_registry_claim_service",
+                "aipcs_registry_claim_active_service",
+                "aipcs_registry_identity_live_domain",
+                "aipcs_registry_receipt_service",
+                "aipcs_registry_audit_principal",
+            ),
+            R4_DDL,
+            strict=True,
+        )
+    ),
+}
+R4_TABLE_XINFO = {
+    key: value
+    for key, value in R3_TABLE_XINFO.items()
+    if key not in {"aipcs_registry_mutation", "aipcs_registry_audit"}
+}
+R4_TABLE_XINFO.update(
+    {
+        "aipcs_registry_claim": (
+            (0, "principal_id", "TEXT", 1, None, 1, 0),
+            (1, "idempotency_key", "TEXT", 1, None, 2, 0),
+            (2, "fingerprint", "TEXT", 1, None, 0, 0),
+            (3, "service_id", "TEXT", 1, None, 0, 0),
+            (4, "operation_kind", "TEXT", 1, None, 0, 0),
+            (5, "phase", "TEXT", 1, None, 0, 0),
+            (6, "created_via", "TEXT", 0, None, 0, 0),
+            (7, "intent_json", "TEXT", 0, None, 0, 0),
+            (8, "result_json", "TEXT", 0, None, 0, 0),
+            (9, "recovery_category", "TEXT", 0, None, 0, 0),
+        ),
+        "aipcs_registry_identity": (
+            (0, "service_id", "TEXT", 1, None, 1, 0),
+            (1, "principal_id", "TEXT", 1, None, 0, 0),
+            (2, "identity_state", "TEXT", 1, None, 0, 0),
+            (3, "domain_name", "TEXT", 0, None, 0, 0),
+            (4, "storage_backend", "TEXT", 0, None, 0, 0),
+            (5, "storage_namespace", "TEXT", 1, None, 0, 0),
+            (6, "claim_idempotency_key", "TEXT", 0, None, 0, 0),
+            (7, "lifecycle_at", "TEXT", 0, None, 0, 0),
+        ),
+        "aipcs_registry_receipt": (
+            (0, "receipt_id", "TEXT", 1, None, 1, 0),
+            (1, "principal_id", "TEXT", 1, None, 0, 0),
+            (2, "idempotency_key", "TEXT", 1, None, 0, 0),
+            (3, "service_id", "TEXT", 1, None, 0, 0),
+            (4, "receipt_kind", "TEXT", 1, None, 0, 0),
+            (5, "bundle_root_sha256", "TEXT", 1, None, 0, 0),
+            (6, "export_format_version", "INTEGER", 1, None, 0, 0),
+            (7, "storage_backend", "TEXT", 1, None, 0, 0),
+            (8, "service_revision", "INTEGER", 1, None, 0, 0),
+            (9, "operational_status", "TEXT", 1, None, 0, 0),
+            (10, "verification", "TEXT", 1, None, 0, 0),
+            (11, "created_at", "TEXT", 1, None, 0, 0),
+        ),
+        "aipcs_registry_audit": R1_TABLE_XINFO["aipcs_registry_audit"],
+    }
+)
+R4_FOREIGN_KEYS = {
+    key: value
+    for key, value in R3_FOREIGN_KEYS.items()
+    if key not in {"aipcs_registry_mutation", "aipcs_registry_audit"}
+}
+R4_FOREIGN_KEYS.update(
+    {
+        "aipcs_registry_claim": (),
+        "aipcs_registry_identity": (
+            (
+                0,
+                0,
+                "aipcs_registry_claim",
+                "principal_id",
+                "principal_id",
+                "RESTRICT",
+                "RESTRICT",
+                "NONE",
+            ),
+            (
+                0,
+                1,
+                "aipcs_registry_claim",
+                "claim_idempotency_key",
+                "idempotency_key",
+                "RESTRICT",
+                "RESTRICT",
+                "NONE",
+            ),
+            (
+                0,
+                2,
+                "aipcs_registry_claim",
+                "service_id",
+                "service_id",
+                "RESTRICT",
+                "RESTRICT",
+                "NONE",
+            ),
+        ),
+        "aipcs_registry_receipt": (
+            (
+                0,
+                0,
+                "aipcs_registry_claim",
+                "principal_id",
+                "principal_id",
+                "RESTRICT",
+                "RESTRICT",
+                "NONE",
+            ),
+            (
+                0,
+                1,
+                "aipcs_registry_claim",
+                "idempotency_key",
+                "idempotency_key",
+                "RESTRICT",
+                "RESTRICT",
+                "NONE",
+            ),
+            (
+                0,
+                2,
+                "aipcs_registry_claim",
+                "service_id",
+                "service_id",
+                "RESTRICT",
+                "RESTRICT",
+                "NONE",
+            ),
+        ),
+        "aipcs_registry_audit": (),
+    }
+)
+R4_INDEX_LIST = {
+    "aipcs_registry_meta": (),
+    "aipcs_registry_migration": R3_INDEX_LIST["aipcs_registry_migration"],
+    "aipcs_registry_service": R3_INDEX_LIST["aipcs_registry_service"],
+    R3_POLICY_TABLE: (),
+    "aipcs_registry_claim": (
+        ("aipcs_registry_claim_active_service", 1, "c", 1),
+        ("aipcs_registry_claim_service", 0, "c", 0),
+        ("sqlite_autoindex_aipcs_registry_claim_1", 1, "pk", 0),
+        ("sqlite_autoindex_aipcs_registry_claim_2", 1, "u", 0),
+    ),
+    "aipcs_registry_identity": (
+        ("aipcs_registry_identity_live_domain", 1, "c", 1),
+        ("sqlite_autoindex_aipcs_registry_identity_1", 1, "pk", 0),
+        ("sqlite_autoindex_aipcs_registry_identity_2", 1, "u", 0),
+    ),
+    "aipcs_registry_receipt": (
+        ("aipcs_registry_receipt_service", 0, "c", 0),
+        ("sqlite_autoindex_aipcs_registry_receipt_1", 1, "pk", 0),
+        ("sqlite_autoindex_aipcs_registry_receipt_2", 1, "u", 0),
+    ),
+    "aipcs_registry_audit": (("aipcs_registry_audit_principal", 0, "c", 0),),
+}
+R4_INDEX_XINFO = {
+    key: value
+    for key, value in R3_INDEX_XINFO.items()
+    if "mutation" not in key and key != "aipcs_registry_audit_principal"
+}
+R4_INDEX_XINFO.update(
+    {
+        "sqlite_autoindex_aipcs_registry_claim_1": (
+            (0, 0, "principal_id", 0, "BINARY", 1),
+            (1, 1, "idempotency_key", 0, "BINARY", 1),
+            (2, -1, None, 0, "BINARY", 0),
+        ),
+        "sqlite_autoindex_aipcs_registry_claim_2": (
+            (0, 0, "principal_id", 0, "BINARY", 1),
+            (1, 1, "idempotency_key", 0, "BINARY", 1),
+            (2, 3, "service_id", 0, "BINARY", 1),
+            (3, -1, None, 0, "BINARY", 0),
+        ),
+        "aipcs_registry_claim_service": (
+            (0, 0, "principal_id", 0, "BINARY", 1),
+            (1, 3, "service_id", 0, "BINARY", 1),
+            (2, -1, None, 0, "BINARY", 0),
+        ),
+        "aipcs_registry_claim_active_service": (
+            (0, 0, "principal_id", 0, "BINARY", 1),
+            (1, 3, "service_id", 0, "BINARY", 1),
+            (2, -1, None, 0, "BINARY", 0),
+        ),
+        "sqlite_autoindex_aipcs_registry_identity_1": (
+            (0, 0, "service_id", 0, "BINARY", 1),
+            (1, -1, None, 0, "BINARY", 0),
+        ),
+        "sqlite_autoindex_aipcs_registry_identity_2": (
+            (0, 5, "storage_namespace", 0, "BINARY", 1),
+            (1, -1, None, 0, "BINARY", 0),
+        ),
+        "aipcs_registry_identity_live_domain": (
+            (0, 1, "principal_id", 0, "BINARY", 1),
+            (1, 3, "domain_name", 0, "BINARY", 1),
+            (2, -1, None, 0, "BINARY", 0),
+        ),
+        "sqlite_autoindex_aipcs_registry_receipt_1": (
+            (0, 0, "receipt_id", 0, "BINARY", 1),
+            (1, -1, None, 0, "BINARY", 0),
+        ),
+        "sqlite_autoindex_aipcs_registry_receipt_2": (
+            (0, 1, "principal_id", 0, "BINARY", 1),
+            (1, 2, "idempotency_key", 0, "BINARY", 1),
+            (2, -1, None, 0, "BINARY", 0),
+        ),
+        "aipcs_registry_receipt_service": (
+            (0, 1, "principal_id", 0, "BINARY", 1),
+            (1, 3, "service_id", 0, "BINARY", 1),
+            (2, 11, "created_at", 1, "BINARY", 1),
+            (3, -1, None, 0, "BINARY", 0),
+        ),
+        "aipcs_registry_audit_principal": (
+            (0, 4, "principal_id", 0, "BINARY", 1),
+            (1, 0, "audit_id", 1, "BINARY", 1),
+            (2, -1, None, 0, "BINARY", 0),
+        ),
+    }
+)
+
 R1 = MigrationDescriptor(
     1,
     R1_MIGRATION_ID,
@@ -567,17 +1034,28 @@ R3 = MigrationDescriptor(
     MappingProxyType(R3_INDEX_LIST),
     MappingProxyType(R3_INDEX_XINFO),
 )
-MIGRATIONS = (R1, R2, R3)
+R4 = MigrationDescriptor(
+    4,
+    R4_MIGRATION_ID,
+    R4_DDL,
+    R4_CHECKSUM,
+    MappingProxyType(R4_EXPECTED_SQL),
+    MappingProxyType(R4_TABLE_XINFO),
+    MappingProxyType(R4_FOREIGN_KEYS),
+    MappingProxyType(R4_INDEX_LIST),
+    MappingProxyType(R4_INDEX_XINFO),
+)
+MIGRATIONS = (R1, R2, R3, R4)
 WAL_TARGET_REVISION = R3.revision
 
-# C5 integrates the R2-to-R3 physical-policy state machine.  Runtime aliases
-# now describe the only ready registry state.
-TARGET_REVISION = R3.revision
-MIGRATION_ID = R3.migration_id
-DDL = R3.ddl
-CHECKSUM = R3.checksum
-EXPECTED_SQL = R3_EXPECTED_SQL
-TABLE_XINFO = R3_TABLE_XINFO
-FOREIGN_KEYS = R3_FOREIGN_KEYS
-INDEX_LIST = R3_INDEX_LIST
-INDEX_XINFO = R3_INDEX_XINFO
+# R3 remains immutable physical WAL-policy evidence.  R4 is the logical
+# registry target layered on that already-ready physical state.
+TARGET_REVISION = R4.revision
+MIGRATION_ID = R4.migration_id
+DDL = R4.ddl
+CHECKSUM = R4.checksum
+EXPECTED_SQL = R4_EXPECTED_SQL
+TABLE_XINFO = R4_TABLE_XINFO
+FOREIGN_KEYS = R4_FOREIGN_KEYS
+INDEX_LIST = R4_INDEX_LIST
+INDEX_XINFO = R4_INDEX_XINFO

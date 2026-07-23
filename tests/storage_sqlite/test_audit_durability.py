@@ -42,7 +42,7 @@ def _mutation_rows(database: Path) -> list[tuple[str, str, str]]:
     try:
         return connection.execute(
             'SELECT "principal_id","idempotency_key","service_id" '
-            'FROM "aipcs_registry_mutation" ORDER BY "principal_id","idempotency_key"'
+                'FROM "aipcs_registry_claim" ORDER BY "principal_id","idempotency_key"'
         ).fetchall()
     finally:
         connection.close()

@@ -84,7 +84,9 @@ def test_wal_policy_descriptor_is_exact_strict_singleton_evidence(
 @pytest.mark.parametrize(
     ("module", "descriptors", "predecessor", "target", "policy"),
     (
-        (registry, registry.MIGRATIONS, 2, 3, registry.R3_POLICY),
+        # R3 is an immutable physical-policy epoch even when later logical
+        # registry migrations are present.
+        (registry, registry.MIGRATIONS[:3], 2, 3, registry.R3_POLICY),
         (service_store, service_store.MIGRATIONS[:2], 1, 2, service_store.R2_POLICY),
     ),
 )

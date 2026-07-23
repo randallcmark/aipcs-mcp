@@ -14,7 +14,7 @@ from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 from aipcs_mcp.storage.sqlite import adapter as adapter_module
-from aipcs_mcp.storage.sqlite.migrations import CHECKSUM, R2, R3
+from aipcs_mcp.storage.sqlite.migrations import CHECKSUM, R2, R4
 
 
 def _adapter(tmp_path: Path, name: str = "root") -> tuple[SQLiteRegistryAdapter, Path]:
@@ -61,14 +61,14 @@ def test_missing_history_columns_are_incompatible(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute('DROP TABLE "aipcs_registry_migration"')
         connection.execute('CREATE TABLE "aipcs_registry_migration" ("component" TEXT) STRICT')
-    assert adapter.inspect_migration() == MigrationState("registry", 3, 3, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 4, 4, "incompatible")
 
 
 @pytest.mark.parametrize(
     ("descriptor_field", "key", "replacement"),
     [
         ("table_xinfo", "aipcs_registry_meta", ()),
-        ("foreign_keys", "aipcs_registry_mutation", ()),
+            ("foreign_keys", "aipcs_registry_identity", ()),
         ("index_list", "aipcs_registry_service", ()),
         ("index_xinfo", "aipcs_registry_service_list", ()),
     ],
@@ -77,12 +77,12 @@ def test_every_exact_pragma_signature_participates_in_readiness(
     tmp_path: Path, monkeypatch, descriptor_field: str, key: str, replacement: tuple
 ) -> None:
     adapter, _ = _adapter(tmp_path)
-    mapping = dict(getattr(R3, descriptor_field))
+    mapping = dict(getattr(R4, descriptor_field))
     mapping[key] = replacement
     monkeypatch.setattr(
         adapter_module,
-        "R3",
-        replace(R3, **{descriptor_field: MappingProxyType(mapping)}),
+        "R4",
+        replace(R4, **{descriptor_field: MappingProxyType(mapping)}),
     )
     assert adapter.inspect_migration().status == "incompatible"
 
@@ -234,7 +234,7 @@ def test_history_truth_table_rejects_drift(tmp_path: Path, mutation: str) -> Non
             replacement = "0" * 64 if CHECKSUM != "0" * 64 else "1" * 64
             connection.execute('UPDATE "aipcs_registry_migration" SET checksum=?', (replacement,))
         elif mutation == "newer":
-            connection.execute('UPDATE "aipcs_registry_meta" SET applied_revision=4')
+            connection.execute('UPDATE "aipcs_registry_meta" SET applied_revision=5')
         elif mutation == "missing_history":
             connection.execute('DELETE FROM "aipcs_registry_migration"')
         else:
