@@ -49,6 +49,20 @@ to a safe retryable result. WAL does not extend support to network filesystems o
 V1-08D must rerun its full coordinator reconciliation/fault matrix under that final policy before
 V1-08E can expose lifecycle operations.
 
+V1-08B is deliberately narrower than that future coordinator. Its private R2
+registry migration accepts only exact, clean, public-reachable R1 state and
+otherwise fails closed with the existing bounded migration outcome; it adds no
+public upgrade, repair, or recovery command. R2 holds one global durable
+lifecycle/idempotency ledger whose prepared entries can block a conflicting
+lifecycle intent for the same service. Its legacy completed replays retain
+their existing result bytes, while lifecycle evidence and its bounded terminal
+category are never projected through MCP. Explicit inspection and migration
+finalization strictly decode all registry rows in addition to checking physical
+signatures, so canonical-but-forged service, lifecycle, completion, or audit
+data is incompatible and is never silently repaired. This slice does not change runtime
+composition, configuration, MCP registration, WAL/SHM handling, busy policy,
+or service-store access.
+
 Filesystem validation is a local same-effective-user boundary, not isolation
 from a malicious process running as that user. Descriptor-anchored operations
 reject unsafe ancestors, containers, links, file types, modes, sidecars, and
@@ -84,6 +98,13 @@ The opaque `svc_` locator namespace is a non-secret logical identifier.
 Physical data-root and database paths remain private: they are not locator
 fields and must not appear in responses, capabilities, errors, logs, audit
 records, or representations.
+
+R2's reserved materialisation metadata is limited to a safe logical backend
+and that opaque namespace. Public current lifecycle results continue to return
+null materialisation fields and omit the internal service revision. The
+metadata-only audit store retains at most the newest 1,000 entries per
+principal by audit identifier; this retention bound is private, is not an audit
+query feature, and never prunes idempotency or lifecycle evidence.
 
 When V1-08E later adds lifecycle recovery projection, it may expose only
 `service_revision` and `recovery_state: clear | pending | recovery_required`. It must not expose

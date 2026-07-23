@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from aipcs_mcp.application.errors import (
 )
 from aipcs_mcp.application.models import ApplicationContext, DesignCommand, SeedCommand
 from aipcs_mcp.application.services import ServiceApplication
+from aipcs_mcp.lifecycle import MAX_SERVICE_REVISION
 from aipcs_mcp.manifest_v2 import ManifestV2
 from application.fakes import (
     BACKEND_SENTINEL,
@@ -92,7 +94,7 @@ def test_seed_replay_duplicate_and_principal_scoping_are_distinct() -> None:
         1,
         1,
     )
-    assert state.uows[-1].calls == ["claim", "close"]
+    assert state.uows[-1].calls == ["resolve_non_lifecycle", "close"]
 
     duplicate = seed(application, key="seed-2")
     assert duplicate.model_dump(mode="json", by_alias=True) == original_dump
@@ -129,7 +131,7 @@ def test_idempotency_fingerprint_includes_created_via_and_payload() -> None:
             SeedCommand("other_notes", "project", "Different payload", "seed-1"),
         )
     assert (state.commits, len(state.events), clock.calls, ids.calls) == before
-    assert state.uows[-1].calls == ["claim", "rollback", "close"]
+    assert state.uows[-1].calls == ["resolve_non_lifecycle", "rollback", "close"]
 
 
 def test_design_copies_input_projection_storage_and_replay() -> None:
@@ -145,6 +147,8 @@ def test_design_copies_input_projection_storage_and_replay() -> None:
     assert "schema" in expected and "schema_" not in expected
     assert designed.design_state == "seeded"
     assert designed.schema_version == 1
+    assert state.items[service.service_id].service_revision == 2
+    assert state.ledger[(PRINCIPAL, "design-1")][2].service_revision == 2
 
     requested.entities[0].description = "changed after write"
     designed.schema_.entities[0].description = "changed result"
@@ -158,7 +162,7 @@ def test_design_copies_input_projection_storage_and_replay() -> None:
     )
     assert replay.model_dump(mode="json", by_alias=True) == expected
     assert (state.commits, len(state.events), clock.calls, ids.calls) == before
-    assert state.uows[-1].calls == ["claim", "close"]
+    assert state.uows[-1].calls == ["resolve_non_lifecycle", "close"]
 
     replay.schema_.entities[0].description = "changed replay"
     assert application.inspect(CONTEXT, service.service_id).schema_.entities[0].description is None
@@ -185,6 +189,39 @@ def test_design_guards_lifecycle_scope_and_fingerprint() -> None:
     assert (state.commits, len(state.events), len(state.ledger), clock.calls, ids.calls) == before
 
 
+def test_design_cas_stale_rereads_without_overwrite_or_idempotency_completion() -> None:
+    application, state, _, _ = build_app(clock=FixedClock(START, START))
+    service = seed(application)
+    state.force_stale_save = True
+
+    with pytest.raises(InvalidState):
+        application.design(CONTEXT, DesignCommand(service.service_id, manifest(), "design-stale"))
+
+    assert state.items[service.service_id].service_revision == 1
+    assert (PRINCIPAL, "design-stale") not in state.ledger
+    assert state.uows[-1].calls == [
+        "resolve_non_lifecycle",
+        "get",
+        "save",
+        "get",
+        "rollback",
+        "close",
+    ]
+
+
+def test_design_max_service_revision_fails_before_save_or_completion() -> None:
+    application, state, _, _ = build_app()
+    service = seed(application)
+    state.items[service.service_id] = replace(state.items[service.service_id], service_revision=MAX_SERVICE_REVISION)
+    before = (len(state.events), len(state.ledger), state.commits)
+
+    with pytest.raises(InternalFailure):
+        application.design(CONTEXT, DesignCommand(service.service_id, manifest(), "design-overflow"))
+
+    assert (len(state.events), len(state.ledger), state.commits) == before
+    assert state.uows[-1].calls == ["resolve_non_lifecycle", "get", "rollback", "close"]
+
+
 @pytest.mark.parametrize("hostile_value", ["x" * 1_001, object()])
 def test_design_revalidates_mutated_manifest_before_opening_uow(hostile_value: object) -> None:
     application, state, _, _ = build_app()
@@ -200,7 +237,9 @@ def test_design_revalidates_mutated_manifest_before_opening_uow(hostile_value: o
     assert state.uows == []
 
 
-@pytest.mark.parametrize("failure", ["claim", "find_domain", "add", "append", "complete"])
+@pytest.mark.parametrize(
+    "failure", ["resolve_non_lifecycle", "find_domain", "add", "append", "complete_non_lifecycle"]
+)
 def test_seed_failure_rolls_back_all_state_and_is_bounded(failure: str) -> None:
     application, state, _, _ = build_app()
     state.fail_at = failure
@@ -213,7 +252,9 @@ def test_seed_failure_rolls_back_all_state_and_is_bounded(failure: str) -> None:
     assert state.uows[-1].close_count == 1
 
 
-@pytest.mark.parametrize("failure", ["claim", "get", "save", "append", "complete", "commit"])
+@pytest.mark.parametrize(
+    "failure", ["resolve_non_lifecycle", "get", "save", "append", "complete_non_lifecycle", "commit"]
+)
 def test_design_failure_rolls_back_all_state_and_is_bounded(failure: str) -> None:
     application, state, _, _ = build_app(clock=FixedClock(START, START))
     seeded = seed(application)
@@ -274,7 +315,7 @@ def test_close_failure_after_commit_is_bounded_and_retry_replays_durable_result(
     replay = seed(application)
     assert len(state.items) == len(state.events) == state.commits == 1
     assert replay.service_id == next(iter(state.items))
-    assert state.uows[-1].calls == ["claim", "close"]
+    assert state.uows[-1].calls == ["resolve_non_lifecycle", "close"]
 
 
 def test_every_acquired_uow_is_closed_once_including_read_and_not_found_paths() -> None:
@@ -296,7 +337,7 @@ def test_every_acquired_uow_is_closed_once_including_read_and_not_found_paths() 
 def test_adapter_failures_retain_no_hostile_exception_context(sentinel: str) -> None:
     application, state, _, _ = build_app()
     state.error_sentinel = sentinel
-    state.fail_at = "claim"
+    state.fail_at = "resolve_non_lifecycle"
 
     with pytest.raises(InternalFailure) as captured:
         seed(application)

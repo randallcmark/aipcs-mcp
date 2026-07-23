@@ -85,6 +85,27 @@ non-retryable. Storage-busy, different-key operation-in-progress, and operation-
 retryable. An exact same-key prepared claim resumes reconciliation rather than returning
 operation-in-progress.
 
+V1-08B is the private durable-intent prerequisite, not a public lifecycle release. Its registry
+R2 migration upgrades only an exact, clean, public-reachable R1 registry in one transaction; all
+other R1-like, dirty, partial, altered, unknown, or future states fail closed. R1 migration
+history and checksums remain historical evidence, while fresh creation receives the same R1-then-R2
+history. The public migration state remains `uninitialised`, `ready`, `dirty`, or `incompatible`;
+there is no public upgradeable or repair state.
+
+R2 introduces an internal `service_revision` epoch, starting at 1, and reserves the existing
+nullable materialisation metadata for only a safe logical backend/opaque namespace pair. Current
+public seed, list, inspect, and design results continue to omit `service_revision` and return
+null `materialised_at` and `storage`. The single global idempotency ledger retains exact completed
+legacy seed/design replays, including stored result bytes, and later holds materialise/evolve
+evidence in `prepared`, `completed`, or `recovery_required` phases. A prepared lifecycle intent
+blocks another lifecycle intent for that service, recovery-required preserves that blocker, and
+completion releases it. None exposes a public operation or a service-store action.
+
+R2 also caps metadata-only audit rows at the newest 1,000 per principal by audit identifier. The
+cap is enforced during migration and on each later audit append; lifecycle/idempotency evidence is
+never governed or pruned by that cap or exposed through an audit API. It is a private constant, not a
+configuration, environment, CLI, or MCP setting.
+
 V1-08E, not this current release, will expose the bounded projection
 `recovery_state: clear | pending | recovery_required` with `service_revision`. It will expose no
 operation identifier, fingerprint, idempotency key, target snapshot, storage path, fault text, or
@@ -101,6 +122,9 @@ interface. V1-08 is sequenced as contract (A), durable intent (B), SQLite WAL/bu
 internal coordinator (D), public lifecycle (E), record runtime (F), and discovery/topology (G);
 PostgreSQL begins only after V1-08G. Their future compatibility commitments will be documented when
 they exist.
+
+V1-08B adds none of the runtime composition, configuration, MCP registration, WAL/busy policy,
+coordinator capability, service-store I/O, or repair workflow deferred to later slices.
 
 The contract identifier is currently `1.0`. Although earlier planning described
 it as SemVer, no version increment policy is defined yet. Support windows,

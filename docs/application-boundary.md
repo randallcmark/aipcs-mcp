@@ -88,6 +88,38 @@ exact target from a crash-completed one. It must report recovery-required rather
 repair deleted, partial, extra, altered, or incompatible state. These are future V1-08B-D rules;
 they do not create a public operation, storage I/O path, or recovery command.
 
+### V1-08B durable registry prerequisite
+
+V1-08B is the private registry-only prerequisite for that coordinator. Its SQLite registry R2
+migration is sequential and transactional: it accepts only an exact, clean, public-reachable R1
+registry, preserves the immutable R1 migration evidence, and otherwise fails closed. R1 is not
+silently treated as R2, and an interrupted, altered, partial, unknown, newer, or privately
+injected registry has no repair path in this slice. Fresh registry creation applies the same R1
+then R2 migration history. The public migration-state vocabulary remains bounded; an exact R1
+observed below the target is not a new public "upgradeable" state.
+
+R2 gives every service an internal server-owned `service_revision`, beginning at 1 for migrated
+and newly seeded services. Lifecycle-relevant registry changes will use it as a compare-and-swap
+counter; exact replay and failed or stale work do not advance it. R2 also reserves the existing
+public nullable materialisation fields for a safe logical storage projection: a closed backend
+name and opaque `svc_` namespace, never a path, endpoint, DSN, credential, or service-store
+ledger. Current seed, list, inspect, and design responses remain unchanged: their
+`materialised_at` and `storage` fields are null, and they do not expose `service_revision`.
+
+R2 generalises the one global `(principal_id, idempotency_key)` mutation ledger rather than adding
+a lifecycle ledger or key namespace. Historical seed/design rows remain strict completed `legacy`
+replays with their stored result bytes unchanged. Future materialise/evolve evidence has only the
+phase `prepared`, `completed`, or `recovery_required`; a prepared intent acts as the per-service
+transition blocker, recovery-required remains blocked for explicit future reconciliation, and only
+completion releases the blocker. This is durable registry evidence only:
+V1-08B does not observe a service store, reconcile a target, run a coordinator, or make an
+operation runnable.
+
+Registry audit remains metadata-only. R2 retains the newest 1,000 audit rows per principal by
+`audit_id`, trimming historical over-cap rows during migration and older rows for that principal
+with the audit append transaction. It never prunes idempotency or lifecycle evidence, has no audit
+query API, and adds no configuration, environment, CLI, or MCP control.
+
 Their frozen future result meaning is also exact: malformed input, unsupported transition, stale
 expected revision, changed-fingerprint reuse, recovery-required, storage-unavailable, and generic
 internal failure are non-retryable; storage-busy, different-key operation-in-progress, and
@@ -101,6 +133,9 @@ the process ready to serve. Migration failure prevents MCP construction. The
 runtime does not construct or migrate the service-store catalog. Read
 operations do not execute DDL, and opening a unit of work does not
 opportunistically alter storage layout.
+
+V1-08B does not alter the runtime composition rule, configuration, MCP tool
+registration, SQLite WAL settings, busy policy, or service-store behavior.
 
 The application layer requests behavior through its boundary; it never creates
 tables, parses storage locations, opens database connections, or selects a

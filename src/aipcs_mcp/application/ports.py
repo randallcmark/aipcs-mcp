@@ -7,7 +7,20 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from .models import AuditEvent, MutationClaim, Service
+from aipcs_mcp.lifecycle import LifecycleCommand, LifecycleIntent
+
+from .models import (
+    AuditEvent,
+    CompletedLifecycleClaim,
+    EvolveCompletion,
+    LifecycleRegistryOutcome,
+    MaterialiseCompletion,
+    NonLifecycleKind,
+    NonLifecycleRegistryOutcome,
+    RecoveryRequiredLifecycleClaim,
+    Service,
+    ServiceSaveResult,
+)
 
 
 class Clock(Protocol):
@@ -25,14 +38,41 @@ class ServiceRepository(Protocol):
     def get(self, principal_id: str, service_id: UUID) -> Service | None: ...
     def list(self, principal_id: str, limit: int) -> list[Service]: ...
     def add(self, service: Service) -> None: ...
-    def save(self, service: Service) -> None: ...
+    def save(
+        self, service_snapshot: Service, expected_service_revision: int
+    ) -> ServiceSaveResult: ...
 
 
-class MutationLedger(Protocol):
-    """Claims and replay results are detached snapshots owned by the transaction."""
+class MutationRegistry(Protocol):
+    """One global typed idempotency and lifecycle registry, owned by the transaction."""
 
-    def claim(self, principal_id: str, key: str, fingerprint: str) -> MutationClaim: ...
-    def complete(self, principal_id: str, key: str, fingerprint: str, result: Service) -> None: ...
+    def resolve_non_lifecycle(
+        self,
+        kind: NonLifecycleKind,
+        principal_id: str,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> NonLifecycleRegistryOutcome: ...
+
+    def complete_non_lifecycle(
+        self,
+        kind: NonLifecycleKind,
+        principal_id: str,
+        idempotency_key: str,
+        fingerprint: str,
+        service: Service,
+    ) -> None: ...
+
+    def resolve_or_admit(self, command: LifecycleCommand) -> LifecycleRegistryOutcome:
+        """Resolve a key or return prepared/stale/unsupported/blocker typed evidence."""
+
+    def finalize_completed(
+        self, completion: MaterialiseCompletion | EvolveCompletion
+    ) -> CompletedLifecycleClaim | RecoveryRequiredLifecycleClaim: ...
+
+    def finalize_recovery_required(
+        self, prepared_intent: LifecycleIntent, at: datetime
+    ) -> CompletedLifecycleClaim | RecoveryRequiredLifecycleClaim: ...
 
 
 class AuditRepository(Protocol):
@@ -41,7 +81,7 @@ class AuditRepository(Protocol):
 
 class RegistryUnitOfWork(Protocol):
     services: ServiceRepository
-    mutations: MutationLedger
+    mutations: MutationRegistry
     audits: AuditRepository
 
     def commit(self) -> None: ...

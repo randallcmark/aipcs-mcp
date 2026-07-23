@@ -51,6 +51,32 @@ initialisation or layout-changing operation. The public runtime uses only the
 registry migration at SQLite startup; no tool call allocates or migrates a
 service store. Safe diagnostics remain intentionally bounded.
 
+The V1-08B registry R2 migration is a private sequential, checksummed upgrade.
+It admits only an exact, clean, public-reachable R1 registry and otherwise
+fails closed; it does not recalculate R1 evidence, relabel an R1 database, or
+offer repair. Fresh creation applies the same R1 then R2 migration history.
+The public `MigrationState` remains `uninitialised`, `ready`, `dirty`, or
+`incompatible`: exact R1 below the target has no public upgradeable state.
+R2 adds an internal positive `service_revision` epoch and nullable safe logical
+materialisation values. The latter are only a closed backend choice and the
+opaque `ServiceStoreLocator` namespace grammar already described here—never a
+physical location, connection detail, credential, or service-store ledger.
+Explicit R2 inspection and migration finalization validate both the exact
+physical signatures and every stored service, typed mutation phase/result, and
+audit row. Canonical but semantically forged row data therefore fails closed as
+incompatible without a repair write. Ordinary unit-of-work open does not add an
+unbounded full-registry scan; each row codec remains strict when that row is
+used.
+
+R2 retains one global registry mutation/idempotency ledger across legacy and
+future lifecycle work. Exact legacy completed replays keep their stored result
+bytes; a future lifecycle intent is `prepared`, `completed`, or
+`recovery_required`, with prepared and recovery-required rows acting as the
+per-service transition blocker and completion releasing it. This describes
+durable registry state only. It does not compose a
+service-store coordinator, inspect a service store, change SQLite WAL/busy
+behavior, or expose a lifecycle operation.
+
 Registry unit-of-work callers close every successfully acquired unit exactly
 once. A successful commit or rollback ends its transaction attempt, then close
 releases resources. Closing an unterminated unit performs adapter-safe rollback
@@ -68,6 +94,12 @@ A registry adapter's information includes `registry`, and its migration state
 is always for that component. The current public lifecycle persists registry
 metadata, idempotency outcomes, and metadata-only audit information within one
 unit of work. Audit data and principal identity are never projected by MCP.
+
+R2 bounds that metadata-only audit store to the newest 1,000 rows per principal
+by audit identifier. The migration removes only older over-cap audit rows, and
+an audit append trims older rows for its own principal in the same registry
+transaction. The cap never prunes mutation, idempotency, or lifecycle evidence;
+it has no configuration, environment, CLI, MCP, or audit-query surface.
 
 The private SQLite service-store catalog declares only `service_store`
 ownership. `allocate()` purely derives the canonical locator and performs no

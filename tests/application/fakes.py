@@ -4,7 +4,16 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from uuid import UUID
 
-from aipcs_mcp.application.models import AuditEvent, MutationClaim, Service
+from aipcs_mcp.application.models import (
+    AuditEvent,
+    CompletedNonLifecycleClaim,
+    ConflictClaim,
+    NewClaim,
+    NonLifecycleKind,
+    NonLifecycleRegistryOutcome,
+    Service,
+    ServiceSaveResult,
+)
 
 BACKEND_SENTINEL = "postgresql://secret@host/private"
 
@@ -37,11 +46,12 @@ class FakeRegistry:
 
     def __init__(self) -> None:
         self.items: dict[UUID, Service] = {}
-        self.ledger: dict[tuple[str, str], tuple[str, Service]] = {}
+        self.ledger: dict[tuple[str, str], tuple[str, str, Service]] = {}
         self.events: list[AuditEvent] = []
         self.uows: list[FakeUow] = []
         self.commits = 0
         self.fail_at: str | None = None
+        self.force_stale_save = False
         self.rollback_raises = False
         self.error_sentinel = BACKEND_SENTINEL
 
@@ -105,28 +115,51 @@ class FakeUow:
         self._called("add")
         self.items[service.service_id] = deepcopy(service)
 
-    def save(self, service: Service) -> None:
+    def save(
+        self, service_snapshot: Service, expected_service_revision: int
+    ) -> ServiceSaveResult:
         self._called("save")
-        self.items[service.service_id] = deepcopy(service)
+        if self.state.force_stale_save:
+            return "stale_revision"
+        current = self.items.get(service_snapshot.service_id)
+        if (
+            current is None
+            or current.principal_id != service_snapshot.principal_id
+            or current.service_revision != expected_service_revision
+        ):
+            return "stale_revision"
+        if service_snapshot.service_revision != expected_service_revision + 1:
+            raise RuntimeError(BACKEND_SENTINEL)
+        self.items[service_snapshot.service_id] = deepcopy(service_snapshot)
+        return "saved"
 
-    def claim(self, principal_id: str, key: str, fingerprint: str) -> MutationClaim:
-        self._called("claim")
-        previous = self.ledger.get((principal_id, key))
-        if previous is None:
-            return MutationClaim("new")
-        if previous[0] == fingerprint:
-            return MutationClaim("replay", deepcopy(previous[1]))
-        return MutationClaim("conflict")
-
-    def complete(
+    def resolve_non_lifecycle(
         self,
+        kind: NonLifecycleKind,
         principal_id: str,
-        key: str,
+        idempotency_key: str,
         fingerprint: str,
-        result: Service,
+    ) -> NonLifecycleRegistryOutcome:
+        self._called("resolve_non_lifecycle")
+        previous = self.ledger.get((principal_id, idempotency_key))
+        if previous is None:
+            return NewClaim()
+        if previous[0] == fingerprint:
+            return CompletedNonLifecycleClaim(previous[1], deepcopy(previous[2]))
+        return ConflictClaim()
+
+    def complete_non_lifecycle(
+        self,
+        kind: NonLifecycleKind,
+        principal_id: str,
+        idempotency_key: str,
+        fingerprint: str,
+        service: Service,
     ) -> None:
-        self._called("complete")
-        self.ledger[(principal_id, key)] = (fingerprint, deepcopy(result))
+        self._called("complete_non_lifecycle")
+        if service.principal_id != principal_id:
+            raise RuntimeError(BACKEND_SENTINEL)
+        self.ledger[(principal_id, idempotency_key)] = (fingerprint, kind, deepcopy(service))
 
     def append(self, event: AuditEvent) -> None:
         self._called("append")

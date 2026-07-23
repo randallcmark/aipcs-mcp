@@ -65,7 +65,8 @@ def test_replay_result_must_round_trip_to_identical_canonical_bytes() -> None:
 
 def test_service_manifest_and_stored_schema_version_must_match() -> None:
     manifest = ManifestV2.model_validate(valid_manifest())
-    value = replace(_service(), manifest=manifest, schema_version=2, design_state="materialised")
+    value = replace(_service(), manifest=manifest, schema_version=1)
+    object.__setattr__(value, "schema_version", 2)
     with pytest.raises(StorageMigrationError) as captured:
         validate_service(value)
     _assert_bounded(captured.value)
@@ -163,7 +164,7 @@ def test_mutation_result_principal_must_match_ledger_principal(tmp_path: Path) -
     adapter.migrate()
     uow = adapter.open_uow()
     with pytest.raises(StorageMigrationError) as captured:
-        uow.complete("other-principal", "key", "0" * 64, _service())
+        uow.complete_non_lifecycle("seed", "other-principal", "key", "0" * 64, _service())
     _assert_bounded(captured.value)
     count = uow._connection.execute('SELECT count(*) FROM "aipcs_registry_mutation"').fetchone()[0]
     assert count == 0

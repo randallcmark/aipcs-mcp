@@ -1,24 +1,38 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 from application.fakes import FixedClock, SequentialIds
+from fixtures import valid_manifest
 from storage_contracts.conformance import assert_registry_application_conformance
 
 from aipcs_mcp.application.errors import InternalFailure
-from aipcs_mcp.application.models import ApplicationContext, SeedCommand
+from aipcs_mcp.application.models import (
+    ApplicationContext,
+    DesignCommand,
+    MaterialisationStorage,
+    MaterialiseCompletion,
+    PreparedLifecycleClaim,
+    SeedCommand,
+    Service,
+)
 from aipcs_mcp.application.services import ServiceApplication
+from aipcs_mcp.lifecycle import LifecyclePhase, MaterialiseCommand
+from aipcs_mcp.manifest_v2 import ManifestV2
 from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
-from aipcs_mcp.storage.sqlite.migrations import DDL
+from aipcs_mcp.storage.sqlite.codecs import encode_result
+from aipcs_mcp.storage.sqlite.migrations import R1, R2
 
 
 class TraceUow:
@@ -51,11 +65,11 @@ class TraceUow:
     def save(self, *args):
         return self._call("save", *args)
 
-    def claim(self, *args):
-        return self._call("claim", *args)
+    def resolve_non_lifecycle(self, *args):
+        return self._call("resolve_non_lifecycle", *args)
 
-    def complete(self, *args):
-        return self._call("complete", *args)
+    def complete_non_lifecycle(self, *args):
+        return self._call("complete_non_lifecycle", *args)
 
     def append(self, *args):
         return self._call("append", *args)
@@ -128,6 +142,506 @@ def _leave_wal_header_without_sidecars(database: Path, *, malformed: bool) -> No
     database.chmod(0o600)
 
 
+def _create_exact_r1(
+    root: Path, *, audit_count: int = 0, operational_status: str = "active"
+) -> tuple[SQLiteRegistryAdapter, Path, str]:
+    root.mkdir(mode=0o700)
+    database = root / "registry.sqlite"
+    descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+    service_id = "00000000-0000-0000-0000-000000000001"
+    at = "2026-01-01T00:00:00.000000Z"
+    result = json.dumps(
+        {
+            "service_id": service_id,
+            "principal_id": "p",
+            "domain_name": "notes",
+            "domain_class": "project",
+            "intent_description": "Notes",
+            "created_at": at,
+            "updated_at": at,
+            "last_activity_at": at,
+            "manifest": None,
+            "schema_version": None,
+            "design_state": "seeded",
+            "operational_status": operational_status,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        for statement in R1.ddl:
+            connection.execute(statement)
+        connection.execute(
+            'INSERT INTO "aipcs_registry_meta" VALUES (1,?,?,?,?)',
+            ("aipcs.sqlite.registry", "registry", 1, 0),
+        )
+        connection.execute(
+            'INSERT INTO "aipcs_registry_migration" VALUES (?,?,?,?,?)',
+            ("registry", 1, R1.migration_id, R1.checksum, at),
+        )
+        connection.execute(
+            'INSERT INTO "aipcs_registry_service" VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                service_id,
+                "p",
+                "notes",
+                "project",
+                "Notes",
+                at,
+                at,
+                at,
+                None,
+                None,
+                "seeded",
+                operational_status,
+            ),
+        )
+        connection.execute(
+            'INSERT INTO "aipcs_registry_mutation" VALUES (?,?,?,?,?)',
+            ("p", "legacy-key", "a" * 64, service_id, result),
+        )
+        for audit_id in range(1, audit_count + 1):
+            connection.execute(
+                'INSERT INTO "aipcs_registry_audit"('
+                '"audit_id","action","outcome","service_id","principal_id","created_via","at") '
+                "VALUES (?,?,?,?,?,?,?)",
+                (audit_id, "seed", "created", service_id, "p", "test", at),
+            )
+    return SQLiteRegistryAdapter(SQLiteLocationPolicy(root)), database, result
+
+
+def _create_ready_lifecycle_r2(
+    root: Path, phase: LifecyclePhase
+) -> tuple[SQLiteRegistryAdapter, Path]:
+    adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
+    assert adapter.migrate().status == "ready"
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+    service_id = UUID(int=1)
+    manifest = ManifestV2.model_validate(valid_manifest())
+    service = Service(
+        service_id=service_id,
+        principal_id="p",
+        domain_name="notes",
+        domain_class="project",
+        intent_description="Notes",
+        created_at=at,
+        updated_at=at,
+        last_activity_at=at,
+        manifest=manifest,
+        schema_version=1,
+    )
+    uow = adapter.open_uow()
+    uow.services.add(service)
+    uow.commit()
+    uow.close()
+    command = MaterialiseCommand("p", "test", service_id, 1, 1, "lifecycle-key")
+    uow = adapter.open_uow()
+    prepared = uow.mutations.resolve_or_admit(command)
+    assert isinstance(prepared, PreparedLifecycleClaim)
+    uow.commit()
+    uow.close()
+    if phase is LifecyclePhase.RECOVERY_REQUIRED:
+        uow = adapter.open_uow()
+        uow.mutations.finalize_recovery_required(prepared.intent, at)
+        uow.commit()
+        uow.close()
+    elif phase is LifecyclePhase.COMPLETED:
+        uow = adapter.open_uow()
+        uow.mutations.finalize_completed(
+            MaterialiseCompletion(
+                prepared.intent,
+                at,
+                MaterialisationStorage("sqlite", f"svc_{service_id.hex}"),
+            )
+        )
+        uow.commit()
+        uow.close()
+    return adapter, root / "registry.sqlite"
+
+
+def _assert_r2_incompatible_without_mutation(
+    adapter: SQLiteRegistryAdapter, database: Path
+) -> None:
+    before = database.read_bytes()
+    assert adapter.inspect_migration() == MigrationState("registry", 2, 2, "incompatible")
+    assert database.read_bytes() == before
+
+
+def test_exact_public_r1_upgrades_atomically_with_legacy_bytes_and_audit_trim(tmp_path: Path) -> None:
+    adapter, database, legacy_result = _create_exact_r1(tmp_path / "r1", audit_count=1001)
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
+    assert adapter.migrate() == MigrationState("registry", 2, 2, "ready")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            'SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" ORDER BY revision'
+        ).fetchall() == [
+            (1, R1.migration_id, R1.checksum),
+            (2, R2.migration_id, R2.checksum),
+        ]
+        assert connection.execute(
+            'SELECT service_revision,materialised_at,storage_backend,storage_namespace '
+            'FROM "aipcs_registry_service"'
+        ).fetchone() == (1, None, None, None)
+        assert connection.execute(
+            'SELECT operation_kind,phase,result_json FROM "aipcs_registry_mutation"'
+        ).fetchone() == ("legacy", "completed", legacy_result)
+        assert connection.execute('SELECT count(*),min(audit_id),max(audit_id) FROM "aipcs_registry_audit"').fetchone() == (
+            1000,
+            2,
+            1001,
+        )
+
+
+def test_private_or_unreachable_r1_is_not_upgradeable(tmp_path: Path) -> None:
+    adapter, database, _ = _create_exact_r1(
+        tmp_path / "r1", operational_status="suspended"
+    )
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
+    assert adapter.migrate() == MigrationState("registry", 1, 2, "incompatible")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute('SELECT applied_revision,dirty FROM "aipcs_registry_meta"').fetchone() == (
+            1,
+            0,
+        )
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name='aipcs_registry_service_r1'"
+        ).fetchone() is None
+
+
+@pytest.mark.parametrize("row_kind", ["service", "legacy_result"])
+@pytest.mark.parametrize(
+    ("created_at", "updated_at", "last_activity_at"),
+    [
+        (
+            "2026-01-01T00:00:00.000000Z",
+            "2025-12-31T23:59:59.000000Z",
+            "2025-12-31T23:59:59.000000Z",
+        ),
+        (
+            "2026-01-01T00:00:00.000000Z",
+            "2026-01-01T00:00:00.000000Z",
+            "2026-01-01T00:00:01.000000Z",
+        ),
+        (
+            "2026-01-01T00:00:00.000000Z",
+            "2026-01-01T00:00:01.000000Z",
+            "2026-01-01T00:00:01.000000Z",
+        ),
+    ],
+)
+def test_publicly_impossible_r1_timestamp_state_is_not_upgradeable_or_mutated(
+    tmp_path: Path,
+    row_kind: str,
+    created_at: str,
+    updated_at: str,
+    last_activity_at: str,
+) -> None:
+    adapter, database, _ = _create_exact_r1(tmp_path / "r1")
+    with sqlite3.connect(database) as connection:
+        if row_kind == "service":
+            connection.execute(
+                'UPDATE "aipcs_registry_service" SET '
+                '"created_at"=?,"updated_at"=?,"last_activity_at"=?',
+                (created_at, updated_at, last_activity_at),
+            )
+        else:
+            result = json.loads(
+                connection.execute(
+                    'SELECT "result_json" FROM "aipcs_registry_mutation"'
+                ).fetchone()[0]
+            )
+            result.update(
+                created_at=created_at,
+                updated_at=updated_at,
+                last_activity_at=last_activity_at,
+            )
+            connection.execute(
+                'UPDATE "aipcs_registry_mutation" SET "result_json"=?',
+                (json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True),),
+            )
+
+    before = database.read_bytes()
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
+    assert adapter.migrate() == MigrationState("registry", 1, 2, "incompatible")
+    assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["service", "non_lifecycle_result", "audit_timestamp", "audit_provenance", "audit_id"],
+)
+def test_ready_r2_semantic_row_corruption_is_incompatible_without_mutation(
+    tmp_path: Path, corruption: str
+) -> None:
+    harness = Harness(tmp_path)
+    harness.application(UUID(int=1)).seed(
+        ApplicationContext("p", "test"), SeedCommand("notes", "project", "Notes", "seed-key")
+    )
+    database = tmp_path / "registry-root" / "registry.sqlite"
+    with sqlite3.connect(database) as connection:
+        if corruption == "service":
+            connection.execute(
+                'UPDATE "aipcs_registry_service" SET "domain_name"=?', ("UPPER",)
+            )
+        elif corruption == "non_lifecycle_result":
+            connection.execute(
+                'UPDATE "aipcs_registry_mutation" SET "result_json"=?',
+                ('{"unexpected":true}',),
+            )
+        elif corruption == "audit_timestamp":
+            connection.execute(
+                'UPDATE "aipcs_registry_audit" SET "at"=?',
+                ("2026-99-99T99:99:99.999999Z",),
+            )
+        elif corruption == "audit_provenance":
+            connection.execute(
+                'UPDATE "aipcs_registry_audit" SET "created_via"=?', (" test",)
+            )
+        else:
+            connection.execute('UPDATE "aipcs_registry_audit" SET "audit_id"=0')
+    _assert_r2_incompatible_without_mutation(harness.adapter, database)
+
+
+def test_ready_r2_rejects_audit_rows_above_the_per_principal_retention_cap(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path)
+    created = harness.application(UUID(int=1)).seed(
+        ApplicationContext("p", "test"), SeedCommand("notes", "project", "Notes", "seed-key")
+    )
+    database = tmp_path / "registry-root" / "registry.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            'INSERT INTO "aipcs_registry_audit"('
+            '"action","outcome","service_id","principal_id","created_via","at") '
+            "VALUES (?,?,?,?,?,?)",
+            [
+                (
+                    "seed",
+                    "created",
+                    str(created.service_id),
+                    "p",
+                    "test",
+                    "2026-01-01T00:00:00.000000Z",
+                )
+                for _ in range(1_000)
+            ],
+        )
+    _assert_r2_incompatible_without_mutation(harness.adapter, database)
+
+
+def test_ready_r2_design_result_is_kind_exact_while_seed_duplicate_may_replay_design(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path)
+    context = ApplicationContext("p", "test")
+    application = harness.application(UUID(int=1))
+    created = application.seed(context, SeedCommand("notes", "project", "Notes", "seed-key"))
+    manifest = ManifestV2.model_validate(valid_manifest())
+    designed = application.design(
+        context,
+        DesignCommand(created.service_id, manifest, "design-key"),
+    )
+    duplicate = application.seed(
+        context,
+        SeedCommand("notes", "project", "Notes", "duplicate-seed-key"),
+    )
+    assert duplicate == designed
+    assert harness.adapter.inspect_migration().status == "ready"
+
+    database = tmp_path / "registry-root" / "registry.sqlite"
+    uow = harness.adapter.open_uow()
+    current = uow.services.get("p", created.service_id)
+    assert current is not None
+    uow.close()
+    forged = replace(current, service_revision=1)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'UPDATE "aipcs_registry_mutation" SET "result_json"=? '
+            'WHERE "operation_kind"=\'design\'',
+            (encode_result(forged),),
+        )
+    _assert_r2_incompatible_without_mutation(harness.adapter, database)
+
+
+def test_ready_r2_design_completion_cannot_be_ahead_of_current_service(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path)
+    created = harness.application(UUID(int=1)).seed(
+        ApplicationContext("p", "test"), SeedCommand("notes", "project", "Notes", "seed-key")
+    )
+    manifest = ManifestV2.model_validate(valid_manifest())
+    uow = harness.adapter.open_uow()
+    current = uow.services.get("p", created.service_id)
+    assert current is not None
+    uow.close()
+    forged = replace(
+        current,
+        manifest=manifest,
+        schema_version=1,
+        service_revision=2,
+    )
+    database = tmp_path / "registry-root" / "registry.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'INSERT INTO "aipcs_registry_mutation"('
+            '"principal_id","idempotency_key","fingerprint","service_id","operation_kind",'
+            '"phase","created_via","expected_service_revision","expected_schema_version",'
+            '"target_manifest_json","result_json","recovery_category") '
+            "VALUES (?,?,?,?,?,'completed',NULL,NULL,NULL,NULL,?,NULL)",
+            (
+                "p",
+                "forged-design",
+                "f" * 64,
+                str(created.service_id),
+                "design",
+                encode_result(forged),
+            ),
+        )
+    _assert_r2_incompatible_without_mutation(harness.adapter, database)
+
+
+@pytest.mark.parametrize(
+    ("phase", "column", "value"),
+    [
+        (LifecyclePhase.PREPARED, "result_json", "{}"),
+        (LifecyclePhase.RECOVERY_REQUIRED, "recovery_category", None),
+        (LifecyclePhase.COMPLETED, "recovery_category", "recovery_required"),
+    ],
+)
+def test_ready_r2_lifecycle_phase_evidence_corruption_is_incompatible_without_mutation(
+    tmp_path: Path, phase: LifecyclePhase, column: str, value: object
+) -> None:
+    adapter, database = _create_ready_lifecycle_r2(tmp_path / "registry", phase)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA ignore_check_constraints=ON")
+        connection.execute(f'UPDATE "aipcs_registry_mutation" SET "{column}"=?', (value,))
+    _assert_r2_incompatible_without_mutation(adapter, database)
+
+
+def test_ready_r2_completed_result_may_be_canonical_but_must_match_its_intent(
+    tmp_path: Path,
+) -> None:
+    adapter, database = _create_ready_lifecycle_r2(
+        tmp_path / "registry", LifecyclePhase.COMPLETED
+    )
+    uow = adapter.open_uow()
+    current = uow.services.get("p", UUID(int=1))
+    assert current is not None
+    uow.close()
+    wrong_terminal = replace(current, service_revision=current.service_revision + 1)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'UPDATE "aipcs_registry_mutation" SET "result_json"=?',
+            (encode_result(wrong_terminal),),
+        )
+    _assert_r2_incompatible_without_mutation(adapter, database)
+
+
+@pytest.mark.parametrize("corruption", ["materialised_before_completion", "activity_after_completion"])
+def test_ready_r2_completed_materialise_result_requires_exact_terminal_timestamps(
+    tmp_path: Path, corruption: str
+) -> None:
+    adapter, database = _create_ready_lifecycle_r2(
+        tmp_path / "registry", LifecyclePhase.COMPLETED
+    )
+    uow = adapter.open_uow()
+    current = uow.services.get("p", UUID(int=1))
+    assert current is not None
+    uow.close()
+    later = datetime(2026, 1, 2, tzinfo=UTC)
+    if corruption == "materialised_before_completion":
+        wrong_terminal = replace(current, updated_at=later, last_activity_at=later)
+    else:
+        wrong_terminal = replace(current, last_activity_at=later)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'UPDATE "aipcs_registry_mutation" SET "result_json"=?',
+            (encode_result(wrong_terminal),),
+        )
+    _assert_r2_incompatible_without_mutation(adapter, database)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("domain_name", "forged_domain"),
+        ("domain_class", "forged"),
+        ("intent_description", "forged"),
+        ("created_at", datetime(2025, 1, 1, tzinfo=UTC)),
+    ],
+)
+def test_ready_r2_completion_must_match_current_immutable_service_identity(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    adapter, database = _create_ready_lifecycle_r2(
+        tmp_path / "registry", LifecyclePhase.COMPLETED
+    )
+    uow = adapter.open_uow()
+    current = uow.services.get("p", UUID(int=1))
+    assert current is not None
+    uow.close()
+    forged = replace(current, **{field: value})
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'UPDATE "aipcs_registry_mutation" SET "result_json"=?',
+            (encode_result(forged),),
+        )
+    _assert_r2_incompatible_without_mutation(adapter, database)
+
+
+@pytest.mark.parametrize(
+    "corruption", ["mutation_idempotency", "audit_timestamp", "audit_provenance", "audit_id"]
+)
+def test_r1_mutation_and_audit_validation_rejects_non_public_rows_without_mutation(
+    tmp_path: Path, corruption: str
+) -> None:
+    adapter, database, _ = _create_exact_r1(tmp_path / "r1", audit_count=1)
+    with sqlite3.connect(database) as connection:
+        if corruption == "mutation_idempotency":
+            connection.execute(
+                'UPDATE "aipcs_registry_mutation" SET "idempotency_key"=?', (" key",)
+            )
+        elif corruption == "audit_timestamp":
+            connection.execute(
+                'UPDATE "aipcs_registry_audit" SET "at"=?',
+                ("2026-99-99T99:99:99.999999Z",),
+            )
+        elif corruption == "audit_provenance":
+            connection.execute(
+                'UPDATE "aipcs_registry_audit" SET "created_via"=?', (" test",)
+            )
+        else:
+            connection.execute('UPDATE "aipcs_registry_audit" SET "audit_id"=0')
+    before = database.read_bytes()
+    assert adapter.migrate() == MigrationState("registry", 1, 2, "incompatible")
+    assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("action", "outcome"),
+    [("materialise", "completed"), ("evolve", "recovery_required")],
+)
+def test_r1_lifecycle_audit_vocabulary_is_bounded_and_not_migrated(
+    tmp_path: Path, action: str, outcome: str
+) -> None:
+    adapter, database, _ = _create_exact_r1(tmp_path / "r1", audit_count=1)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA ignore_check_constraints=ON")
+        connection.execute(
+            'UPDATE "aipcs_registry_audit" SET "action"=?,"outcome"=?', (action, outcome)
+        )
+    before = database.read_bytes()
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
+    with pytest.raises(StorageMigrationError):
+        adapter.migrate()
+    assert database.read_bytes() == before
+
+
 def test_sqlite_adapter_satisfies_unchanged_registry_conformance(tmp_path: Path) -> None:
     counter = 0
 
@@ -145,7 +659,7 @@ def test_inspection_is_read_only_and_migration_is_explicit(tmp_path: Path) -> No
     root = tmp_path / "root"
     policy = SQLiteLocationPolicy(root)
     adapter = SQLiteRegistryAdapter(policy)
-    assert adapter.inspect_migration() == MigrationState("registry", 0, 1, "uninitialised")
+    assert adapter.inspect_migration() == MigrationState("registry", 0, 2, "uninitialised")
     assert not root.exists()
     assert adapter.migrate().status == "ready"
     database = root / "registry.sqlite"
@@ -234,13 +748,13 @@ def test_dirty_known_partial_layout_is_classified_dirty(tmp_path: Path) -> None:
     descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(descriptor)
     with sqlite3.connect(database) as connection:
-        connection.execute(DDL[0])
+        connection.execute(R1.ddl[0])
         connection.execute(
             'INSERT INTO "aipcs_registry_meta" VALUES (1,?,?,?,?)',
             ("aipcs.sqlite.registry", "registry", 0, 1),
         )
     adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
-    assert adapter.inspect_migration() == MigrationState("registry", 0, 1, "dirty")
+    assert adapter.inspect_migration() == MigrationState("registry", 0, 2, "dirty")
 
 
 def test_corrupt_service_and_replay_rows_fail_with_bounded_storage_error(tmp_path: Path) -> None:
@@ -354,7 +868,7 @@ def test_malformed_replay_is_bounded(tmp_path: Path) -> None:
         )
     uow = harness.adapter.open_uow()
     with pytest.raises(StorageMigrationError) as captured:
-        uow.mutations.claim("p", "key", fingerprint)
+        uow.mutations.resolve_non_lifecycle("seed", "p", "key", fingerprint)
     assert captured.value.__cause__ is None and captured.value.__context__ is None
     uow.rollback()
     uow.close()

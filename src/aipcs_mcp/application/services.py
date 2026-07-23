@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from aipcs_mcp.contracts import ServiceMetadata
+from aipcs_mcp.lifecycle import MAX_SERVICE_REVISION
 from aipcs_mcp.manifest_v2 import ManifestV2
 
 from .errors import (
@@ -25,8 +26,12 @@ from .errors import (
 from .models import (
     ApplicationContext,
     AuditEvent,
+    CompletedNonLifecycleClaim,
+    ConflictClaim,
     DesignCommand,
-    MutationClaim,
+    NewClaim,
+    NonLifecycleKind,
+    NonLifecycleRegistryOutcome,
     SeedCommand,
     Service,
     project,
@@ -60,8 +65,10 @@ class ServiceApplication:
         fingerprint = _fingerprint(context, command)
         uow = self._new_uow()
         try:
-            claim = uow.mutations.claim(context.principal_id, command.idempotency_key, fingerprint)
-            replay = self._resolve_claim(claim, context.principal_id)
+            claim = uow.mutations.resolve_non_lifecycle(
+                "seed", context.principal_id, command.idempotency_key, fingerprint
+            )
+            replay = self._resolve_non_lifecycle_claim(claim, "seed", context.principal_id)
             if replay is not None:
                 result = self._project(replay)
             else:
@@ -81,7 +88,8 @@ class ServiceApplication:
                             at=now,
                         )
                     )
-                    uow.mutations.complete(
+                    uow.mutations.complete_non_lifecycle(
+                        "seed",
                         context.principal_id,
                         command.idempotency_key,
                         fingerprint,
@@ -112,7 +120,8 @@ class ServiceApplication:
                             at=now,
                         )
                     )
-                    uow.mutations.complete(
+                    uow.mutations.complete_non_lifecycle(
+                        "seed",
                         context.principal_id,
                         command.idempotency_key,
                         fingerprint,
@@ -174,8 +183,10 @@ class ServiceApplication:
         fingerprint = _fingerprint(context, command)
         uow = self._new_uow()
         try:
-            claim = uow.mutations.claim(context.principal_id, command.idempotency_key, fingerprint)
-            replay = self._resolve_claim(claim, context.principal_id)
+            claim = uow.mutations.resolve_non_lifecycle(
+                "design", context.principal_id, command.idempotency_key, fingerprint
+            )
+            replay = self._resolve_non_lifecycle_claim(claim, "design", context.principal_id)
             if replay is not None:
                 result = self._project(replay)
             else:
@@ -188,6 +199,8 @@ class ServiceApplication:
                     or service.manifest is not None
                 ):
                     raise InvalidState()
+                if service.service_revision >= MAX_SERVICE_REVISION:
+                    raise InternalFailure()
 
                 now = self._now()
                 if now < service.updated_at:
@@ -198,9 +211,14 @@ class ServiceApplication:
                     schema_version=1,
                     updated_at=now,
                     last_activity_at=now,
+                    service_revision=service.service_revision + 1,
                 )
                 result = self._project(changed)
-                uow.services.save(changed)
+                save_result = uow.services.save(changed, service.service_revision)
+                if save_result == "stale_revision":
+                    self._reread_after_stale_design(uow, context.principal_id, command.service_id)
+                if save_result != "saved":
+                    raise InternalFailure()
                 uow.audits.append(
                     AuditEvent(
                         action="design",
@@ -211,7 +229,8 @@ class ServiceApplication:
                         at=now,
                     )
                 )
-                uow.mutations.complete(
+                uow.mutations.complete_non_lifecycle(
+                    "design",
                     context.principal_id,
                     command.idempotency_key,
                     fingerprint,
@@ -309,18 +328,31 @@ class ServiceApplication:
         raise failure from None
 
     @staticmethod
-    def _resolve_claim(claim: MutationClaim, principal_id: str) -> Service | None:
-        if claim.status == "new" and claim.result is None:
+    def _resolve_non_lifecycle_claim(
+        claim: NonLifecycleRegistryOutcome,
+        kind: NonLifecycleKind,
+        principal_id: str,
+    ) -> Service | None:
+        if type(claim) is NewClaim:
             return None
-        if (
-            claim.status == "replay"
-            and claim.result is not None
-            and claim.result.principal_id == principal_id
-        ):
-            return claim.result
-        if claim.status == "conflict" and claim.result is None:
+        if type(claim) is CompletedNonLifecycleClaim:
+            if claim.operation_kind not in {"legacy", kind} or claim.service.principal_id != principal_id:
+                raise InternalFailure()
+            return claim.service
+        if type(claim) is ConflictClaim:
             raise Conflict()
         raise InternalFailure()
+
+    @staticmethod
+    def _reread_after_stale_design(
+        uow: RegistryUnitOfWork, principal_id: str, service_id: UUID
+    ) -> None:
+        """Never retry a zero-row CAS update; re-read before returning current semantics."""
+
+        current = uow.services.get(principal_id, service_id)
+        if current is None or current.principal_id != principal_id:
+            raise NotFound()
+        raise InvalidState()
 
     @staticmethod
     def _project(service: Service) -> ServiceMetadata:

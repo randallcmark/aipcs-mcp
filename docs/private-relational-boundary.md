@@ -65,6 +65,32 @@ storage-unavailable, and generic internal failure are non-retryable; storage-bus
 operation-in-progress, and operation-uncertain are retryable. An exact same-key prepared claim
 resumes reconciliation rather than returning operation-in-progress.
 
+## V1-08B registry-only prerequisite
+
+V1-08B gives the registry—not this private service-store seam—one durable
+authority for a later lifecycle coordinator. Its R2 migration is a sequential,
+checksummed upgrade only from an exact, clean, public-reachable R1 registry;
+other states fail closed and receive no repair workflow. R1 remains immutable
+historical migration evidence. R2 starts each internal server-owned
+`service_revision` at 1 and reserves a safe logical backend/opaque namespace
+pair for a later materialisation result. Neither value changes the current
+public seeded result or identifies a filesystem location.
+
+R2 extends the existing global idempotency ledger rather than creating a
+service-store or per-lifecycle ledger. Strict completed legacy replays keep
+their stored result bytes. Future materialise/evolve intent may be prepared,
+completed, or recovery-required; prepared and recovery-required intent supply
+the registry-side per-service transition blocker, while completion releases it.
+The registry audit log remains metadata-only
+and retains only the newest 1,000 rows per principal by audit identifier. That
+bound never removes lifecycle/idempotency evidence and is not an operator or
+public control.
+
+This packet does not compose the service store, add a coordinator, observe or
+reconcile physical state, change WAL/busy policy, create a runtime/configuration
+surface, register MCP tools, or add a repair procedure. Those remain deferred
+to V1-08C through V1-08E.
+
 ## Public boundary
 
 The public runtime starts only the registry adapter. A ready SQLite server

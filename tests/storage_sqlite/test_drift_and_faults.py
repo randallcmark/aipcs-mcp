@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 from aipcs_mcp.storage.sqlite import adapter as adapter_module
-from aipcs_mcp.storage.sqlite.migrations import CHECKSUM, DDL
+from aipcs_mcp.storage.sqlite.migrations import CHECKSUM, R2
 
 
 def _adapter(tmp_path: Path, name: str = "root") -> tuple[SQLiteRegistryAdapter, Path]:
@@ -59,7 +60,7 @@ def test_missing_history_columns_are_incompatible(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute('DROP TABLE "aipcs_registry_migration"')
         connection.execute('CREATE TABLE "aipcs_registry_migration" ("component" TEXT) STRICT')
-    assert adapter.inspect_migration() == MigrationState("registry", 1, 1, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 2, 2, "incompatible")
 
 
 @pytest.mark.parametrize(
@@ -155,16 +156,16 @@ def test_initial_empty_store_hot_journal_is_recovered_only_by_migrate(
     assert not journal.exists()
 
 
-@pytest.mark.parametrize("fault_index", range(len(DDL)))
+@pytest.mark.parametrize("fault_index", range(len(R2.ddl)))
 def test_every_ddl_failure_rolls_back_to_uninitialised(
     tmp_path: Path, monkeypatch, fault_index: int
 ) -> None:
     root = tmp_path / "root"
     adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
-    faulty = list(DDL)
+    faulty = list(R2.ddl)
     faulty[fault_index] = "NOT VALID SQL"
     with monkeypatch.context() as context:
-        context.setattr(adapter_module, "DDL", tuple(faulty))
+        context.setattr(adapter_module, "R2", replace(R2, ddl=tuple(faulty)))
         with pytest.raises(StorageMigrationError) as captured:
             adapter.migrate()
         _assert_bounded(captured.value)
@@ -178,7 +179,7 @@ def test_precommit_readiness_failure_rolls_back(tmp_path: Path, monkeypatch) -> 
         context.setattr(
             adapter_module,
             "_inspect_connection",
-            lambda connection, *, integrity: MigrationState("registry", 1, 1, "incompatible"),
+            lambda connection, *, integrity: MigrationState("registry", 2, 2, "incompatible"),
         )
         with pytest.raises(StorageMigrationError) as captured:
             adapter.migrate()
@@ -225,7 +226,7 @@ def test_history_truth_table_rejects_drift(tmp_path: Path, mutation: str) -> Non
             replacement = "0" * 64 if CHECKSUM != "0" * 64 else "1" * 64
             connection.execute('UPDATE "aipcs_registry_migration" SET checksum=?', (replacement,))
         elif mutation == "newer":
-            connection.execute('UPDATE "aipcs_registry_meta" SET applied_revision=2')
+            connection.execute('UPDATE "aipcs_registry_meta" SET applied_revision=3')
         elif mutation == "missing_history":
             connection.execute('DELETE FROM "aipcs_registry_migration"')
         else:

@@ -26,6 +26,95 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_OUTPUT_CHARS = 4_000
 DEFAULT_TIMEOUT_SECONDS = 300
 SMOKE_TIMEOUT_SECONDS = 60
+_FROZEN_R1_MIGRATION_ID = "registry-0001-initial"
+_FROZEN_R1_CHECKSUM = "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc"
+_FROZEN_R2_MIGRATION_ID = "registry-0002-durable-intent"
+_FROZEN_R2_CHECKSUM = "b6190247d4f709728bab59cb4eb5fd149d4b7424472615f377b83f5191e0d8ea"
+_FROZEN_R1_DDL = (
+    """CREATE TABLE "aipcs_registry_meta" (
+    "singleton" INTEGER PRIMARY KEY NOT NULL CHECK ("singleton" = 1),
+    "adapter_id" TEXT NOT NULL CHECK ("adapter_id" = 'aipcs.sqlite.registry'),
+    "component" TEXT NOT NULL CHECK ("component" = 'registry'),
+    "applied_revision" INTEGER NOT NULL CHECK ("applied_revision" >= 0),
+    "dirty" INTEGER NOT NULL CHECK ("dirty" IN (0, 1))
+) STRICT""",
+    """CREATE TABLE "aipcs_registry_migration" (
+    "component" TEXT NOT NULL CHECK ("component" = 'registry'),
+    "revision" INTEGER NOT NULL CHECK ("revision" > 0),
+    "migration_id" TEXT NOT NULL CHECK (length("migration_id") BETWEEN 1 AND 96),
+    "checksum" TEXT NOT NULL CHECK (
+        length("checksum") = 64 AND "checksum" = lower("checksum")
+        AND "checksum" NOT GLOB '*[^0-9a-f]*'
+    ),
+    "applied_at" TEXT NOT NULL CHECK (
+        length("applied_at") = 27 AND substr("applied_at", 11, 1) = 'T'
+        AND substr("applied_at", 20, 1) = '.' AND substr("applied_at", 27, 1) = 'Z'
+    ),
+    PRIMARY KEY ("component", "revision"),
+    UNIQUE ("component", "migration_id")
+) STRICT""",
+    """CREATE TABLE "aipcs_registry_service" (
+    "service_id" TEXT PRIMARY KEY NOT NULL CHECK (
+        length("service_id") = 36 AND "service_id" = lower("service_id")
+        AND substr("service_id", 9, 1) = '-' AND substr("service_id", 14, 1) = '-'
+        AND substr("service_id", 19, 1) = '-' AND substr("service_id", 24, 1) = '-'
+        AND replace("service_id", '-', '') NOT GLOB '*[^0-9a-f]*'
+        AND length(replace("service_id", '-', '')) = 32
+        AND replace("service_id", '-', '') != '00000000000000000000000000000000'
+    ),
+    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),
+    "domain_name" TEXT NOT NULL CHECK (length("domain_name") BETWEEN 1 AND 63),
+    "domain_class" TEXT NOT NULL CHECK (length("domain_class") BETWEEN 1 AND 64),
+    "intent_description" TEXT NOT NULL CHECK (length("intent_description") BETWEEN 1 AND 1000),
+    "created_at" TEXT NOT NULL CHECK (length("created_at") = 27),
+    "updated_at" TEXT NOT NULL CHECK (length("updated_at") = 27),
+    "last_activity_at" TEXT NOT NULL CHECK (length("last_activity_at") = 27),
+    "manifest_json" TEXT,
+    "schema_version" INTEGER CHECK ("schema_version" IS NULL OR "schema_version" >= 1),
+    "design_state" TEXT NOT NULL CHECK ("design_state" IN ('seeded', 'materialised')),
+    "operational_status" TEXT NOT NULL CHECK (
+        "operational_status" IN ('active', 'suspended', 'archived')
+    ),
+    CHECK (
+        ("manifest_json" IS NULL AND "schema_version" IS NULL)
+        OR ("manifest_json" IS NOT NULL AND "schema_version" IS NOT NULL)
+    ),
+    UNIQUE ("service_id", "principal_id"),
+    UNIQUE ("principal_id", "domain_name")
+) STRICT""",
+    """CREATE TABLE "aipcs_registry_mutation" (
+    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),
+    "idempotency_key" TEXT NOT NULL CHECK (length("idempotency_key") BETWEEN 1 AND 128),
+    "fingerprint" TEXT NOT NULL CHECK (
+        length("fingerprint") = 64 AND "fingerprint" = lower("fingerprint")
+        AND "fingerprint" NOT GLOB '*[^0-9a-f]*'
+    ),
+    "service_id" TEXT NOT NULL,
+    "result_json" TEXT NOT NULL,
+    PRIMARY KEY ("principal_id", "idempotency_key"),
+    FOREIGN KEY ("service_id", "principal_id")
+        REFERENCES "aipcs_registry_service" ("service_id", "principal_id")
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+) STRICT""",
+    """CREATE TABLE "aipcs_registry_audit" (
+    "audit_id" INTEGER PRIMARY KEY,
+    "action" TEXT NOT NULL CHECK ("action" IN ('seed', 'design')),
+    "outcome" TEXT NOT NULL CHECK ("outcome" IN ('created', 'duplicate', 'accepted')),
+    "service_id" TEXT NOT NULL,
+    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),
+    "created_via" TEXT NOT NULL CHECK (length("created_via") BETWEEN 1 AND 64),
+    "at" TEXT NOT NULL CHECK (length("at") = 27),
+    CHECK (
+        ("action" = 'seed' AND "outcome" IN ('created', 'duplicate'))
+        OR ("action" = 'design' AND "outcome" = 'accepted')
+    ),
+    FOREIGN KEY ("service_id", "principal_id")
+        REFERENCES "aipcs_registry_service" ("service_id", "principal_id")
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+) STRICT""",
+    """CREATE INDEX "aipcs_registry_service_list"
+    ON "aipcs_registry_service" ("principal_id", "created_at" ASC, "service_id" ASC)""",
+)
 _SCRUBBED_ENVIRONMENT_KEYS = frozenset(
     {
         "PYTHONPATH",
@@ -1726,6 +1815,494 @@ def run_installed_lifecycle_contract_smoke(
     )
 
 
+def _registry_r2_smoke_program() -> str:
+    """Standalone installed V1-08B registry migration and ledger proof."""
+
+    program = r'''
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import site
+import sqlite3
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import UUID
+
+import aipcs_mcp.application.models as models_module
+import aipcs_mcp.lifecycle as lifecycle_module
+import aipcs_mcp.manifest_v2 as manifest_module
+import aipcs_mcp.storage as storage_module
+import aipcs_mcp.storage.sqlite as sqlite_module
+import aipcs_mcp.storage.sqlite.migrations as migrations_module
+from aipcs_mcp.application.models import (
+    CompletedLifecycleClaim,
+    CompletedNonLifecycleClaim,
+    MaterialisationStorage,
+    MaterialiseCompletion,
+    PreparedLifecycleClaim,
+    RecoveryRequiredLifecycleClaim,
+    Service,
+)
+from aipcs_mcp.lifecycle import LifecyclePhase, MaterialiseCommand
+from aipcs_mcp.manifest_v2 import ManifestV2
+from aipcs_mcp.storage import MigrationState
+from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
+from aipcs_mcp.storage.sqlite.migrations import R1, R2
+
+frozen_r1_ddl = __FROZEN_R1_DDL__
+frozen_r1_migration_id = "__FROZEN_R1_MIGRATION_ID__"
+frozen_r1_checksum = "__FROZEN_R1_CHECKSUM__"
+frozen_r2_migration_id = "__FROZEN_R2_MIGRATION_ID__"
+frozen_r2_checksum = "__FROZEN_R2_CHECKSUM__"
+assert hashlib.sha256("\n".join(frozen_r1_ddl).encode()).hexdigest() == frozen_r1_checksum
+assert R1.ddl == frozen_r1_ddl
+assert R1.migration_id == frozen_r1_migration_id
+assert R1.checksum == frozen_r1_checksum
+assert R2.migration_id == frozen_r2_migration_id
+assert R2.checksum == frozen_r2_checksum
+
+cwd = Path.cwd()
+assert tuple(cwd.iterdir()) == ()
+sites = tuple(Path(value).resolve() for value in site.getsitepackages())
+for module in (
+    models_module,
+    lifecycle_module,
+    manifest_module,
+    storage_module,
+    sqlite_module,
+    migrations_module,
+):
+    origin = Path(module.__file__).resolve()
+    assert any(origin.is_relative_to(value) for value in sites), origin
+at_text = "2026-01-01T00:00:00.000000Z"
+at = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def legacy_result(service_id, principal, domain):
+    return json.dumps(
+        {
+            "service_id": service_id,
+            "principal_id": principal,
+            "domain_name": domain,
+            "domain_class": "release",
+            "intent_description": f"{domain} release proof",
+            "created_at": at_text,
+            "updated_at": at_text,
+            "last_activity_at": at_text,
+            "manifest": None,
+            "schema_version": None,
+            "design_state": "seeded",
+            "operational_status": "active",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+
+
+root = (cwd / "registry-root").resolve()
+root.mkdir(mode=0o700)
+database = root / "registry.sqlite"
+descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+os.close(descriptor)
+service_a = "00000000-0000-0000-0000-000000000001"
+service_b = "00000000-0000-0000-0000-000000000002"
+result_a = legacy_result(service_a, "principal-a", "notes_a")
+result_b = legacy_result(service_b, "principal-b", "notes_b")
+with sqlite3.connect(database) as connection:
+    connection.execute("PRAGMA foreign_keys=ON")
+    for statement in frozen_r1_ddl:
+        connection.execute(statement)
+    connection.execute(
+        'INSERT INTO "aipcs_registry_meta" VALUES (1,?,?,?,?)',
+        ("aipcs.sqlite.registry", "registry", 1, 0),
+    )
+    connection.execute(
+        'INSERT INTO "aipcs_registry_migration" VALUES (?,?,?,?,?)',
+        ("registry", 1, frozen_r1_migration_id, frozen_r1_checksum, at_text),
+    )
+    connection.executemany(
+        'INSERT INTO "aipcs_registry_service" VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        [
+            (
+                service_a,
+                "principal-a",
+                "notes_a",
+                "release",
+                "notes_a release proof",
+                at_text,
+                at_text,
+                at_text,
+                None,
+                None,
+                "seeded",
+                "active",
+            ),
+            (
+                service_b,
+                "principal-b",
+                "notes_b",
+                "release",
+                "notes_b release proof",
+                at_text,
+                at_text,
+                at_text,
+                None,
+                None,
+                "seeded",
+                "active",
+            ),
+        ],
+    )
+    connection.executemany(
+        'INSERT INTO "aipcs_registry_mutation" VALUES (?,?,?,?,?)',
+        [
+            ("principal-a", "legacy-a", "a" * 64, service_a, result_a),
+            ("principal-b", "legacy-b", "b" * 64, service_b, result_b),
+        ],
+    )
+    connection.executemany(
+        'INSERT INTO "aipcs_registry_audit" VALUES (?,?,?,?,?,?,?)',
+        [
+            (audit_id, "seed", "created", service_a, "principal-a", "release", at_text)
+            for audit_id in range(1, 1002)
+        ]
+        + [
+            (audit_id, "seed", "created", service_b, "principal-b", "release", at_text)
+            for audit_id in range(1002, 1003)
+        ],
+    )
+
+adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
+assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
+assert adapter.migrate() == MigrationState("registry", 2, 2, "ready")
+with sqlite3.connect(database) as connection:
+    assert connection.execute(
+        'SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" ORDER BY revision'
+    ).fetchall() == [
+        (1, frozen_r1_migration_id, frozen_r1_checksum),
+        (2, frozen_r2_migration_id, frozen_r2_checksum),
+    ]
+    assert connection.execute(
+        'SELECT "service_revision","materialised_at","storage_backend","storage_namespace" '
+        'FROM "aipcs_registry_service" ORDER BY "service_id"'
+    ).fetchall() == [
+        (1, None, None, None),
+        (1, None, None, None),
+    ]
+    assert connection.execute(
+        'SELECT result_json FROM "aipcs_registry_mutation" '
+        'WHERE "principal_id"=? AND "idempotency_key"=?',
+        ("principal-a", "legacy-a"),
+    ).fetchone() == (result_a,)
+    assert connection.execute(
+        'SELECT count(*),min(audit_id),max(audit_id) FROM "aipcs_registry_audit" '
+        'WHERE "principal_id"=?',
+        ("principal-a",),
+    ).fetchone() == (1000, 2, 1001)
+    assert connection.execute(
+        'SELECT count(*),min(audit_id),max(audit_id) FROM "aipcs_registry_audit" '
+        'WHERE "principal_id"=?',
+        ("principal-b",),
+    ).fetchone() == (1, 1002, 1002)
+
+
+def prove_under_cap_retention(count):
+    case_root = (cwd / f"retention-{count}-root").resolve()
+    case_root.mkdir(mode=0o700)
+    case_database = case_root / "registry.sqlite"
+    case_descriptor = os.open(
+        case_database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+    )
+    os.close(case_descriptor)
+    with sqlite3.connect(case_database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        for statement in frozen_r1_ddl:
+            connection.execute(statement)
+        connection.execute(
+            'INSERT INTO "aipcs_registry_meta" VALUES (1,?,?,?,?)',
+            ("aipcs.sqlite.registry", "registry", 1, 0),
+        )
+        connection.execute(
+            'INSERT INTO "aipcs_registry_migration" VALUES (?,?,?,?,?)',
+            (
+                "registry",
+                1,
+                frozen_r1_migration_id,
+                frozen_r1_checksum,
+                at_text,
+            ),
+        )
+        connection.execute(
+            'INSERT INTO "aipcs_registry_service" VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                service_a,
+                "principal-a",
+                "notes_a",
+                "release",
+                "notes_a release proof",
+                at_text,
+                at_text,
+                at_text,
+                None,
+                None,
+                "seeded",
+                "active",
+            ),
+        )
+        connection.execute(
+            'INSERT INTO "aipcs_registry_mutation" VALUES (?,?,?,?,?)',
+            ("principal-a", "legacy-a", "a" * 64, service_a, result_a),
+        )
+        connection.executemany(
+            'INSERT INTO "aipcs_registry_audit" VALUES (?,?,?,?,?,?,?)',
+            [
+                (
+                    audit_id,
+                    "seed",
+                    "created",
+                    service_a,
+                    "principal-a",
+                    "release",
+                    at_text,
+                )
+                for audit_id in range(1, count + 1)
+            ],
+        )
+    case_adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(case_root))
+    assert case_adapter.inspect_migration() == MigrationState(
+        "registry", 1, 2, "incompatible"
+    )
+    assert case_adapter.migrate() == MigrationState("registry", 2, 2, "ready")
+    with sqlite3.connect(case_database) as connection:
+        assert connection.execute(
+            'SELECT count(*),min(audit_id),max(audit_id) '
+            'FROM "aipcs_registry_audit"'
+        ).fetchone() == (count, 1, count)
+
+
+prove_under_cap_retention(999)
+prove_under_cap_retention(1000)
+
+uow = adapter.open_uow()
+legacy = uow.mutations.resolve_non_lifecycle(
+    "seed", "principal-a", "legacy-a", "a" * 64
+)
+assert isinstance(legacy, CompletedNonLifecycleClaim)
+assert legacy.operation_kind == "legacy"
+assert str(legacy.service.service_id) == service_a
+uow.rollback()
+uow.close()
+
+manifest = ManifestV2.model_validate(
+    {
+        "manifest_version": 2,
+        "schema_version": 1,
+        "entities": [
+            {
+                "name": "project",
+                "attributes": [
+                    {"name": "id", "type": "uuid", "required": True, "primary_key": True},
+                    {"name": "owner_id", "type": "string", "required": True},
+                    {"name": "created_at", "type": "datetime", "required": True},
+                    {"name": "updated_at", "type": "datetime", "required": True},
+                    {"name": "created_via", "type": "string", "required": True},
+                    {"name": "record_version", "type": "integer", "required": True},
+                    {"name": "title", "type": "string", "required": True},
+                ],
+            }
+        ],
+        "relationships": [],
+        "indices": [{"name": "project_owner_idx", "entity": "project", "fields": ["owner_id"]}],
+        "query_patterns": ["Find projects by owner."],
+        "discovery_facets": [{"entity": "project", "field": "owner_id"}],
+        "retrieval_guidance": "Use exact owner filters before listing.",
+        "migration_history": [],
+    }
+)
+
+
+def add_service(service_id):
+    service = Service(
+        service_id=service_id,
+        principal_id="lifecycle-principal",
+        domain_name=f"service_{service_id.int}",
+        domain_class="release",
+        intent_description="installed R2 ledger proof",
+        created_at=at,
+        updated_at=at,
+        last_activity_at=at,
+        manifest=manifest,
+        schema_version=1,
+    )
+    unit = adapter.open_uow()
+    unit.services.add(service)
+    unit.commit()
+    unit.close()
+
+
+def admit(service_id, key):
+    command = MaterialiseCommand(
+        principal_id="lifecycle-principal",
+        created_via="release",
+        service_id=service_id,
+        expected_service_revision=1,
+        expected_schema_version=1,
+        idempotency_key=key,
+    )
+    unit = adapter.open_uow()
+    claim = unit.mutations.resolve_or_admit(command)
+    assert isinstance(claim, PreparedLifecycleClaim)
+    unit.commit()
+    unit.close()
+    return claim.intent
+
+
+prepared_id = UUID(int=3)
+completed_id = UUID(int=4)
+recovery_id = UUID(int=5)
+for item in (prepared_id, completed_id, recovery_id):
+    add_service(item)
+prepared_intent = admit(prepared_id, "prepared-key")
+completed_intent = admit(completed_id, "completed-key")
+recovery_intent = admit(recovery_id, "recovery-key")
+
+uow = adapter.open_uow()
+completed = uow.mutations.finalize_completed(
+    MaterialiseCompletion(
+        completed_intent,
+        at,
+        MaterialisationStorage("sqlite", f"svc_{completed_id.hex}"),
+    )
+)
+assert isinstance(completed, CompletedLifecycleClaim)
+uow.commit()
+uow.close()
+
+uow = adapter.open_uow()
+recovery = uow.mutations.finalize_recovery_required(recovery_intent, at)
+assert isinstance(recovery, RecoveryRequiredLifecycleClaim)
+uow.commit()
+uow.close()
+
+with sqlite3.connect(database) as connection:
+    phases = connection.execute(
+        'SELECT "idempotency_key","phase","result_json","recovery_category" '
+        'FROM "aipcs_registry_mutation" WHERE "principal_id"=? '
+        'ORDER BY "idempotency_key"',
+        ("lifecycle-principal",),
+    ).fetchall()
+    invalid_insert = (
+        'INSERT INTO "aipcs_registry_mutation"('
+        '"principal_id","idempotency_key","fingerprint","service_id","operation_kind",'
+        '"phase","created_via","expected_service_revision","expected_schema_version",'
+        '"target_manifest_json","result_json","recovery_category") '
+        'SELECT "principal_id",?,"fingerprint","service_id",?,?,"created_via",'
+        '"expected_service_revision","expected_schema_version","target_manifest_json",?,? '
+        'FROM "aipcs_registry_mutation" WHERE "principal_id"=? AND "idempotency_key"=?'
+    )
+    invalid_rows = (
+        ("invalid-kind-key", "unknown", "prepared", None, None),
+        ("invalid-phase-key", "materialise", "unknown", None, None),
+        ("invalid-completed-key", "materialise", "completed", None, None),
+        ("invalid-recovery-key", "materialise", "recovery_required", None, None),
+    )
+    for values in invalid_rows:
+        try:
+            connection.execute(
+                invalid_insert,
+                (*values, "lifecycle-principal", "prepared-key"),
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("invalid lifecycle kind/phase/evidence row was accepted")
+    assert connection.execute(
+        'SELECT count(*) FROM "aipcs_registry_mutation" '
+        'WHERE "idempotency_key" LIKE \'invalid-%\''
+    ).fetchone() == (0,)
+assert [(row[0], row[1]) for row in phases] == [
+    ("completed-key", LifecyclePhase.COMPLETED.value),
+    ("prepared-key", LifecyclePhase.PREPARED.value),
+    ("recovery-key", LifecyclePhase.RECOVERY_REQUIRED.value),
+]
+assert phases[0][2] is not None and phases[0][3] is None
+assert phases[1][2:] == (None, None)
+assert phases[2][2:] == (None, "recovery_required")
+assert adapter.inspect_migration() == MigrationState("registry", 2, 2, "ready")
+
+def prove_corruption_fails_closed(name, statement, parameters=()):
+    corrupt_root = (cwd / f"corrupt-{name}-root").resolve()
+    corrupt_root.mkdir(mode=0o700)
+    corrupt_database = corrupt_root / "registry.sqlite"
+    shutil.copy2(database, corrupt_database)
+    corrupt_database.chmod(0o600)
+    with sqlite3.connect(corrupt_database) as connection:
+        connection.execute(statement, parameters)
+    corrupt_before = corrupt_database.read_bytes()
+    corrupt_adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(corrupt_root))
+    assert corrupt_adapter.inspect_migration() == MigrationState(
+        "registry", 2, 2, "incompatible"
+    )
+    assert corrupt_database.read_bytes() == corrupt_before
+    assert corrupt_adapter.migrate() == MigrationState(
+        "registry", 2, 2, "incompatible"
+    )
+    assert corrupt_database.read_bytes() == corrupt_before
+
+
+prove_corruption_fails_closed(
+    "row",
+    'UPDATE "aipcs_registry_mutation" SET "result_json"=? '
+    'WHERE "principal_id"=? AND "idempotency_key"=?',
+    ("{}", "lifecycle-principal", "completed-key"),
+)
+prove_corruption_fails_closed(
+    "checksum",
+    'UPDATE "aipcs_registry_migration" SET "checksum"=? WHERE "revision"=2',
+    ("c" * 64,),
+)
+prove_corruption_fails_closed(
+    "schema",
+    'DROP INDEX "aipcs_registry_audit_principal"',
+)
+'''
+    return (
+        program.replace("__FROZEN_R1_DDL__", repr(_FROZEN_R1_DDL))
+        .replace("__FROZEN_R1_MIGRATION_ID__", _FROZEN_R1_MIGRATION_ID)
+        .replace("__FROZEN_R1_CHECKSUM__", _FROZEN_R1_CHECKSUM)
+        .replace("__FROZEN_R2_MIGRATION_ID__", _FROZEN_R2_MIGRATION_ID)
+        .replace("__FROZEN_R2_CHECKSUM__", _FROZEN_R2_CHECKSUM)
+    )
+
+
+def run_installed_registry_r2_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Run the V1-08B installed registry proof from an empty external cwd."""
+
+    client = workspace / f"{name}-registry-r2-smoke.py"
+    client.write_text(_registry_r2_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"{name}-registry-r2-cwd"
+    cwd.mkdir(mode=0o700)
+    run_stage(
+        f"installed {name} registry R2 smoke",
+        [python, "-I", client],
+        cwd=cwd,
+        environment=environment,
+        timeout=SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+
+
 def run_wheel_restart_principal_smoke(
     python: Path,
     workspace: Path,
@@ -2013,6 +2590,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_registry_r2_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_wheel_restart_principal_smoke(
             wheel_python,
             workspace,
@@ -2059,6 +2643,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             redaction_roots=redaction_roots,
         )
         run_installed_lifecycle_contract_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_registry_r2_smoke(
             sdist_python,
             workspace,
             "sdist",

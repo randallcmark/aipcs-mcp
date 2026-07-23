@@ -432,6 +432,39 @@ def test_embedded_lifecycle_client_exercises_the_source_contract(
     assert tuple(tmp_path.iterdir()) == ()
 
 
+def test_embedded_registry_r2_client_exercises_the_source_contract(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    program = verifier._registry_r2_smoke_program()
+    compile(program, "installed_registry_r2_smoke.py", "exec")
+    assert "SQLiteRegistryAdapter" in program
+    assert "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc" in program
+    assert 'MigrationState("registry", 1, 2, "incompatible")' in program
+    assert 'MigrationState("registry", 2, 2, "ready")' in program
+    assert "CompletedNonLifecycleClaim" in program
+    assert "(1000, 2, 1001)" in program
+    assert "prove_under_cap_retention(999)" in program
+    assert "prove_under_cap_retention(1000)" in program
+    assert "LifecyclePhase.PREPARED.value" in program
+    assert "LifecyclePhase.COMPLETED.value" in program
+    assert "LifecyclePhase.RECOVERY_REQUIRED.value" in program
+    assert "invalid lifecycle kind/phase/evidence row was accepted" in program
+    assert 'prove_corruption_fails_closed(\n    "checksum"' in program
+    assert 'prove_corruption_fails_closed(\n    "schema"' in program
+    assert "site.getsitepackages()" in program
+    assert "corrupt_database.read_bytes() == corrupt_before" in program
+
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
+    monkeypatch.chdir(tmp_path)
+    exec(compile(program, "installed_registry_r2_smoke.py", "exec"), {})
+    assert (tmp_path / "registry-root" / "registry.sqlite").is_file()
+    assert (tmp_path / "retention-999-root" / "registry.sqlite").is_file()
+    assert (tmp_path / "retention-1000-root" / "registry.sqlite").is_file()
+    assert (tmp_path / "corrupt-row-root" / "registry.sqlite").is_file()
+    assert (tmp_path / "corrupt-checksum-root" / "registry.sqlite").is_file()
+    assert (tmp_path / "corrupt-schema-root" / "registry.sqlite").is_file()
+
+
 def test_catalog_smoke_uses_each_installed_interpreter_and_external_cwd(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -581,6 +614,37 @@ def test_lifecycle_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert all(args[1] == "-I" for _, args, _ in calls)
     assert calls[0][2] == tmp_path / "wheel-lifecycle-contract-cwd"
     assert calls[1][2] == tmp_path / "sdist-lifecycle-contract-cwd"
+    assert calls[0][2] != calls[1][2]
+
+
+def test_registry_r2_smoke_uses_each_installed_interpreter_and_external_cwd(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name in ("wheel", "sdist"):
+        verifier.run_installed_registry_r2_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [label for label, _, _ in calls] == [
+        "installed wheel registry R2 smoke",
+        "installed sdist registry R2 smoke",
+    ]
+    assert calls[0][1][0].endswith("wheel-venv/bin/python")
+    assert calls[1][1][0].endswith("sdist-venv/bin/python")
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][2] == tmp_path / "wheel-registry-r2-cwd"
+    assert calls[1][2] == tmp_path / "sdist-registry-r2-cwd"
     assert calls[0][2] != calls[1][2]
 
 

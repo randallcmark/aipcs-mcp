@@ -206,7 +206,13 @@ def assert_registry_application_conformance(factory: RegistryHarnessFactory) -> 
     ]
     assert all(trace.close_count == 1 for trace in harness.traces())
 
-    for boundary in ("claim", "find_domain", "add", "append", "complete"):
+    for boundary in (
+        "resolve_non_lifecycle",
+        "find_domain",
+        "add",
+        "append",
+        "complete_non_lifecycle",
+    ):
         failed = factory()
         failed.fail(boundary)
         captured = _expect(
