@@ -123,9 +123,9 @@ def _expected_materialise_action(
     deferred = _expected_deferred(foundation)
     if deferred is not None:
         return deferred
-    if foundation is FoundationObservation.UNINITIALISED:
+    if foundation in {FoundationObservation.UNINITIALISED, FoundationObservation.DIRTY}:
         return RecoveryAction.PREPARE_FOUNDATION, None, None, False
-    if foundation in {FoundationObservation.DIRTY, FoundationObservation.INCOMPATIBLE}:
+    if foundation is FoundationObservation.INCOMPATIBLE:
         return _recovery_required_expected()
     deferred = _expected_deferred(target)
     if deferred is not None:
@@ -150,6 +150,8 @@ def _expected_evolve_action(
     deferred = _expected_deferred(foundation)
     if deferred is not None:
         return deferred
+    if foundation is FoundationObservation.DIRTY:
+        return RecoveryAction.PREPARE_FOUNDATION, None, None, False
     if foundation is not FoundationObservation.READY:
         return _recovery_required_expected()
     deferred = _expected_deferred(target)
@@ -468,7 +470,7 @@ def test_lifecycle_result_categories_have_frozen_retryability(
                 FoundationObservation.DIRTY,
                 DomainObservation.NOT_OBSERVED,
             ),
-            RecoveryAction.RECOVERY_REQUIRED,
+            RecoveryAction.PREPARE_FOUNDATION,
             None,
         ),
         (
@@ -534,6 +536,16 @@ def test_materialise_truth_table(
                 DomainObservation.NOT_OBSERVED,
             ),
             RecoveryAction.RECOVERY_REQUIRED,
+            None,
+        ),
+        (
+            EvolveRecoveryObservation(
+                LifecyclePhase.PREPARED,
+                FoundationObservation.DIRTY,
+                DomainObservation.NOT_OBSERVED,
+                DomainObservation.NOT_OBSERVED,
+            ),
+            RecoveryAction.PREPARE_FOUNDATION,
             None,
         ),
         (

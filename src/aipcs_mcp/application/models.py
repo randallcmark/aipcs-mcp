@@ -16,6 +16,7 @@ from aipcs_mcp.lifecycle import (
     LifecycleKind,
     LifecyclePhase,
     LifecycleResultCategory,
+    lifecycle_result_retryable,
 )
 from aipcs_mcp.manifest_v2 import ManifestV2
 
@@ -285,6 +286,27 @@ type LifecycleRegistryOutcome = (
     | OperationInProgress
 )
 type LifecycleCompletion = MaterialiseCompletion | EvolveCompletion
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleExecutionResult:
+    """Private coordinator outcome with no storage or operation evidence."""
+
+    category: Literal["completed"] | LifecycleResultCategory
+    service: Service | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.category) is str and self.category == "completed":
+            object.__setattr__(self, "service", _service_snapshot(self.service))
+            return
+        if type(self.category) is not LifecycleResultCategory or self.service is not None:
+            raise ValueError("Lifecycle execution result is invalid.")
+
+    @property
+    def retryable(self) -> bool:
+        if type(self.category) is str and self.category == "completed":
+            return False
+        return lifecycle_result_retryable(self.category)
 
 
 def _is_utc_datetime(value: object) -> bool:

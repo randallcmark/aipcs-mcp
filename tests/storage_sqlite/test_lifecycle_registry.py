@@ -35,8 +35,10 @@ from aipcs_mcp.lifecycle import (
     prepare_intent,
 )
 from aipcs_mcp.manifest_v2 import ManifestV2
+from aipcs_mcp.relational import RelationalContractError
 from aipcs_mcp.storage.errors import StorageMigrationError
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
+from aipcs_mcp.storage.sqlite import uow as uow_module
 from aipcs_mcp.storage.sqlite.codecs import decode_lifecycle_intent, encode_manifest, encode_result
 
 _START = datetime(2026, 7, 23, tzinfo=UTC)
@@ -57,6 +59,8 @@ def _manifest(version: int = 1) -> ManifestV2:
         }
         for prior in range(1, version)
     ]
+    if version > 1:
+        payload["entities"][0]["attributes"].append({"name": "summary", "type": "string"})
     return ManifestV2.model_validate(payload)
 
 
@@ -126,7 +130,7 @@ def _materialise(
     )
 
 
-def _evolve(*, key: str = "evolve-1") -> EvolveCommand:
+def _evolve(*, key: str = "evolve-1", target_manifest: ManifestV2 | None = None) -> EvolveCommand:
     return EvolveCommand(
         principal_id=_PRINCIPAL,
         created_via="registry-test",
@@ -134,7 +138,7 @@ def _evolve(*, key: str = "evolve-1") -> EvolveCommand:
         expected_service_revision=2,
         expected_schema_version=1,
         idempotency_key=key,
-        target_manifest=_manifest(2),
+        target_manifest=target_manifest or _manifest(2),
     )
 
 
@@ -226,6 +230,57 @@ def test_stale_and_unsupported_new_keys_never_insert_prepared_intent(tmp_path: P
 
     with sqlite3.connect(tmp_path / "registry" / "registry.sqlite") as connection:
         assert connection.execute('SELECT count(*) FROM "aipcs_registry_mutation"').fetchone() == (0,)
+
+
+def test_relationally_unsupported_materialise_creates_no_lifecycle_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _adapter(tmp_path)
+    _add(adapter, _service())
+
+    def reject_manifest(_: ManifestV2) -> object:
+        raise RelationalContractError()
+
+    monkeypatch.setattr(uow_module, "compile_manifest", reject_manifest)
+    assert isinstance(_admit(adapter, _materialise()), UnsupportedTransition)
+
+    with sqlite3.connect(_database(tmp_path)) as connection:
+        assert connection.execute('SELECT count(*) FROM "aipcs_registry_mutation"').fetchone() == (0,)
+        assert connection.execute('SELECT count(*) FROM "aipcs_registry_audit"').fetchone() == (0,)
+
+
+def test_non_additive_evolve_creates_no_lifecycle_evidence_after_blocker_precedence(
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter(tmp_path)
+    _add(adapter, _service())
+    materialise = _admit(adapter, _materialise())
+    assert isinstance(materialise, PreparedLifecycleClaim)
+    assert isinstance(
+        _write(
+            adapter,
+            lambda uow: uow.mutations.finalize_completed(
+                MaterialiseCompletion(
+                    materialise.intent,
+                    _START + timedelta(seconds=1),
+                    MaterialisationStorage("sqlite", f"svc_{_SERVICE_ID.hex}"),
+                )
+            ),
+        ),
+        CompletedLifecycleClaim,
+    )
+    payload = _manifest(2).model_dump(mode="json", by_alias=True)
+    payload["entities"][0]["attributes"].append(
+        {"name": "required_after_design", "type": "string", "required": True}
+    )
+    unsupported = _evolve(key="unsupported-evolve", target_manifest=ManifestV2.model_validate(payload))
+    before = _registry_snapshot(_database(tmp_path))
+    assert isinstance(_admit(adapter, unsupported), UnsupportedTransition)
+    assert _registry_snapshot(_database(tmp_path)) == before
+
+    prepared = _admit(adapter, _evolve(key="prepared-evolve"))
+    assert isinstance(prepared, PreparedLifecycleClaim)
+    assert isinstance(_admit(adapter, unsupported), OperationInProgress)
 
 
 def test_service_save_is_exact_cas_success_then_stale_without_blind_overwrite(tmp_path: Path) -> None:

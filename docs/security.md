@@ -60,12 +60,17 @@ incompatible, `SQLITE_LOCKED`, and uncertain commit outcomes. WAL does not
 extend support to network filesystems, multi-host use, Windows SQLite, or a
 hostile same-user process.
 
-V1-08C establishes this final local SQLite policy before V1-08D composes the
-cross-store coordinator.
-V1-08D must rerun its full coordinator reconciliation/fault matrix under that final policy before
-V1-08E can expose lifecycle operations.
+V1-08C establishes the final local SQLite policy under which V1-08D's private
+cross-store coordinator is tested. V1-08D reruns coordinator
+reconciliation/fault and installed-artifact proof under that policy before
+V1-08E may expose lifecycle operations.
 
-V1-08B is deliberately narrower than that future coordinator. Its historical
+The coordinator treats a dirty service-store foundation as one bounded
+recovery check, not immediate corruption: the existing migration action may
+resume an exact AIPCS-prepared WAL phase, then fresh observation decides.
+Persistent generic dirt becomes recovery-required and is never repaired.
+
+V1-08B is deliberately narrower than the V1-08D coordinator. Its historical
 R2 registry migration accepts only exact, clean, public-reachable R1 state and
 otherwise fails closed with the existing bounded migration outcome; it adds no
 public upgrade, repair, or recovery command. That R2 layout holds one global
@@ -140,21 +145,21 @@ All repository test data is synthetic and marked with its provenance. Do not
 add operational stores, database copies, credentials, or personal context to
 this repository.
 
-The registry stores service metadata and initial manifests only. A design does
-not invoke the packaged private service-store catalog or domain-schema adapter,
-create a service database or agent-defined table, or make records durable. The
-catalog can be exercised directly as an internal foundation and creates only
-namespace-bound adapter metadata and its checksummed migration ledger; the
-separate private domain adapter can operate on that ready foundation only
-through direct internal code. Because both are uncomposed, direct use can leave
-an orphan database or physical schema and is not a public workflow. It adds no
-MCP tool, CLI command, configuration option, capability, repair, or recovery
-path. Public materialisation, records, branches, retrieval, backup/export,
-cross-store recovery, operator administration, remote transport, PostgreSQL,
-and multi-user tenancy are not implemented. Future slices must preserve the
-same boundary: validate input before persistence, keep configuration separate
-from data, and redact sensitive implementation details from errors and
-capability output. See the [private relational
+The registry stores service metadata and initial manifests only. A public
+design does not invoke the packaged private service-store catalog,
+domain-schema adapter, or lifecycle coordinator; it creates no service
+database or agent-defined table and makes no records durable. The private
+coordinator admits supported work before physical I/O, closes every registry
+UoW before service-store access, exposes only bounded result categories, and
+persists no path, credential, SQL, driver error, or physical locator. It is
+packaged for internal restart and release proof but has no runtime, MCP, CLI,
+or configuration composition. Direct catalog/domain use can still leave an
+orphan database or physical schema and is not a public workflow. No public
+materialisation, records, branches, retrieval, backup/export, repair, operator
+administration, remote transport, PostgreSQL, or multi-user tenancy is
+implemented. Future slices must preserve the same boundary: validate input
+before persistence, keep configuration separate from data, and redact
+sensitive implementation details from errors and capability output. See the [private relational
 boundary](private-relational-boundary.md).
 
 There is not yet a supported release, maintenance, or security-fix policy.

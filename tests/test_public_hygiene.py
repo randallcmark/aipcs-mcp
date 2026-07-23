@@ -45,6 +45,34 @@ def test_path_and_binary_probes_are_rejected() -> None:
     assert "private preservation path" in reasons("docs/private-artifact-report.md")
 
 
+def test_exact_credential_filenames_are_ignored_and_rejected_from_tracked_blobs() -> None:
+    credential_names = (
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials.json",
+        "credentials.yaml",
+        "credentials.yml",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+    )
+    for name in credential_names:
+        assert "likely credential filename" in reasons(
+            f"examples/{name}", b"non-sensitive representative payload\n"
+        )
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", "--", f"examples/{name}"],
+            cwd=ROOT,
+            check=False,
+        )
+        assert ignored.returncode == 0, name
+
+    assert reasons("src/id_rsa_helper.py") == []
+    assert reasons("docs/credentials.yaml.example") == []
+
+
 def test_content_and_fixture_probes_are_rejected() -> None:
     local_path = b"/" + b"Users/example/workspace"
     credential = ("gh" + "p_" + "x" * 24).encode()

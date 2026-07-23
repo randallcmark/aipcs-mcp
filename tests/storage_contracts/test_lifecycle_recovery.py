@@ -30,6 +30,7 @@ from aipcs_mcp.lifecycle import (
     prepare_intent,
 )
 from aipcs_mcp.manifest_v2 import ManifestV2
+from aipcs_mcp.relational import RelationalContractError, classify_transition, compile_manifest
 
 _SERVICE_ID = UUID(int=1)
 
@@ -66,11 +67,20 @@ class _LifecycleAdmissionFake:
         self._intents: dict[tuple[str, str], LifecycleIntent] = {}
         self._service_revisions: dict[UUID, int] = {}
         self._schema_versions: dict[UUID, int] = {}
+        self._manifests: dict[UUID, ManifestV2] = {}
         self.finalization_wins = 0
 
-    def seed_service(self, service_id: UUID, *, service_revision: int, schema_version: int) -> None:
+    def seed_service(
+        self,
+        service_id: UUID,
+        *,
+        service_revision: int,
+        schema_version: int,
+        manifest: ManifestV2 | None = None,
+    ) -> None:
         self._service_revisions[service_id] = service_revision
         self._schema_versions[service_id] = schema_version
+        self._manifests[service_id] = manifest or self._manifests.get(service_id, _v1())
 
     def _claim(self, command: MaterialiseCommand | EvolveCommand) -> LifecycleClaim:
         key = (command.principal_id, command.idempotency_key)
@@ -116,6 +126,14 @@ class _LifecycleAdmissionFake:
                 blocker,
             )
 
+        try:
+            if type(command) is MaterialiseCommand:
+                compile_manifest(self._manifests[command.service_id])
+            else:
+                classify_transition(self._manifests[command.service_id], target)
+        except RelationalContractError:
+            return LifecycleResultCategory.UNSUPPORTED_TRANSITION
+
         intent = prepare_intent(command, target)
         self._intents[(command.principal_id, command.idempotency_key)] = intent
         return LifecycleAdmission(LifecycleAdmissionStatus.PREPARED, intent)
@@ -152,6 +170,7 @@ class _LifecycleAdmissionFake:
         self._intents[key] = completed
         self._service_revisions[current.service_id] = current.expected_service_revision + 1
         self._schema_versions[current.service_id] = completed.target_manifest.schema_version
+        self._manifests[current.service_id] = completed.target_manifest
         self.finalization_wins += 1
         return _Finalisation("completed", completed)
 
@@ -218,7 +237,7 @@ def _evolve(
 
 def _ready_fake(service_id: UUID = _SERVICE_ID) -> _LifecycleAdmissionFake:
     fake = _LifecycleAdmissionFake()
-    fake.seed_service(service_id, service_revision=1, schema_version=1)
+    fake.seed_service(service_id, service_revision=1, schema_version=1, manifest=_v1())
     return fake
 
 
@@ -292,6 +311,30 @@ def test_different_key_after_completion_uses_current_expected_versions() -> None
     assert accepted.status is LifecycleAdmissionStatus.PREPARED
     assert accepted.intent is not None
     assert accepted.intent.kind is LifecycleKind.EVOLVE
+
+
+def test_new_non_additive_transition_is_rejected_without_prepared_evidence() -> None:
+    fake = _ready_fake()
+    materialise = fake.operate(_materialise(), _v1())
+    assert isinstance(materialise, LifecycleAdmission)
+    assert materialise.intent is not None
+    assert fake.finalise(materialise.intent).status == "completed"
+
+    payload = _v2().model_dump(mode="json", by_alias=True)
+    payload["entities"][0]["attributes"].append(
+        {"name": "required_after_design", "type": "string", "required": True}
+    )
+    unsupported = EvolveCommand(
+        principal_id="contract-principal",
+        created_via="contract-test",
+        service_id=_SERVICE_ID,
+        expected_service_revision=2,
+        expected_schema_version=1,
+        idempotency_key="unsupported-evolve",
+        target_manifest=ManifestV2.model_validate(payload),
+    )
+    assert fake.operate(unsupported, unsupported.target_manifest) is LifecycleResultCategory.UNSUPPORTED_TRANSITION
+    assert (unsupported.principal_id, unsupported.idempotency_key) not in fake._intents
 
 
 def test_recovery_required_is_terminal_for_same_and_different_keys() -> None:

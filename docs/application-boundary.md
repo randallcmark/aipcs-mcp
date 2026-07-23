@@ -29,10 +29,11 @@ ledger, and metadata-only audit store for seed and initial-design operations.
 It does not provide a service-store or record unit of work. The packaged
 private SQLite service-store catalog is not injected into the application and
 has no application port for materialisation or records. The private
-`DomainSchemaStore` relational-schema protocol is likewise uncomposed: it
-freezes pure inspection/materialisation/evolution signatures but has no runtime
-composition or call path. A successfully
-acquired registry unit is always closed exactly once. `commit()` and `rollback()`
+`DomainSchemaStore` relational-schema protocol is composed only by the
+top-level transport-neutral lifecycle coordinator; that coordinator remains
+outside the registry-only `application/` package and outside runtime, MCP, CLI,
+and configuration. A successfully acquired registry unit is always closed
+exactly once. `commit()` and `rollback()`
 terminate its transaction attempt; `close()` releases resources and performs
 adapter-safe cleanup of an unterminated attempt. The application preserves the
 original failure when rollback or close also fail. A close failure after an
@@ -49,45 +50,50 @@ separation without adding a current runtime path:
   manifest v2.
 - `schema_version` describes agent-defined additive evolution and is a future lifecycle concurrency
   input, not a manifest or MCP compatibility version.
-- A future server-owned `service_revision` is the lifecycle compare-and-swap revision; a successful
+- The internal server-owned `service_revision` is the lifecycle compare-and-swap revision; a successful
   design/materialise/evolve/operational transition increments it once, while exact replay does not.
 - A future `record_version` is a per-record mutation revision reserved for V1-08F.
 - Adapter migration revisions describe physical storage layout and adapter-owned migration state.
 
-Future cross-store operation state (`prepared`, `completed`, or `recovery_required`) is distinct
+Cross-store operation state (`prepared`, `completed`, or `recovery_required`) is distinct
 from all of these values. A schema change is not an adapter migration, and neither is a substitute
 for a durable operation/recovery record.
 
 The uncomposed service-store catalog demonstrates that separation: its private
 R2 WAL-ready foundation can make adapter metadata ready without reading a
 manifest or changing registry state. Such a database is not a materialised
-service. Direct initialisation may leave it orphaned until a future operation
-record can coordinate and reconcile the independently committed stores.
+service. Direct initialisation may leave it orphaned because it bypasses the
+private coordinator and its durable operation record.
 
 The relational specification is also not a second schema authority. It is an
 immutable, backend-neutral projection supplied by the registry-authoritative
-manifest at the point a future adapter needs comparison. No schema ledger,
+manifest at the point an adapter needs comparison. No schema ledger,
 manifest copy, schema-version row, or fingerprint is introduced into a service
 store by this boundary.
 
-## Frozen future lifecycle boundary
+## Private lifecycle coordination and future public boundary
 
-V1-08A documents, but does not compose, future materialise/evolve use cases. Materialise will
-require `service_id`, `expected_service_revision`, `expected_schema_version`, and an idempotency
-key. Evolve will require the same inputs plus a complete, deeply validated adjacent manifest-v2
-target; it will not accept SQL, a migration delta, or history prose. Admission will validate and
-detach the request, compute the principal-scoped fingerprint, and resolve any existing idempotency
+V1-08A froze materialise/evolve use cases, and V1-08D implements them behind a
+private coordinator without a transport or runtime call path. Materialise
+requires `service_id`, `expected_service_revision`, `expected_schema_version`,
+and an idempotency key. Evolve requires the same inputs plus a complete, deeply
+validated adjacent manifest-v2 target; it does not accept SQL, a migration
+delta, or history prose. Admission validates and detaches the request, computes
+the principal-scoped fingerprint, and resolves any existing idempotency
 claim before reading current expected revisions. Exact completed claims replay even after their
 successful operation incremented the service revision.
 
-The future registry intent is the only cross-store recovery and transition-lock authority. It may
+The registry intent is the only cross-store recovery and transition-lock authority. It may
 retain one immutable admitted target snapshot, but that evidence never becomes a second current
-manifest. A coordinator will adopt an exact contained physical target only within the documented
+manifest. The private coordinator adopts an exact contained physical target only within the documented
 same-operating-system-owner boundary, because no domain provenance seal exists to distinguish a prior
 exact target from a crash-completed one. It must report recovery-required rather than infer or
-repair deleted, partial, extra, altered, or incompatible state. The remaining
-coordinator rules are future V1-08D work; they do not create a public operation,
-storage I/O path, or recovery command.
+repair deleted, partial, extra, altered, or incompatible state. New work proves
+relational support before prepared insertion, commits and closes prepared
+registry intent before service-store I/O, and drives finite actions from fresh
+observation through the pure recovery planner. These private rules create no
+public operation, runtime storage I/O path, or recovery command; V1-08E owns
+public composition.
 
 ### V1-08B durable registry prerequisite
 
@@ -141,7 +147,8 @@ V1-08C subsequently fixes the registry at R3 and the private service-store
 foundation at R2 with persistent WAL, `synchronous=FULL`, a 1..30,000 ms
 busy timeout (default 5,000), and no adapter retry after `StorageBusy`. It
 does not alter runtime composition, MCP registration, or public service-store
-behavior.
+behavior. V1-08D packages the private coordinator but preserves that same
+runtime and public-composition rule.
 
 The application layer requests behavior through its boundary; it never creates
 tables, parses storage locations, opens database connections, or selects a
@@ -159,6 +166,7 @@ manifest but does not apply it to physical tables: a resulting service remains
 standalone lifecycle/admin CLI, public service-store allocation or
 materialisation, record API, export/import, PostgreSQL, remote transport, or
 adapter discovery mechanism. The packaged private catalog and domain-schema
-store remain outside this application and public capability surface.
+store, plus their top-level coordinator, remain outside this application and
+public capability surface.
 
 See [compatibility](compatibility.md) and [security](security.md).

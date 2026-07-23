@@ -1,11 +1,12 @@
 # Private relational boundary
 
-`aipcs-mcp` packages two private SQLite seams so the distribution can prove
-relational adapter fidelity: the service-store catalog establishes an opaque,
-contained database foundation, and the domain-schema store compares,
-materialises, and evolves one supplied relational specification. Neither seam
-is a public API, MCP capability, CLI command, configuration option, or
-operator workflow.
+`aipcs-mcp` packages private SQLite and coordination seams so the distribution
+can prove recoverable relational lifecycle behavior: the service-store catalog
+establishes an opaque contained database foundation, the domain-schema store
+compares, materialises, and evolves one supplied relational specification, and
+the transport-neutral lifecycle coordinator reconciles those stores with
+durable registry intent. None is a public API, MCP capability, CLI command,
+configuration option, or operator workflow.
 
 This guide explains that boundary for maintainers and release reviewers. It
 does not provide an invocation recipe. The normative contract is in [storage
@@ -50,20 +51,43 @@ external deletion of all domain objects is consequently indistinguishable from
 never materialising them; partial deletion remains incompatible. Do not try to
 repair or infer history from this seam.
 
-V1-08A freezes the future coordinator consequence without composing it here. The registry holds
-the sole current manifest and may hold one immutable admitted target snapshot as lifecycle evidence;
-the service database remains free of a manifest, schema-version row, fingerprint, operation record,
-provenance seal, or domain ledger. Therefore, within the contained same-operating-system-owner store
-boundary, an exact physical target that predates a prepared intent is indistinguishable from a
-target committed immediately before a crash and may be adopted by target-first finalisation. This
-does not permit repair: any partial, extra, altered, incompatible, or unexpectedly deleted state is
-recovery-required. The rule is future coordinator behavior, not a direct-private-seam workflow.
+The private V1-08D coordinator implements the V1-08A recovery consequence
+without public composition. The registry holds the sole current manifest and
+may hold one immutable admitted target snapshot as lifecycle evidence; the
+service database remains free of a manifest, schema-version row, fingerprint,
+operation record, provenance seal, or domain ledger. Within the contained
+same-operating-system-owner store boundary, an exact physical target that
+predates a prepared intent is indistinguishable from a target committed
+immediately before a crash and may be adopted by target-first finalisation.
+This does not permit repair: any partial, extra, altered, incompatible, or
+unexpectedly deleted state is recovery-required.
 
-The future coordinator also preserves the frozen result contract: malformed input, unsupported
-transition, stale expected revision, changed-fingerprint reuse, recovery-required,
-storage-unavailable, and generic internal failure are non-retryable; storage-busy, different-key
-operation-in-progress, and operation-uncertain are retryable. An exact same-key prepared claim
-resumes reconciliation rather than returning operation-in-progress.
+For a new key, relational compilation or additive-transition classification
+occurs after registry blocker checks and before prepared intent is inserted.
+Prepared intent commits and its registry UoW closes before catalog or
+domain-schema I/O. Every physical action return is discarded and exact state
+is re-observed through the pure recovery planner; the coordinator performs
+each physical action at most once per call.
+
+The one bounded foundation action also resolves a SQLite concurrency
+distinction. Crash-resumable WAL migration exposes its exact committed
+`prepared` phases as `dirty`, so another same-key worker may see dirt while
+valid migration is live. The coordinator runs `catalog.migrate()` once for
+that observation and re-observes. A prepared phase converges to ready; generic
+historical dirt is not repaired and remains dirty, at which point
+recovery-required becomes durable. This confirmation applies to materialise
+and evolve and takes precedence over the generic repeated-action uncertainty
+guard.
+
+The coordinator preserves the frozen result contract: malformed input,
+unsupported transition, stale expected revision, changed-fingerprint reuse,
+recovery-required, storage-unavailable, and generic internal failure are
+non-retryable; storage-busy, different-key operation-in-progress, and
+operation-uncertain are retryable. An exact same-key prepared claim resumes
+reconciliation rather than returning operation-in-progress. Inspection-time
+migration errors and failures after a physical action or registry commit may
+have taken effect are operation-uncertain; no exception is inferred as exact
+incompatible state.
 
 ## V1-08B registry-only prerequisite
 
@@ -88,25 +112,26 @@ public control.
 
 V1-08B itself did not compose the service store, add a coordinator, observe or
 reconcile physical state, change WAL/busy policy, create a runtime/configuration
-surface, register MCP tools, or add a repair procedure. V1-08C now fixes the
+surface, register MCP tools, or add a repair procedure. V1-08C then fixed the
 private foundation at R2 under the same WAL policy as registry R3: local POSIX,
 same-effective-user use; one writer with concurrent readers; a 1..30,000 ms
-busy timeout (default 5,000); and `StorageBusy` without adapter retries. A
-coordinator, public composition, and repair procedure remain deferred to
-V1-08D through V1-08E.
+busy timeout (default 5,000); and `StorageBusy` without adapter retries.
+V1-08D now packages the private coordinator over those boundaries. Public
+composition remains deferred to V1-08E, and no repair procedure exists.
 
 ## Public boundary
 
-The public runtime starts only the registry adapter. A ready SQLite server
+The public runtime still starts only the registry adapter. A ready SQLite server
 exposes server-info plus seed, list, inspect, and initial design; design remains
 seeded and does not create a service database, domain table, or record. Public
 materialise/evolve operations, records, service-store composition, and domain
-state reporting remain unavailable.
+state reporting remain unavailable. The runtime, MCP server, CLI, and
+configuration do not construct or import the private coordinator.
 
 V1-08 owns the missing lifecycle work: cross-store materialisation/evolution
 idempotency and revision coordination, registry/store reconciliation, recovery,
 and eventual public composition. Its sequence is lifecycle contract (A), durable intent (B),
 SQLite WAL/busy policy (C), internal coordinator (D), public lifecycle composition (E), generic
 records (F), and structured discovery/topology (G); PostgreSQL begins only after V1-08G.
-Until then, use the supported public lifecycle only and treat this private seam
+Until V1-08E, use the supported public lifecycle only and treat this private seam
 as an internal test and release boundary.

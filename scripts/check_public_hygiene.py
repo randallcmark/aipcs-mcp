@@ -27,10 +27,21 @@ PRIVATE_PARTS = {
 PRIVATE_NAMES = {
     "AGENTS.md",
     "CLAUDE.md",
-    "credentials.json",
     "destination-sha256.tsv",
     "secrets.json",
     "source-sha256.tsv",
+}
+CREDENTIAL_NAMES = {
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials.json",
+    "credentials.yaml",
+    "credentials.yml",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
 }
 PRIVATE_SUFFIXES = {
     ".sqlite",
@@ -83,6 +94,8 @@ def path_violations(relative: PurePosixPath) -> list[str]:
         problems.append("local data path")
     if set(parts) & PRIVATE_PARTS or name in PRIVATE_NAMES:
         problems.append("private agent/archive/plan path")
+    if name in CREDENTIAL_NAMES:
+        problems.append("likely credential filename")
     if name.startswith(".env") and name != ".env.example":
         problems.append("likely credential filename")
     if relative.suffix.lower() in PRIVATE_SUFFIXES:

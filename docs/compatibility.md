@@ -55,17 +55,19 @@ Design accepts and stores an initial manifest-v2 document but does not
 materialise a service store, create domain tables, create records, or expose
 generated tools. `design_state` remains `seeded` and `storage` remains null.
 
-The distribution also contains a private SQLite service-store catalog and
-domain-schema adapter. The catalog's pure locator allocation and independent
-foundation migration establish adapter-private ownership; the domain adapter
-can directly inspect, materialise, or apply one validated additive transition
-to a supplied physical schema. Both remain uncomposed implementation seams,
-not MCP, CLI, configuration, application, or public compatibility contracts.
-The current runtime constructs neither. Their filesystem layout, foundation
-migration ledger, and relational behavior are not a portable-storage promise.
-Direct use can create an orphan database or physical schema without changing
-registry state; public materialisation remains gated on V1-08 recoverable
-cross-store coordination. See the [private relational
+The distribution also contains a private SQLite service-store catalog,
+domain-schema adapter, and transport-neutral lifecycle coordinator. The
+catalog's pure locator allocation and independent foundation migration
+establish adapter-private ownership; the domain adapter can inspect,
+materialise, or apply one validated additive transition to a supplied physical
+schema. The coordinator uses durable registry intent and exact re-observation
+to reconcile those independently committed stores. All remain private
+implementation seams, not MCP, CLI, configuration, application, or public
+compatibility contracts. The current runtime constructs none of them. Their
+filesystem layout, foundation migration ledger, and relational behavior are
+not a portable-storage promise. Direct catalog/domain use can still create an
+orphan database or physical schema without changing registry state; public
+materialisation remains gated on V1-08E composition. See the [private relational
 boundary](private-relational-boundary.md).
 
 ## Frozen future V1-08 contract
@@ -124,6 +126,26 @@ migration/startup. `sqlite_busy_timeout_ms` is 1 through 30,000 ms (default
 retries. These are SQLite physical mechanics, not manifest, MCP, or PostgreSQL
 compatibility fields. No public tool or capability is added.
 
+V1-08D adds one packaged but uncomposed internal coordinator. New-key
+admission proves relational support before inserting prepared intent; the
+prepared registry UoW commits and closes before service-store I/O; exact
+foundation/target/source observations drive the frozen pure planner; and
+terminal registry finalisation uses a fresh UoW. Each physical action runs at
+most once per call, and retry uses the same idempotency key. Exact target state
+may be adopted within the documented contained-store trust boundary, while
+partial, extra, altered, incompatible, or unexpectedly deleted state becomes
+recovery-required without repair. Inspection uncertainty and potentially
+committed failures return operation-uncertain. Runtime, MCP, CLI,
+configuration, public projections, and the five-tool snapshot remain
+unchanged.
+
+An exact dirty SQLite foundation receives its one bounded migration action
+before terminal classification. This is not automatic repair: the adapter
+resumes its own exact crash-recovery `prepared` WAL states but leaves generic
+historical dirt unchanged. Fresh dirt after that successful action becomes
+recovery-required. The rule prevents a cooperating same-key worker from
+terminalizing another worker's visible prepared WAL checkpoint.
+
 V1-08E, not this current release, will expose the bounded projection
 `recovery_state: clear | pending | recovery_required` with `service_revision`. It will expose no
 operation identifier, fingerprint, idempotency key, target snapshot, storage path, fault text, or
@@ -142,8 +164,8 @@ PostgreSQL begins only after V1-08G. Their future compatibility commitments will
 they exist.
 
 V1-08C adds only the documented SQLite timeout configuration and private WAL
-policy. It adds no MCP registration, coordinator capability, public
-service-store I/O, or repair workflow.
+policy. V1-08D packages the internal coordinator but adds no MCP registration,
+public coordinator capability, runtime service-store I/O, or repair workflow.
 
 The contract identifier is currently `1.0`. Although earlier planning described
 it as SemVer, no version increment policy is defined yet. Support windows,

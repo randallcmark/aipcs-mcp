@@ -179,10 +179,19 @@ _PRIVATE_DIRECTORY_NAMES = frozenset(
 )
 _PRIVATE_FILE_NAMES = frozenset(
     {
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
         "agents.md",
         "claude.md",
         "credentials.json",
+        "credentials.yaml",
+        "credentials.yml",
         "destination-sha256.tsv",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
         "secrets.json",
         "source-sha256.tsv",
     }
@@ -1728,7 +1737,10 @@ def materialise_expected(phase, foundation, target):
     deferred = deferred_expected(foundation) or deferred_expected(target)
     if deferred is not None:
         return RecoveryAction.DEFER_OBSERVATION, deferred
-    if foundation is FoundationObservation.UNINITIALISED:
+    if foundation in {
+        FoundationObservation.UNINITIALISED,
+        FoundationObservation.DIRTY,
+    }:
         return RecoveryAction.PREPARE_FOUNDATION, None
     if foundation is FoundationObservation.READY:
         if target is DomainObservation.UNMATERIALISED:
@@ -1810,6 +1822,8 @@ def evolve_expected(phase, foundation, target, source):
     deferred = deferred_expected(foundation) or deferred_expected(target) or deferred_expected(source)
     if deferred is not None:
         return RecoveryAction.DEFER_OBSERVATION, deferred
+    if foundation is FoundationObservation.DIRTY:
+        return RecoveryAction.PREPARE_FOUNDATION, None
     if foundation is not FoundationObservation.READY:
         return RecoveryAction.RECOVERY_REQUIRED, None
     if target is DomainObservation.READY:
@@ -2611,6 +2625,298 @@ def run_installed_wal_release_smoke(
     )
 
 
+def _lifecycle_coordinator_smoke_program() -> str:
+    """Private installed lifecycle orchestration proof; public transport stays unchanged."""
+
+    return r'''
+from __future__ import annotations
+
+import site
+import sqlite3
+import sys
+from copy import deepcopy
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import UUID
+
+import aipcs_mcp.lifecycle_coordinator as lifecycle_coordinator_module
+import aipcs_mcp.mcp_server as mcp_server_module
+import aipcs_mcp.storage.sqlite.domain_schema as domain_schema_module
+from aipcs_mcp.application.models import PreparedLifecycleClaim, Service
+from aipcs_mcp.lifecycle import EvolveCommand, MaterialiseCommand
+from aipcs_mcp.lifecycle_coordinator import LifecycleCoordinator
+from aipcs_mcp.manifest_v2 import ManifestV2
+from aipcs_mcp.relational import classify_transition, compile_manifest
+from aipcs_mcp.storage import MigrationState
+from aipcs_mcp.storage.sqlite import (
+    SQLiteLocationPolicy,
+    SQLiteRegistryAdapter,
+    SQLiteServiceStoreCatalog,
+)
+from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+assert mode in {"initial", "restart"}
+sites = tuple(Path(value).resolve() for value in site.getsitepackages())
+for module in (lifecycle_coordinator_module, domain_schema_module):
+    origin = Path(module.__file__).resolve()
+    assert any(origin.is_relative_to(value) for value in sites), origin
+
+assert tuple(tool.name for tool in mcp_server_module._tools(True)) == (
+    "aipcs_server_info",
+    "aipcs_service_seed",
+    "aipcs_service_list",
+    "aipcs_service_inspect",
+    "aipcs_service_design",
+)
+
+managed = [
+    {"name": "id", "type": "uuid", "required": True, "primary_key": True},
+    {"name": "owner_id", "type": "string", "required": True},
+    {"name": "created_at", "type": "datetime", "required": True},
+    {"name": "updated_at", "type": "datetime", "required": True},
+    {"name": "created_via", "type": "string", "required": True},
+    {"name": "record_version", "type": "integer", "required": True},
+]
+source_document = {
+    "manifest_version": 2,
+    "schema_version": 1,
+    "entities": [{
+        "name": "memory",
+        "attributes": managed + [{"name": "title", "type": "string", "required": True}],
+    }],
+    "relationships": [],
+    "indices": [],
+    "query_patterns": [],
+    "discovery_facets": [],
+    "migration_history": [],
+}
+target_document = deepcopy(source_document)
+target_document["schema_version"] = 2
+target_document["migration_history"] = [{
+    "from_schema_version": 1,
+    "to_schema_version": 2,
+    "operations": ["add memory summary"],
+}]
+target_document["entities"][0]["attributes"].append(
+    {"name": "summary", "type": "string"}
+)
+v1 = ManifestV2.model_validate(source_document)
+v2 = ManifestV2.model_validate(target_document)
+
+principal = "installed-coordinator"
+created_via = "release"
+first_id = UUID(int=71)
+adopt_id = UUID(int=72)
+restart_id = UUID(int=73)
+recovery_id = UUID(int=74)
+at = datetime(2026, 1, 1, tzinfo=UTC)
+
+class Clock:
+    def __init__(self):
+        self.tick = 0
+
+    def now(self):
+        self.tick += 1
+        day = 2 if mode == "initial" else 3
+        return datetime(2026, 1, day, 0, 0, self.tick, tzinfo=UTC)
+
+policy = SQLiteLocationPolicy(root)
+registry = SQLiteRegistryAdapter(policy)
+catalog = SQLiteServiceStoreCatalog(policy)
+domain = SQLiteDomainSchemaStore(policy)
+coordinator = LifecycleCoordinator(registry.open_uow, Clock(), catalog, domain)
+
+def seeded(service_id):
+    return Service(
+        service_id=service_id,
+        principal_id=principal,
+        domain_name=f"domain_{service_id.int}",
+        domain_class="release",
+        intent_description="installed coordinator smoke",
+        created_at=at,
+        updated_at=at,
+        last_activity_at=at,
+        manifest=v1,
+        schema_version=1,
+        design_state="seeded",
+        service_revision=2,
+    )
+
+def materialise(service_id, key):
+    return MaterialiseCommand(
+        principal_id=principal,
+        created_via=created_via,
+        service_id=service_id,
+        expected_service_revision=2,
+        expected_schema_version=1,
+        idempotency_key=key,
+    )
+
+def evolve(service_id, key):
+    return EvolveCommand(
+        principal_id=principal,
+        created_via=created_via,
+        service_id=service_id,
+        expected_service_revision=3,
+        expected_schema_version=1,
+        idempotency_key=key,
+        target_manifest=v2,
+    )
+
+def prepare(command):
+    uow = registry.open_uow()
+    claim = uow.mutations.resolve_or_admit(command)
+    assert type(claim) is PreparedLifecycleClaim
+    uow.commit()
+    uow.close()
+    return claim.intent
+
+def service(service_id):
+    uow = registry.open_uow()
+    value = uow.services.get(principal, service_id)
+    uow.rollback()
+    uow.close()
+    assert type(value) is Service
+    return value
+
+def service_database(service_id):
+    return root / "service-stores" / f"svc_{service_id.hex}.sqlite"
+
+if mode == "initial":
+    assert registry.migrate() == MigrationState("registry", 3, 3, "ready")
+    uow = registry.open_uow()
+    for item in (seeded(first_id), seeded(adopt_id), seeded(restart_id), seeded(recovery_id)):
+        uow.services.add(item)
+    uow.commit()
+    uow.close()
+
+    first_materialise = materialise(first_id, "first-materialise")
+    first_result = coordinator.execute(first_materialise)
+    assert first_result.category == "completed"
+    assert first_result.service is not None and first_result.service.service_revision == 3
+    replay = coordinator.execute(first_materialise)
+    assert replay.category == "completed"
+    assert replay.service == first_result.service
+    first_evolve = coordinator.execute(evolve(first_id, "first-evolve"))
+    assert first_evolve.category == "completed"
+    assert first_evolve.service is not None and first_evolve.service.schema_version == 2
+
+    # Seed an exact physical materialise target while its registry intent remains prepared.
+    prepared_adopt = prepare(materialise(adopt_id, "adopt-materialise"))
+    adopt_locator = catalog.allocate(adopt_id)
+    assert catalog.migrate(adopt_locator) == MigrationState("service_store", 2, 2, "ready")
+    assert domain.materialise(adopt_locator, compile_manifest(prepared_adopt.target_manifest)).status == "ready"
+
+    # Independently finish physical adjacent evolution before its registry completion.
+    restart_materialise = coordinator.execute(materialise(restart_id, "restart-materialise"))
+    assert restart_materialise.category == "completed"
+    prepared_evolve = prepare(evolve(restart_id, "restart-evolve"))
+    restart_locator = catalog.allocate(restart_id)
+    assert domain.evolve(
+        restart_locator, classify_transition(v1, prepared_evolve.target_manifest)
+    ).status == "ready"
+
+    # A non-empty, otherwise ordinary SQLite database is an incompatible service foundation.
+    # It is constructed inside this private release workspace without calling a private repair seam.
+    prepare(materialise(recovery_id, "recovery-materialise"))
+    recovery_database = service_database(recovery_id)
+    recovery_database.parent.mkdir(mode=0o700, exist_ok=True)
+    with sqlite3.connect(recovery_database) as connection:
+        connection.execute('CREATE TABLE "unexpected" ("id" TEXT PRIMARY KEY) STRICT')
+    recovery_database.chmod(0o600)
+else:
+    adopted = coordinator.execute(materialise(adopt_id, "adopt-materialise"))
+    assert adopted.category == "completed"
+    assert adopted.service is not None and adopted.service.service_revision == 3
+    restarted = coordinator.execute(evolve(restart_id, "restart-evolve"))
+    assert restarted.category == "completed"
+    assert restarted.service is not None and restarted.service.schema_version == 2
+    assert service(first_id).service_revision == 4
+    assert service(adopt_id).service_revision == 3
+    assert service(restart_id).service_revision == 4
+    recovered = coordinator.execute(materialise(recovery_id, "recovery-materialise"))
+    assert recovered.category.value == "recovery_required"
+    recovery_replay = coordinator.execute(materialise(recovery_id, "recovery-materialise"))
+    assert recovery_replay.category.value == "recovery_required"
+    recovery_service = service(recovery_id)
+    assert recovery_service.service_revision == 2 and recovery_service.design_state == "seeded"
+
+    assert registry.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+    for service_id in (first_id, adopt_id, restart_id):
+        locator = catalog.allocate(service_id)
+        assert catalog.inspect_migration(locator) == MigrationState(
+            "service_store", 2, 2, "ready"
+        )
+        with sqlite3.connect(service_database(service_id)) as connection:
+            assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    recovery_locator = catalog.allocate(recovery_id)
+    assert catalog.inspect_migration(recovery_locator) == MigrationState(
+        "service_store", 0, 2, "incompatible"
+    )
+    with sqlite3.connect(service_database(recovery_id)) as connection:
+        assert connection.execute(
+            'SELECT name FROM sqlite_schema WHERE type=\'table\' AND name=\'unexpected\''
+        ).fetchone() == ("unexpected",)
+    with sqlite3.connect(root / "registry.sqlite") as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        terminal = connection.execute(
+            'SELECT "service_id","operation_kind","phase" FROM "aipcs_registry_mutation" '
+            'WHERE "principal_id"=? ORDER BY "service_id","idempotency_key"',
+            (principal,),
+        ).fetchall()
+        assert terminal == [
+            (str(first_id), "evolve", "completed"),
+            (str(first_id), "materialise", "completed"),
+            (str(adopt_id), "materialise", "completed"),
+            (str(restart_id), "evolve", "completed"),
+            (str(restart_id), "materialise", "completed"),
+            (str(recovery_id), "materialise", "recovery_required"),
+        ]
+        audits = connection.execute(
+            'SELECT "service_id","action","outcome",count(*) FROM "aipcs_registry_audit" '
+            'WHERE "principal_id"=? GROUP BY "service_id","action","outcome" '
+            'ORDER BY "service_id","action"',
+            (principal,),
+        ).fetchall()
+        assert audits == [
+            (str(first_id), "evolve", "completed", 1),
+            (str(first_id), "materialise", "completed", 1),
+            (str(adopt_id), "materialise", "completed", 1),
+            (str(restart_id), "evolve", "completed", 1),
+            (str(restart_id), "materialise", "completed", 1),
+            (str(recovery_id), "materialise", "recovery_required", 1),
+        ]
+'''
+
+
+def run_installed_lifecycle_coordinator_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Run the private V1-08D coordinator recovery proof for one installed artifact."""
+
+    client = workspace / f"{name}-lifecycle-coordinator-smoke.py"
+    client.write_text(_lifecycle_coordinator_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"{name}-lifecycle-coordinator-cwd"
+    cwd.mkdir(mode=0o700)
+    root = workspace / f"{name}-lifecycle-coordinator-root"
+    for mode in ("initial", "restart"):
+        run_stage(
+            f"installed {name} lifecycle coordinator {mode}",
+            [python, "-I", client, root, mode],
+            cwd=cwd,
+            environment=environment,
+            timeout=SMOKE_TIMEOUT_SECONDS,
+            redaction_roots=redaction_roots,
+        )
+
+
 def run_wheel_restart_principal_smoke(
     python: Path,
     workspace: Path,
@@ -2664,7 +2970,7 @@ def run_sdist_startup_smoke(
     environment: Mapping[str, str],
     redaction_roots: Iterable[Path],
 ) -> None:
-    """Exercise real installed sdist stateless startup with the same external client."""
+    """Exercise installed sdist stateless and ready-SQLite startup with the external client."""
 
     executable = python.parent / "aipcs"
     if not executable.is_file():
@@ -2680,6 +2986,18 @@ def run_sdist_startup_smoke(
         root,
         "release-principal-s",
         "stateless",
+        environment=environment,
+        redaction_roots=redaction_roots,
+    )
+    sqlite_root = workspace / "sdist-sqlite-root"
+    sqlite_root.mkdir(mode=0o700)
+    _run_smoke_client(
+        python,
+        workspace,
+        executable,
+        sqlite_root,
+        "release-principal-sdist",
+        "principal_a",
         environment=environment,
         redaction_roots=redaction_roots,
     )
@@ -2912,6 +3230,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_lifecycle_coordinator_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_wheel_restart_principal_smoke(
             wheel_python,
             workspace,
@@ -2972,6 +3297,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             redaction_roots=redaction_roots,
         )
         run_installed_wal_release_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_lifecycle_coordinator_smoke(
             sdist_python,
             workspace,
             "sdist",

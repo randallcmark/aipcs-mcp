@@ -37,6 +37,7 @@ from aipcs_mcp.lifecycle import (
     lifecycle_fingerprint,
     prepare_intent,
 )
+from aipcs_mcp.relational import RelationalContractError, classify_transition, compile_manifest
 from aipcs_mcp.storage.errors import (
     StorageBusy,
     StorageMigrationError,
@@ -278,6 +279,13 @@ class SQLiteRegistryUnitOfWork:
         target = service.manifest if type(command) is MaterialiseCommand else command.target_manifest
         if target is None:
             raise ValueError
+        try:
+            if type(command) is MaterialiseCommand:
+                compile_manifest(target)
+            else:
+                classify_transition(service.manifest, target)
+        except RelationalContractError:
+            return UnsupportedTransition()
         intent = prepare_intent(command, target)
         self._insert_prepared(intent)
         return PreparedLifecycleClaim(intent)

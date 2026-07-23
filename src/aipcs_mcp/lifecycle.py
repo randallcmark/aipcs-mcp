@@ -546,12 +546,12 @@ def plan_recovery(intent: LifecycleIntent, observation: LifecycleObservation) ->
 
 
 def _plan_materialise(observation: MaterialiseRecoveryObservation) -> RecoveryPlan:
-    if observation.foundation is FoundationObservation.UNINITIALISED:
-        return RecoveryPlan(RecoveryAction.PREPARE_FOUNDATION)
     if observation.foundation in {
+        FoundationObservation.UNINITIALISED,
         FoundationObservation.DIRTY,
-        FoundationObservation.INCOMPATIBLE,
     }:
+        return RecoveryPlan(RecoveryAction.PREPARE_FOUNDATION)
+    if observation.foundation is FoundationObservation.INCOMPATIBLE:
         return RecoveryPlan(RecoveryAction.RECOVERY_REQUIRED)
     deferred = _deferred_domain(observation.target)
     if deferred is not None:
@@ -564,6 +564,8 @@ def _plan_materialise(observation: MaterialiseRecoveryObservation) -> RecoveryPl
 
 
 def _plan_evolve(observation: EvolveRecoveryObservation) -> RecoveryPlan:
+    if observation.foundation is FoundationObservation.DIRTY:
+        return RecoveryPlan(RecoveryAction.PREPARE_FOUNDATION)
     if observation.foundation is not FoundationObservation.READY:
         return RecoveryPlan(RecoveryAction.RECOVERY_REQUIRED)
     deferred = _deferred_domain(observation.target)

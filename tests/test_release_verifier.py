@@ -84,6 +84,9 @@ def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
     (root / "notes-session.json").write_text("private", encoding="utf-8")
     (root / ".env.example").write_text("documented configuration", encoding="utf-8")
     (root / ".env.local").write_text("private", encoding="utf-8")
+    (root / ".netrc").write_text("private", encoding="utf-8")
+    (root / "credentials.yaml").write_text("private", encoding="utf-8")
+    (root / "id_ed25519").write_text("private", encoding="utf-8")
 
     relative = {
         path.relative_to(root).as_posix() for path in verifier.generated_checkout_artifacts(root)
@@ -91,8 +94,11 @@ def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
     assert relative == {
         ".data-local",
         ".env.local",
+        ".netrc",
         ".mypy_cache",
         "coverage.xml",
+        "credentials.yaml",
+        "id_ed25519",
         "module.py~",
         "notes-session.json",
         "private-data",
@@ -449,6 +455,37 @@ def test_embedded_lifecycle_client_exercises_the_source_contract(
     assert tuple(tmp_path.iterdir()) == ()
 
 
+def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    program = verifier._lifecycle_coordinator_smoke_program()
+    compile(program, "installed_lifecycle_coordinator_smoke.py", "exec")
+    assert "lifecycle_coordinator_module" in program
+    assert "domain_schema_module" in program
+    assert "LifecycleCoordinator" in program
+    assert "PreparedLifecycleClaim" in program
+    assert "adopt-materialise" in program
+    assert "restart-evolve" in program
+    assert "recovery-materialise" in program
+    assert 'CREATE TABLE "unexpected"' in program
+    assert '"recovery_required"' in program
+    assert "PRAGMA journal_mode" in program
+    assert 'tuple(tool.name for tool in mcp_server_module._tools(True))' in program
+    assert "aipcs_service_design" in program
+
+    root = tmp_path / "lifecycle-coordinator-root"
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
+    monkeypatch.setattr(
+        sys, "argv", ["installed_lifecycle_coordinator_smoke.py", str(root), "initial"]
+    )
+    exec(compile(program, "installed_lifecycle_coordinator_smoke.py", "exec"), {})
+    monkeypatch.setattr(
+        sys, "argv", ["installed_lifecycle_coordinator_smoke.py", str(root), "restart"]
+    )
+    exec(compile(program, "installed_lifecycle_coordinator_smoke.py", "exec"), {})
+    assert (root / "registry.sqlite").is_file()
+
+
 def test_embedded_registry_r2_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -573,6 +610,32 @@ def test_domain_schema_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert calls[0][1][-2] == calls[1][1][-2]
     assert calls[2][1][-2] == calls[3][1][-2]
     assert calls[0][1][-2] != calls[2][1][-2]
+
+
+def test_sdist_startup_smoke_runs_stateless_and_ready_sqlite_clients(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def fake_client(*args, **kwargs):
+        calls.append((str(args[5]), args))
+
+    executable = tmp_path / "sdist-venv" / "bin" / "aipcs"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    monkeypatch.setattr(verifier, "_run_smoke_client", fake_client)
+
+    verifier.run_sdist_startup_smoke(
+        tmp_path / "sdist-venv" / "bin" / "python",
+        tmp_path,
+        environment={},
+        redaction_roots=(),
+    )
+
+    assert [mode for mode, _ in calls] == ["stateless", "principal_a"]
+    assert calls[0][1][3] == tmp_path / "stateless-root"
+    assert calls[1][1][3] == tmp_path / "sdist-sqlite-root"
+    assert calls[1][1][4] == "release-principal-sdist"
 
 
 def test_relational_smoke_uses_each_installed_interpreter_and_external_cwd(
@@ -702,6 +765,46 @@ def test_wal_release_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert verifier.hashlib.sha256("\n".join(verifier._FROZEN_R2_DDL).encode()).hexdigest() == (
         verifier._FROZEN_R2_CHECKSUM
     )
+
+
+def test_lifecycle_coordinator_smoke_uses_each_installed_interpreter_and_external_cwd(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name in ("wheel", "sdist"):
+        verifier.run_installed_lifecycle_coordinator_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [label for label, _, _ in calls] == [
+        "installed wheel lifecycle coordinator initial",
+        "installed wheel lifecycle coordinator restart",
+        "installed sdist lifecycle coordinator initial",
+        "installed sdist lifecycle coordinator restart",
+    ]
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][2] == tmp_path / "wheel-lifecycle-coordinator-cwd"
+    assert calls[1][2] == tmp_path / "wheel-lifecycle-coordinator-cwd"
+    assert calls[2][2] == tmp_path / "sdist-lifecycle-coordinator-cwd"
+    assert calls[3][2] == tmp_path / "sdist-lifecycle-coordinator-cwd"
+    assert calls[0][2] != calls[2][2]
+    assert calls[0][1][-1] == "initial"
+    assert calls[1][1][-1] == "restart"
+    assert calls[2][1][-1] == "initial"
+    assert calls[3][1][-1] == "restart"
+    assert calls[0][1][-2] == calls[1][1][-2]
+    assert calls[2][1][-2] == calls[3][1][-2]
+    assert calls[0][1][-2] != calls[2][1][-2]
 
 
 def test_main_hides_unexpected_exception_details(monkeypatch, capsys, verifier) -> None:

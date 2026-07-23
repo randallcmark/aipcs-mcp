@@ -3,8 +3,11 @@
 The storage layer defines pure, backend-neutral contracts. The current SQLite
 registry adapter implements the registry portion and is composed only by the
 local stdio runtime. A private SQLite service-store catalog implements the
-separate service-store portion as an uncomposed foundation. Neither is a
-general adapter plugin API or a PostgreSQL implementation.
+separate service-store portion. A private top-level lifecycle coordinator
+composes the registry, catalog, and domain-schema protocols for internal
+restart proof, but remains absent from runtime, MCP, CLI, configuration, and
+the registry-only application package. None is a general adapter plugin API or
+a PostgreSQL implementation.
 
 The reference adapter is certified only for local POSIX filesystems on Linux
 and macOS, one host, Python 3.12+, SQLite 3.51.3+, and cooperating processes
@@ -100,12 +103,13 @@ unbounded full-registry scan; each row codec remains strict when that row is
 used.
 
 The historical R2 layout retains one global registry mutation/idempotency ledger across legacy and
-future lifecycle work. Exact legacy completed replays keep their stored result
-bytes; a future lifecycle intent is `prepared`, `completed`, or
+lifecycle work. Exact legacy completed replays keep their stored result
+bytes; a lifecycle intent is `prepared`, `completed`, or
 `recovery_required`, with prepared and recovery-required rows acting as the
 per-service transition blocker and completion releasing it. This describes
-durable registry state only. It does not compose a service-store coordinator,
-inspect a service store, or expose a lifecycle operation.
+durable registry state only. V1-08D's private coordinator consumes that
+evidence; the registry repository itself still does not inspect a service
+store or expose a lifecycle operation.
 
 Registry unit-of-work callers close every successfully acquired unit exactly
 once. A successful commit or rollback ends its transaction attempt, then close
@@ -115,6 +119,20 @@ a close failure after an otherwise successful operation becomes a bounded
 internal failure. A commit exception has indeterminate durable outcome, so a
 caller receives a bounded failure, resources are closed, and a retry relies on
 the existing idempotency replay semantics.
+
+The private coordinator keeps registry transactions short: it resolves a key,
+loads the exact admitted source only for prepared work, commits a new prepared
+intent, and closes the UoW before catalog or domain-schema access. Terminal
+completion or recovery-required uses a fresh registry UoW. An unprovable
+commit or post-action outcome is `operation_uncertain`; it is never converted
+to recovery-required from exception text.
+
+Because the WAL policy's exact committed `prepared` phases are visible as
+`dirty`, the coordinator gives a dirty foundation one call to the catalog's
+existing migration action and then re-observes. That action serialises and
+resumes only the adapter's exact prepared WAL states. Generic historical dirt
+remains unchanged and becomes recovery-required on fresh observation; there
+is no repair loop, lease, fencing token, or process mutex.
 
 Repository and mutation-ledger values cross the port as detached snapshots.
 They must not retain a connection-backed cursor or a mutable reference to
@@ -159,11 +177,11 @@ materialisation slice.
 
 The catalog rejects a foreign-backend locator before I/O, reports migration
 state only for `service_store`, and does not repair dirty or incompatible
-state. It is packaged for internal composition work but is not constructed by
-the current runtime or application. Direct initialisation can create an orphan
-database because there is deliberately no registry transition or cross-store
-operation record in this slice. Public materialisation must remain unavailable
-until that operation becomes recoverable. No record operation, PostgreSQL
+state. It is packaged with the private V1-08D coordinator but is not
+constructed by the current runtime or application. Direct catalog
+initialisation can still create an orphan database because it bypasses the
+registry intent and coordinator. Public materialisation remains unavailable
+until V1-08E composes the proven operation. No record operation, PostgreSQL
 adapter, repair, backup, import/export, or cross-store transaction exists yet.
 
 The reusable test-only conformance cases in `tests/storage_contracts/` assert
