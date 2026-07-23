@@ -73,6 +73,28 @@ def _evolved_manifest() -> dict[str, object]:
     return target
 
 
+def _prepare_materialise(
+    root: Path, principal: str, service_id: str, idempotency_key: str
+) -> None:
+    """Create durable prepared evidence without opening a service store."""
+
+    registry = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
+    uow = registry.open_uow()
+    command = MaterialiseCommand(
+        principal_id=principal,
+        created_via="mcp",
+        service_id=UUID(service_id),
+        expected_service_revision=2,
+        expected_schema_version=1,
+        idempotency_key=idempotency_key,
+    )
+    try:
+        assert isinstance(uow.mutations.resolve_or_admit(command), PreparedLifecycleClaim)
+        uow.commit()
+    finally:
+        uow.close()
+
+
 def _assert_no_private_fields(value: object) -> None:
     if isinstance(value, dict):
         assert _PRIVATE_FIELDS.isdisjoint(value)
@@ -458,6 +480,140 @@ def test_public_pending_and_recovery_required_projection(tmp_path: Path) -> None
             assert terminal["storage"] is None
 
     anyio.run(exercise_recovery)
+
+
+def test_two_same_key_stdio_processes_resume_one_prepared_materialise_once(tmp_path: Path) -> None:
+    root = tmp_path / "aipcs-same-key-root"
+    principal = "test-principal-same-key"
+    _secure_parent(root)
+    request_key = "materialise-same-key"
+
+    async def seed_and_design() -> str:
+        async with async_session(sqlite_parameters(root, principal)) as session:
+            seeded, failed = await call_envelope(session, "aipcs_service_seed", _seed("seed-same-key"))
+            assert failed is False
+            service_id = successful(seeded)["service_id"]
+            designed, failed = await call_envelope(
+                session,
+                "aipcs_service_design",
+                {
+                    "service_id": service_id,
+                    "schema": valid_manifest(),
+                    "idempotency_key": "design-same-key",
+                },
+            )
+            assert failed is False
+            assert successful(designed)["service_revision"] == 2
+            return service_id
+
+    service_id = anyio.run(seed_and_design)
+    _prepare_materialise(root, principal, service_id, request_key)
+    request = {
+        "service_id": service_id,
+        "expected_service_revision": 2,
+        "expected_schema_version": 1,
+        "idempotency_key": request_key,
+    }
+
+    async def cooperate() -> list[tuple[dict[str, object], bool]]:
+        outcomes: list[tuple[dict[str, object], bool]] = []
+
+        async def worker() -> None:
+            async with async_session(sqlite_parameters(root, principal)) as session:
+                outcomes.append(await call_envelope(session, "aipcs_service_materialise", request))
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(worker)
+            tasks.start_soon(worker)
+        return outcomes
+
+    outcomes = anyio.run(cooperate)
+    assert len(outcomes) == 2
+    assert all(failed is False for _envelope, failed in outcomes)
+    first, second = (successful(envelope) for envelope, _failed in outcomes)
+    assert first == second
+    _assert_public_metadata(first, revision=3, schema_version=1, materialised=True)
+
+    with sqlite3.connect(root / "registry.sqlite") as connection:
+        service = connection.execute(
+            'SELECT "service_revision", "design_state" FROM "aipcs_registry_service" '
+            'WHERE "principal_id"=? AND "service_id"=?',
+            (principal, service_id),
+        ).fetchone()
+        assert service == (3, "materialised")
+        phase = connection.execute(
+            'SELECT "phase" FROM "aipcs_registry_mutation" '
+            'WHERE "principal_id"=? AND "idempotency_key"=?',
+            (principal, request_key),
+        ).fetchone()
+        assert phase == ("completed",)
+        audits = connection.execute(
+            'SELECT COUNT(*) FROM "aipcs_registry_audit" '
+            'WHERE "service_id"=? AND "action"=\'materialise\' AND "outcome"=\'completed\'',
+            (service_id,),
+        ).fetchone()
+        assert audits == (1,)
+
+
+def test_different_key_stdio_request_is_blocked_before_service_store_work(tmp_path: Path) -> None:
+    root = tmp_path / "aipcs-different-key-root"
+    principal = "test-principal-different-key"
+    _secure_parent(root)
+
+    async def seed_and_design() -> str:
+        async with async_session(sqlite_parameters(root, principal)) as session:
+            seeded, failed = await call_envelope(
+                session, "aipcs_service_seed", _seed("seed-different-key")
+            )
+            assert failed is False
+            service_id = successful(seeded)["service_id"]
+            designed, failed = await call_envelope(
+                session,
+                "aipcs_service_design",
+                {
+                    "service_id": service_id,
+                    "schema": valid_manifest(),
+                    "idempotency_key": "design-different-key",
+                },
+            )
+            assert failed is False
+            assert successful(designed)["service_revision"] == 2
+            return service_id
+
+    service_id = anyio.run(seed_and_design)
+    _prepare_materialise(root, principal, service_id, "prepared-winner")
+
+    async def attempt_loser() -> tuple[dict[str, object], bool]:
+        async with async_session(sqlite_parameters(root, principal)) as session:
+            return await call_envelope(
+                session,
+                "aipcs_service_materialise",
+                {
+                    "service_id": service_id,
+                    "expected_service_revision": 2,
+                    "expected_schema_version": 1,
+                    "idempotency_key": "different-loser",
+                },
+            )
+
+    envelope, failed = anyio.run(attempt_loser)
+    assert failed is True
+    assert envelope["result"] is None
+    assert envelope["error"] == {
+        "code": "operation_in_progress",
+        "message": "A lifecycle operation is already in progress.",
+        "issues": [],
+        "retryable": True,
+    }
+    assert not (root / "service-stores").exists()
+    with sqlite3.connect(root / "registry.sqlite") as connection:
+        claims = connection.execute(
+            'SELECT "idempotency_key", "phase" FROM "aipcs_registry_mutation" '
+            'WHERE "principal_id"=? AND "service_id"=? '
+            'AND "operation_kind"=\'materialise\' ORDER BY "idempotency_key"',
+            (principal, service_id),
+        ).fetchall()
+    assert claims == [("prepared-winner", "prepared")]
 
 
 def test_second_principal_isolated_and_can_reuse_key(tmp_path: Path) -> None:
