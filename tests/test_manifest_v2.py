@@ -202,6 +202,26 @@ def test_manifest_rejects_non_finite_numeric_allowed_values(value: float) -> Non
         ManifestV2.model_validate(manifest)
 
 
+@pytest.mark.parametrize(
+    ("attribute_type", "value"),
+    [
+        ("integer", -(2**63) - 1),
+        ("integer", 2**63),
+        ("number", -(2**53) - 1),
+        ("number", 2**53 + 1),
+    ],
+)
+def test_manifest_rejects_numeric_allowed_values_outside_runtime_domain(
+    attribute_type: str, value: int
+) -> None:
+    manifest = valid_manifest()
+    manifest["entities"][0]["attributes"].append(
+        {"name": "score", "type": attribute_type, "allowed_values": [value]}
+    )
+    with pytest.raises(ValidationError, match="compatible"):
+        ManifestV2.model_validate(manifest)
+
+
 @pytest.mark.parametrize("attribute_type", ["string", "string_list"])
 def test_manifest_rejects_nul_in_string_allowed_values(attribute_type: str) -> None:
     manifest = valid_manifest()

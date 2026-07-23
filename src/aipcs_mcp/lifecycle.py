@@ -46,6 +46,7 @@ class RecoveryState(StrEnum):
 
 class FoundationObservation(StrEnum):
     UNINITIALISED = "uninitialised"
+    OUTDATED = "outdated"
     READY = "ready"
     DIRTY = "dirty"
     INCOMPATIBLE = "incompatible"
@@ -124,6 +125,7 @@ _FOUNDATION_NON_STATE = frozenset(
 _FOUNDATION_EXACT_NON_READY = frozenset(
     {
         FoundationObservation.UNINITIALISED,
+        FoundationObservation.OUTDATED,
         FoundationObservation.DIRTY,
         FoundationObservation.INCOMPATIBLE,
     }
@@ -556,6 +558,7 @@ def plan_recovery(intent: LifecycleIntent, observation: LifecycleObservation) ->
 def _plan_materialise(observation: MaterialiseRecoveryObservation) -> RecoveryPlan:
     if observation.foundation in {
         FoundationObservation.UNINITIALISED,
+        FoundationObservation.OUTDATED,
         FoundationObservation.DIRTY,
     }:
         return RecoveryPlan(RecoveryAction.PREPARE_FOUNDATION)
@@ -572,7 +575,7 @@ def _plan_materialise(observation: MaterialiseRecoveryObservation) -> RecoveryPl
 
 
 def _plan_evolve(observation: EvolveRecoveryObservation) -> RecoveryPlan:
-    if observation.foundation is FoundationObservation.DIRTY:
+    if observation.foundation in {FoundationObservation.OUTDATED, FoundationObservation.DIRTY}:
         return RecoveryPlan(RecoveryAction.PREPARE_FOUNDATION)
     if observation.foundation is not FoundationObservation.READY:
         return RecoveryPlan(RecoveryAction.RECOVERY_REQUIRED)

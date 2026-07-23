@@ -47,6 +47,7 @@ from aipcs_mcp.storage.errors import (
     StorageBusy,
     StorageContractError,
     StorageMigrationError,
+    StorageTransientJournal,
     StorageUnavailable,
 )
 
@@ -229,6 +230,8 @@ class _Catalog:
         self.info_error: Exception | None = None
         self.allocate_error: Exception | None = None
         self.migrate_error: Exception | None = None
+        self.migrate_result = MigrationState("service_store", 2, 2, "ready")
+        self.migrate_results: list[MigrationState] = []
         self.locator: ServiceStoreLocator | None = None
 
     def info(self) -> StorageAdapterInfo:
@@ -256,7 +259,9 @@ class _Catalog:
         self._called("migrate")
         if self.migrate_error is not None:
             raise self.migrate_error
-        return MigrationState("service_store", 2, 2, "ready")
+        if self.migrate_results:
+            return self.migrate_results.pop(0)
+        return self.migrate_result
 
     def _called(self, name: str) -> None:
         assert self.state.uows and all(uow.closed for uow in self.state.uows)
@@ -363,6 +368,57 @@ def test_materialise_adopts_prepared_wal_foundation_then_completes() -> None:
     assert catalog.calls.count("migrate") == 1
     assert domain.calls == ["inspect", "materialise", "inspect"]
     assert state.intent is not None and state.intent.phase is LifecyclePhase.COMPLETED
+
+
+def test_materialise_exact_outdated_foundation_migrates_before_domain_observation() -> None:
+    coordinator, state, catalog, domain = _coordinator(
+        _service(),
+        [
+            MigrationState("service_store", 2, 3, "outdated"),
+            MigrationState("service_store", 3, 3, "ready"),
+            MigrationState("service_store", 3, 3, "ready"),
+        ],
+        [DomainSchemaState("unmaterialised"), DomainSchemaState("ready")],
+    )
+    catalog.migrate_result = MigrationState("service_store", 3, 3, "ready")
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "outdated-materialise")
+    )
+
+    assert result.category == "completed"
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+        "inspect_migration",
+    ]
+    assert domain.calls == ["inspect", "materialise", "inspect"]
+    assert state.intent is not None and state.intent.phase is LifecyclePhase.COMPLETED
+
+
+def test_repeated_materialise_outdated_foundation_defers_without_terminal_poisoning() -> None:
+    coordinator, state, catalog, domain = _coordinator(
+        _service(),
+        [
+            MigrationState("service_store", 2, 3, "outdated"),
+            MigrationState("service_store", 2, 3, "outdated"),
+        ],
+        [],
+    )
+    catalog.migrate_result = MigrationState("service_store", 2, 3, "outdated")
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "outdated-materialise")
+    )
+
+    assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
+    assert catalog.calls.count("migrate") == 1
+    assert domain.calls == []
+    assert state.intent is not None and state.intent.phase is LifecyclePhase.PREPARED
+    assert all("finalize" not in call for uow in state.uows for call in uow.calls)
 
 
 def test_evolve_adopts_prepared_wal_foundation_then_completes() -> None:
@@ -587,17 +643,230 @@ def test_materialise_foundation_exact_and_uncertain_categories(
         assert registry.intent is not None and registry.intent.phase is LifecyclePhase.RECOVERY_REQUIRED
     else:
         assert registry.intent is not None and registry.intent.phase is LifecyclePhase.PREPARED
+    if type(state) is StorageUnavailable:
+        assert catalog.calls == ["info", "allocate", "inspect_migration"]
+
+
+def test_transient_unavailable_foundation_reconciles_through_migration_boundary() -> None:
+    coordinator, registry, catalog, domain = _coordinator(
+        _service(),
+        [
+            StorageTransientJournal(),
+            MigrationState("service_store", 3, 3, "ready"),
+        ],
+        [
+            DomainSchemaState("unmaterialised"),
+            DomainSchemaState("ready"),
+        ],
+    )
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "same-key")
+    )
+
+    assert result.category == "completed"
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+    ]
+    assert domain.calls == ["inspect", "materialise", "inspect"]
+    assert registry.intent is not None
+    assert registry.intent.phase is LifecyclePhase.COMPLETED
+
+
+def test_transient_journal_then_unavailable_migration_is_post_action_uncertain() -> None:
+    coordinator, registry, catalog, domain = _coordinator(
+        _service(),
+        [StorageTransientJournal(), StorageUnavailable()],
+        [],
+    )
+    catalog.migrate_error = StorageUnavailable()
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "same-key")
+    )
+
+    assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+    ]
+    assert domain.calls == []
+    assert registry.intent is not None
+    assert registry.intent.phase is LifecyclePhase.PREPARED
+
+
+def test_post_action_reinspection_converges_an_exact_peer_completed_foundation() -> None:
+    coordinator, registry, catalog, domain = _coordinator(
+        _service(),
+        [
+            StorageTransientJournal(),
+            MigrationState("service_store", 3, 3, "ready"),
+            MigrationState("service_store", 3, 3, "ready"),
+        ],
+        [
+            DomainSchemaState("unmaterialised"),
+            DomainSchemaState("ready"),
+        ],
+    )
+    catalog.migrate_error = StorageUnavailable()
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "same-key")
+    )
+
+    assert result.category == "completed"
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+        "inspect_migration",
+    ]
+    assert domain.calls == ["inspect", "materialise", "inspect"]
+    assert registry.intent is not None
+    assert registry.intent.phase is LifecyclePhase.COMPLETED
+
+
+def test_transient_journal_dirty_result_cannot_terminalise_recovery() -> None:
+    coordinator, registry, catalog, domain = _coordinator(
+        _service(),
+        [
+            StorageTransientJournal(),
+            MigrationState("service_store", 2, 3, "dirty"),
+        ],
+        [],
+    )
+    catalog.migrate_result = MigrationState("service_store", 2, 3, "dirty")
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "same-key")
+    )
+
+    assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+    ]
+    assert domain.calls == []
+    assert registry.intent is not None
+    assert registry.intent.phase is LifecyclePhase.PREPARED
+
+
+def test_ordinary_prepared_r3_dirt_reconciles_without_terminal_registry_poisoning() -> None:
+    coordinator, registry, catalog, domain = _coordinator(
+        _service(),
+        [
+            MigrationState("service_store", 0, 3, "uninitialised"),
+            MigrationState("service_store", 2, 3, "dirty"),
+            MigrationState("service_store", 3, 3, "ready"),
+            MigrationState("service_store", 3, 3, "ready"),
+        ],
+        [
+            DomainSchemaState("unmaterialised"),
+            DomainSchemaState("ready"),
+        ],
+    )
+    catalog.migrate_results = [
+        MigrationState("service_store", 2, 3, "dirty"),
+        MigrationState("service_store", 3, 3, "ready"),
+    ]
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "same-key")
+    )
+
+    assert result.category == "completed"
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+        "inspect_migration",
+    ]
+    assert domain.calls == ["inspect", "materialise", "inspect"]
+    assert registry.intent is not None
+    assert registry.intent.phase is LifecyclePhase.COMPLETED
+
+
+def test_repeated_resumable_r3_dirt_defers_without_terminal_registry_poisoning() -> None:
+    coordinator, registry, catalog, domain = _coordinator(
+        _service(),
+        [
+            MigrationState("service_store", 0, 3, "uninitialised"),
+            MigrationState("service_store", 2, 3, "dirty"),
+            MigrationState("service_store", 2, 3, "dirty"),
+        ],
+        [],
+    )
+    catalog.migrate_results = [
+        MigrationState("service_store", 2, 3, "dirty"),
+        MigrationState("service_store", 2, 3, "dirty"),
+    ]
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "same-key")
+    )
+
+    assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
+    assert catalog.calls.count("migrate") == 2
+    assert domain.calls == []
+    assert registry.intent is not None
+    assert registry.intent.phase is LifecyclePhase.PREPARED
+
+
+def test_domain_transient_journal_reconciles_foundation_then_reinspects() -> None:
+    coordinator, registry, catalog, domain = _coordinator(
+        _service(),
+        [
+            MigrationState("service_store", 3, 3, "ready"),
+            MigrationState("service_store", 3, 3, "ready"),
+        ],
+        [
+            StorageTransientJournal(),
+            DomainSchemaState("ready"),
+        ],
+    )
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "same-key")
+    )
+
+    assert result.category == "completed"
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "inspect_migration",
+    ]
+    assert domain.calls == ["inspect", "inspect"]
+    assert registry.intent is not None
+    assert registry.intent.phase is LifecyclePhase.COMPLETED
 
 
 @pytest.mark.parametrize("materialised", [False, True])
-def test_persistent_dirty_foundation_requires_recovery_after_one_prepare(
+def test_repeated_dirty_foundation_defers_without_terminal_registry_poisoning(
     materialised: bool,
 ) -> None:
     coordinator, state, catalog, domain = _coordinator(
         _service(materialised=materialised),
         [
-            MigrationState("service_store", 2, 2, "dirty"),
-            MigrationState("service_store", 2, 2, "dirty"),
+            MigrationState("service_store", 3, 3, "dirty"),
+            MigrationState("service_store", 3, 3, "dirty"),
+            MigrationState("service_store", 3, 3, "dirty"),
         ],
         [],
     )
@@ -606,11 +875,12 @@ def test_persistent_dirty_foundation_requires_recovery_after_one_prepare(
         command = EvolveCommand("principal", "test", _ID, 2, 1, "persistent-dirty", _manifest(2))
     else:
         command = MaterialiseCommand("principal", "test", _ID, 2, 1, "persistent-dirty")
+    catalog.migrate_result = MigrationState("service_store", 3, 3, "dirty")
     result = coordinator.execute(command)
-    assert result.category is LifecycleResultCategory.RECOVERY_REQUIRED
-    assert catalog.calls.count("migrate") == 1
+    assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
+    assert catalog.calls.count("migrate") == 2
     assert domain.calls == []
-    assert state.intent is not None and state.intent.phase is LifecyclePhase.RECOVERY_REQUIRED
+    assert state.intent is not None and state.intent.phase is LifecyclePhase.PREPARED
 
 
 @pytest.mark.parametrize(
@@ -650,16 +920,38 @@ def test_evolve_source_inspection_and_transition_are_target_first() -> None:
     assert all(uow.closed for uow in state.uows)
 
 
-@pytest.mark.parametrize("status", ["uninitialised", "incompatible"])
-def test_evolve_nonready_foundation_is_terminal_recovery_without_domain_io(status: str) -> None:
-    revision = 0 if status == "uninitialised" else 2
+@pytest.mark.parametrize(
+    ("status", "revision", "target_revision"),
+    (("uninitialised", 0, 2), ("incompatible", 2, 2)),
+)
+def test_evolve_nonready_foundation_is_terminal_recovery_without_domain_io(
+    status: str, revision: int, target_revision: int
+) -> None:
     coordinator, state, _, domain = _coordinator(
-        _service(materialised=True), [MigrationState("service_store", revision, 2, status)], []
+        _service(materialised=True),
+        [MigrationState("service_store", revision, target_revision, status)],
+        [],
     )
     result = coordinator.execute(EvolveCommand("principal", "test", _ID, 2, 1, "key", _manifest(2)))
     assert result.category is LifecycleResultCategory.RECOVERY_REQUIRED
     assert state.intent is not None and state.intent.phase is LifecyclePhase.RECOVERY_REQUIRED
     assert domain.calls == []
+
+
+def test_evolve_exact_outdated_foundation_migrates_before_schema_observation() -> None:
+    coordinator, state, catalog, domain = _coordinator(
+        _service(materialised=True),
+        [
+            MigrationState("service_store", 2, 3, "outdated"),
+            MigrationState("service_store", 3, 3, "ready"),
+        ],
+        [DomainSchemaState("ready")],
+    )
+    result = coordinator.execute(EvolveCommand("principal", "test", _ID, 2, 1, "key", _manifest(2)))
+    assert result.category == "completed"
+    assert catalog.calls == ["info", "allocate", "inspect_migration", "migrate", "inspect_migration"]
+    assert domain.calls == ["inspect"]
+    assert state.intent is not None and state.intent.phase is LifecyclePhase.COMPLETED
 
 
 @pytest.mark.parametrize(
@@ -700,6 +992,57 @@ def test_once_per_action_returns_uncertain_without_repeating_migration() -> None
     result = coordinator.execute(MaterialiseCommand("principal", "test", _ID, 2, 1, "key"))
     assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
     assert catalog.calls.count("migrate") == 1 and domain.calls == []
+    assert state.intent is not None and state.intent.phase is LifecyclePhase.PREPARED
+
+
+def test_successful_foundation_action_then_unavailable_reinspection_is_uncertain() -> None:
+    coordinator, state, catalog, domain = _coordinator(
+        _service(),
+        [
+            MigrationState("service_store", 0, 2, "uninitialised"),
+            StorageUnavailable(),
+        ],
+        [],
+    )
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "key")
+    )
+
+    assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+    ]
+    assert domain.calls == []
+    assert state.intent is not None and state.intent.phase is LifecyclePhase.PREPARED
+
+
+def test_successful_domain_action_then_unavailable_reinspection_is_uncertain() -> None:
+    coordinator, state, catalog, domain = _coordinator(
+        _service(),
+        [
+            MigrationState("service_store", 2, 2, "ready"),
+            MigrationState("service_store", 2, 2, "ready"),
+        ],
+        [DomainSchemaState("unmaterialised"), StorageUnavailable()],
+    )
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "key")
+    )
+
+    assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "inspect_migration",
+    ]
+    assert domain.calls == ["inspect", "materialise", "inspect"]
     assert state.intent is not None and state.intent.phase is LifecyclePhase.PREPARED
 
 
@@ -778,6 +1121,18 @@ def test_admission_uow_failures_are_bounded(stage: str, error: Exception, catego
     assert all(uow.closed for uow in state.uows)
 
 
+def test_pre_admission_storage_unavailable_remains_storage_unavailable() -> None:
+    coordinator, state, catalog, domain = _coordinator(_service(), [], [])
+    state.uow_error = StorageUnavailable()
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "key")
+    )
+
+    assert result.category is LifecycleResultCategory.STORAGE_UNAVAILABLE
+    assert catalog.calls == [] and domain.calls == []
+
+
 @pytest.mark.parametrize(
     ("stage", "category"),
     [
@@ -801,12 +1156,27 @@ def test_terminal_completion_uow_failures_are_bounded(stage: str, category: Life
         assert state.uows[-1].closed
 
 
-def test_terminal_recovery_uow_failure_after_persistent_dirty_is_internal() -> None:
+def test_terminal_completion_storage_unavailable_is_post_action_uncertain() -> None:
+    coordinator, state, _, _ = _coordinator(
+        _service(),
+        [MigrationState("service_store", 3, 3, "ready")],
+        [DomainSchemaState("ready")],
+    )
+    state.uow_failures[(2, "open")] = StorageUnavailable()
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "key")
+    )
+
+    assert result.category is LifecycleResultCategory.OPERATION_UNCERTAIN
+    assert state.intent is not None and state.intent.phase is LifecyclePhase.PREPARED
+
+
+def test_terminal_recovery_uow_failure_after_incompatible_foundation_is_internal() -> None:
     coordinator, state, catalog, domain = _coordinator(
         _service(),
         [
-            MigrationState("service_store", 2, 2, "dirty"),
-            MigrationState("service_store", 2, 2, "dirty"),
+            MigrationState("service_store", 2, 3, "incompatible"),
         ],
         [],
     )
@@ -814,7 +1184,7 @@ def test_terminal_recovery_uow_failure_after_persistent_dirty_is_internal() -> N
     result = coordinator.execute(MaterialiseCommand("principal", "test", _ID, 2, 1, "key"))
     assert result.category is LifecycleResultCategory.INTERNAL_FAILURE
     assert state.intent is not None and state.intent.phase is LifecyclePhase.PREPARED
-    assert catalog.calls.count("migrate") == 1
+    assert catalog.calls.count("migrate") == 0
     assert domain.calls == []
 
 

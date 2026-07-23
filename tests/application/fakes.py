@@ -108,6 +108,10 @@ class FakeUow:
             return None
         return deepcopy(service)
 
+    def count(self, principal_id: str) -> int:
+        self._called("count")
+        return sum(service.principal_id == principal_id for service in self.items.values())
+
     def list(self, principal_id: str, limit: int) -> list[Service]:
         self._called("list")
         scoped = [item for item in self.items.values() if item.principal_id == principal_id]

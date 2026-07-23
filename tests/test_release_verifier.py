@@ -312,6 +312,62 @@ def test_dirty_summary_names_base_commit_and_hashes_intended_source(
     assert changed != digest
 
 
+def test_exact_tip_requires_clean_head_bytes(tmp_path: Path, verifier) -> None:
+    root = _repository(tmp_path)
+    environment = verifier.scrubbed_environment({})
+    with pytest.raises(
+        verifier.ReleaseVerificationError,
+        match="exact-tip verification requires a clean source checkout",
+    ):
+        verifier.require_exact_tip(root, environment=environment)
+
+    _git(root, "add", "tracked.txt", "new.txt")
+    _git(root, "commit", "-m", "candidate")
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert verifier.require_exact_tip(root, environment=environment) == expected
+
+    (root / "untracked-after-candidate.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(
+        verifier.ReleaseVerificationError,
+        match="exact-tip verification requires a clean source checkout",
+    ):
+        verifier.require_exact_tip(root, environment=environment)
+
+
+def test_exact_tip_rejects_mutation_during_source_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verifier
+) -> None:
+    root = _repository(tmp_path)
+    _git(root, "add", "tracked.txt", "new.txt")
+    _git(root, "commit", "-m", "candidate")
+    workspace = tmp_path / "release-workspace"
+    workspace.mkdir(mode=0o700)
+
+    monkeypatch.setattr(verifier, "require_local_preconditions", lambda _root: "uv")
+    monkeypatch.setattr(verifier, "require_clean_checkout_artifacts", lambda _root: None)
+    monkeypatch.setattr(verifier, "create_workspace", lambda: workspace)
+
+    def mutate_during_gates(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        (root / "tracked.txt").write_text("changed during gates\n", encoding="utf-8")
+        return ()
+
+    monkeypatch.setattr(verifier, "run_source_gates", mutate_during_gates)
+
+    with pytest.raises(
+        verifier.ReleaseVerificationError,
+        match="exact-tip verification requires a clean source checkout",
+    ):
+        verifier.verify_release(root, exact_tip=True)
+
+    assert not workspace.exists()
+
+
 def test_origin_rule_rejects_source_and_non_site_imports(tmp_path: Path, verifier) -> None:
     site_packages = tmp_path / "venv" / "site-packages"
     installed = site_packages / "aipcs_mcp" / "__init__.py"
@@ -359,22 +415,39 @@ def test_wheel_and_sdist_origin_probes_use_distinct_working_directories(
 def test_embedded_client_is_syntactically_valid(verifier) -> None:
     program = verifier._smoke_client_program()
     compile(program, "installed_smoke_client.py", "exec")
+    assert "import aipcs_mcp" not in program
     assert "metadata_fields" in program
     assert '"service_revision", "recovery_state"' in program
     assert 'features"]["materialisation_lifecycle"] is True' in program
-    assert '"aipcs_mcp_contract"] == "1.1.0"' in program
+    assert '"aipcs_mcp_contract"] == "1.2.0"' in program
+    assert "assert names == tool_names and len(names) == 21" in program
     assert '"aipcs_service_materialise"' in program
     assert '"aipcs_service_evolve"' in program
+    assert '"aipcs_record_create"' in program
+    assert '"aipcs_record_search"' in program
+    assert '"aipcs_record_history"' in program
+    assert '"aipcs_service_summary"' in program
+    assert '"aipcs_branch_assign_records"' in program
+    assert '"aipcs_maintenance_scan"' in program
     assert 'features"]["registry_lifecycle"] is True' in program
-    assert "design_replay == designed" in program
-    assert "materialise_replay == materialised" in program
-    assert "evolve_replay == evolved" in program
+    assert 'features"]["record_runtime"] is True' in program
+    assert 'features"]["discovery_topology"] is True' in program
+    assert "downgrade_exact_r3_to_r2(database)" in program
+    assert '["data_status"] == "migration_required"' in program
+    assert '"storage_migration_required"' in program
+    assert "assert database.read_bytes() == before" in program
+    assert '"__aipcs_record_branch"' in program
     assert '"changed_fingerprint"' in program
     assert '"stale_revision"' in program
+    assert '"stale_record_version"' in program
+    assert '(4, "primary_move")' in program
+    assert 'result["unbranched_record_count"] == 1' in program
+    assert 'json.loads(state_path.read_text(encoding="utf-8")) == state' in program
+    assert 'mode == "principal_b"' in program
     assert 'mode == "recovery"' in program
     assert 'CREATE TABLE "unexpected"' in program
     assert '"recovery_required"' in program
-    assert "replay == recovery" in program
+    assert 'session, "aipcs_service_materialise", materialise' in program
     assert 'recovery_state="recovery_required"' in program
     assert "assert_redacted(payload)" in program
 
@@ -458,8 +531,8 @@ def test_embedded_lifecycle_client_exercises_the_source_contract(
     assert "lifecycle_result_retryable(category) is retryable" in program
     assert "for phase, foundation, target in product(" in program
     assert "for phase, foundation, target, source in product(" in program
-    assert "assert materialise_valid_count == 14" in program
-    assert "assert evolve_valid_count == 21" in program
+    assert "assert materialise_valid_count == 15" in program
+    assert "assert evolve_valid_count == 22" in program
     assert "assert result.result_category is category" in program
     assert "tuple(cwd.iterdir()) == before" in program
 
@@ -476,7 +549,17 @@ def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
     program = verifier._lifecycle_coordinator_smoke_program()
     compile(program, "installed_lifecycle_coordinator_smoke.py", "exec")
     assert "lifecycle_coordinator_module" in program
+    assert "data_application_module" in program
+    assert "data_requests_module" in program
+    assert "data_results_module" in program
+    assert "data_store_module" in program
+    assert "mcp_server_module" in program
+    assert "records_module" in program
+    assert "runtime_module" in program
+    assert "sqlite_data_store_module" in program
+    assert "discovery_module" in program
     assert "domain_schema_module" in program
+    assert "topology_module" in program
     assert "LifecycleCoordinator" in program
     assert "PreparedLifecycleClaim" in program
     assert "adopt-materialise" in program
@@ -485,10 +568,17 @@ def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
     assert 'CREATE TABLE "unexpected"' in program
     assert '"recovery_required"' in program
     assert "PRAGMA journal_mode" in program
-    assert 'tuple(tool.name for tool in mcp_server_module._tools(True, True))' in program
+    assert (
+        'tuple(tool.name for tool in mcp_server_module._tools(True, True, True))'
+        in program
+    )
     assert "aipcs_service_design" in program
     assert "aipcs_service_materialise" in program
     assert "aipcs_service_evolve" in program
+    assert "aipcs_record_create" in program
+    assert "aipcs_service_summary" in program
+    assert "aipcs_branch_assign_records" in program
+    assert "aipcs_maintenance_scan" in program
 
     root = tmp_path / "lifecycle-coordinator-root"
     monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
@@ -815,6 +905,9 @@ def test_wal_release_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert "frozen_registry(mode)" in program
     assert "prepared-delete" in program and "prepared-wal" in program
     assert '"byte-preserved"' in program
+    assert 'MigrationState("service_store", 3, 3, "ready")' in program
+    assert '"service-store-0003-record-topology"' in program
+    assert "8181f28aa6e4f8812ae169ea9754eb13fbfe10b574a88a36968564a4595896d7" in program
     assert "__FROZEN_R2_DDL__" not in program
     assert "from aipcs_mcp.storage.sqlite.migrations import R2" not in program
     assert verifier._FROZEN_R2_DDL
@@ -874,6 +967,19 @@ def test_main_hides_unexpected_exception_details(monkeypatch, capsys, verifier) 
     assert captured.err == "release verification failed: unexpected internal failure.\n"
 
 
+def test_main_forwards_exact_tip_and_failed_workspace_choice(
+    monkeypatch, verifier
+) -> None:
+    calls: list[dict[str, bool]] = []
+
+    def capture(**options: bool) -> None:
+        calls.append(options)
+
+    monkeypatch.setattr(verifier, "verify_release", capture)
+    assert verifier.main(["--exact-tip", "--keep-failed-workdir"]) == 0
+    assert calls == [{"keep_failed_workdir": True, "exact_tip": True}]
+
+
 def test_copy_side_gates_are_direct_and_never_reinvoke_verifier(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -894,7 +1000,16 @@ def test_copy_side_gates_are_direct_and_never_reinvoke_verifier(
     assert all("verify_release.py" not in arguments for _, arguments, _ in calls)
     assert all(cwd == tmp_path for _, _, cwd in calls)
     assert "git diff --cached --check" in [label for label, _, _ in calls]
+    sync_call = next(arguments for label, arguments, _ in calls if label == "source environment")
+    boundary_call = next(
+        arguments for label, arguments, _ in calls if label == "application boundaries"
+    )
     pytest_call = next(arguments for label, arguments, _ in calls if label == "pytest")
     ruff_call = next(arguments for label, arguments, _ in calls if label == "ruff")
+    assert sync_call[-1] == "--no-install-project"
+    assert boundary_call[-2:] == ("python", "scripts/check_application_boundaries.py")
+    assert "--no-sync" in boundary_call
+    assert "--no-sync" in pytest_call
+    assert "--no-sync" in ruff_call
     assert pytest_call[-2:] == ("-p", "no:cacheprovider")
     assert ruff_call[-1] == "--no-cache"

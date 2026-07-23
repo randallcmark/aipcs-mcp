@@ -20,7 +20,7 @@ def test_server_info_is_safe_and_capability_versioned() -> None:
     assert data == {
         "server_name": "aipcs-mcp",
         "package_version": "0.0.0.dev0",
-        "aipcs_mcp_contract": "1.1.0",
+        "aipcs_mcp_contract": "1.2.0",
         "supported_manifest_versions": [2],
         "transports": ["stdio"],
         "features": {
@@ -30,11 +30,28 @@ def test_server_info_is_safe_and_capability_versioned() -> None:
             "stdio_preflight": True,
             "registry_lifecycle": False,
             "materialisation_lifecycle": False,
+            "record_runtime": False,
+            "discovery_topology": False,
         },
         "operational_statuses": ["active"],
     }
     assert "path" not in repr(data).lower()
     assert "dsn" not in repr(data).lower()
+
+
+def test_data_runtime_capabilities_are_an_atomic_ready_binding() -> None:
+    with pytest.raises(ValueError):
+        public_server_info(record_runtime=True, discovery_topology=False)
+    with pytest.raises(ValueError):
+        public_server_info(record_runtime=True, discovery_topology=True)
+    info = public_server_info(
+        registry_lifecycle=True,
+        materialisation_lifecycle=True,
+        record_runtime=True,
+        discovery_topology=True,
+    )
+    assert info.features.record_runtime is True
+    assert info.features.discovery_topology is True
 
 
 def test_public_storage_summary_uses_the_exact_service_store_namespace() -> None:

@@ -123,7 +123,11 @@ def _expected_materialise_action(
     deferred = _expected_deferred(foundation)
     if deferred is not None:
         return deferred
-    if foundation in {FoundationObservation.UNINITIALISED, FoundationObservation.DIRTY}:
+    if foundation in {
+        FoundationObservation.UNINITIALISED,
+        FoundationObservation.OUTDATED,
+        FoundationObservation.DIRTY,
+    }:
         return RecoveryAction.PREPARE_FOUNDATION, None, None, False
     if foundation is FoundationObservation.INCOMPATIBLE:
         return _recovery_required_expected()
@@ -150,7 +154,7 @@ def _expected_evolve_action(
     deferred = _expected_deferred(foundation)
     if deferred is not None:
         return deferred
-    if foundation is FoundationObservation.DIRTY:
+    if foundation in {FoundationObservation.OUTDATED, FoundationObservation.DIRTY}:
         return RecoveryAction.PREPARE_FOUNDATION, None, None, False
     if foundation is not FoundationObservation.READY:
         return _recovery_required_expected()
@@ -210,6 +214,23 @@ def test_pure_contract_uses_no_storage_from_an_external_working_directory(
     )
     assert Path.cwd() == tmp_path
     assert result.action is RecoveryAction.FINALIZE_REGISTRY
+
+
+def test_materialise_exact_outdated_foundation_is_resumable_not_terminal() -> None:
+    intent = prepare_intent(_materialise(), _manifest())
+
+    result = plan_recovery(
+        intent,
+        MaterialiseRecoveryObservation(
+            LifecyclePhase.PREPARED,
+            FoundationObservation.OUTDATED,
+            DomainObservation.NOT_OBSERVED,
+        ),
+    )
+
+    assert result.action is RecoveryAction.PREPARE_FOUNDATION
+    assert result.result_category is None
+    assert result.retryable is False
 
 
 def test_fingerprint_has_exact_compact_ascii_shape_and_known_digest() -> None:
@@ -650,6 +671,7 @@ def test_materialise_observation_matrix_is_closed_and_exhaustive() -> None:
             and foundation
             in {
                 FoundationObservation.UNINITIALISED,
+                FoundationObservation.OUTDATED,
                 FoundationObservation.DIRTY,
                 FoundationObservation.INCOMPATIBLE,
                 FoundationObservation.BUSY,

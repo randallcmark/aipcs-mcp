@@ -147,6 +147,17 @@ class SQLiteRegistryUnitOfWork:
         return decode_service(row) if row else None
 
     @_bounded_uow
+    def count(self, principal_id: str) -> int:
+        self._read()
+        row = self._connection.execute(
+            'SELECT COUNT(*) FROM "aipcs_registry_service" WHERE "principal_id"=?',
+            (principal_id,),
+        ).fetchone()
+        if row is None or type(row[0]) is not int or row[0] < 0:
+            raise ValueError
+        return row[0]
+
+    @_bounded_uow
     def list(self, principal_id: str, limit: int) -> list[Service]:
         self._read()
         rows = self._connection.execute(

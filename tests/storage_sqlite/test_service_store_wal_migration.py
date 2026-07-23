@@ -113,18 +113,27 @@ def _assert_recoverable_or_ready(catalog: SQLiteServiceStoreCatalog, locator: ob
     state = catalog.inspect_migration(locator)  # type: ignore[arg-type]
     mode, revision, dirty, row, history = _raw_state(database)
     if state.status == "ready":
-        assert (mode, revision, dirty, row, history[-1]) == ("wal", 2, 0, (1, _POLICY_ID, _R2_CHECKSUM, "ready"), (2, _R2_ID, _R2_CHECKSUM))
-    else:
-        assert state == MigrationState("service_store", 1, 2, "dirty") or state == MigrationState(
-            "service_store", 1, 2, "incompatible"
+        assert (mode, revision, dirty, row) == (
+            "wal",
+            3,
+            0,
+            (1, _POLICY_ID, _R2_CHECKSUM, "ready"),
         )
+        assert history[-2:] == ((2, _R2_ID, _R2_CHECKSUM), history[-1])
+        assert history[-1][0] == 3
+    else:
+        assert state in {
+            MigrationState("service_store", 1, 3, "dirty"),
+            MigrationState("service_store", 1, 3, "incompatible"),
+            MigrationState("service_store", 2, 3, "outdated"),
+        }
         assert revision == 1
         if row is None:
             assert (mode, dirty, history[-1]) == ("delete", 0, (1, _R1_ID, _R1_CHECKSUM))
         else:
             assert (dirty, row) == (1, (1, _POLICY_ID, _R2_CHECKSUM, "prepared"))
             assert mode in {"delete", "wal"}
-    assert catalog.migrate(locator) == MigrationState("service_store", 2, 2, "ready")  # type: ignore[arg-type]
+    assert catalog.migrate(locator) == MigrationState("service_store", 3, 3, "ready")  # type: ignore[arg-type]
     with sqlite3.connect(database) as connection:
         assert connection.execute('SELECT body FROM "note"').fetchone() == ("preserve me",)
 
@@ -228,7 +237,7 @@ def test_r2_final_reinspection_fault_never_rewrites_ready_target(tmp_path: Path,
 @pytest.mark.parametrize("prepared,wal", ((False, False), (True, False), (True, True)))
 def test_predecessor_and_exact_prepared_states_preserve_domain_data(tmp_path: Path, prepared: bool, wal: bool) -> None:
     catalog, locator, database = _seed_r1_delete(tmp_path / f"{prepared}-{wal}", prepared=prepared, wal=wal)
-    assert catalog.migrate(locator) == MigrationState("service_store", 2, 2, "ready")
+    assert catalog.migrate(locator) == MigrationState("service_store", 3, 3, "ready")
     with sqlite3.connect(database) as connection:
         assert connection.execute('SELECT body FROM "note"').fetchone() == ("preserve me",)
 
@@ -258,7 +267,7 @@ def test_r2_adversarial_states_fail_closed(tmp_path: Path, mutation: str) -> Non
         elif mutation == "arbitrary_dirty":
             connection.execute(f'UPDATE "{_META}" SET dirty=1')
         elif mutation == "future_revision":
-            connection.execute(f'UPDATE "{_META}" SET applied_revision=3')
+            connection.execute(f'UPDATE "{_META}" SET applied_revision=4')
         else:
             connection.execute(f'UPDATE "{_MIGRATION}" SET migration_id="altered" WHERE revision=2')
     before = _raw_state(database)

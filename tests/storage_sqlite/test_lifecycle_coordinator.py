@@ -218,7 +218,7 @@ def test_materialise_restarts_to_exact_completed_replay_with_one_terminal_audit(
     assert first.service is not None
     assert (first.service.service_revision, first.service.design_state) == (2, "materialised")
     locator = catalog.allocate(_SERVICE_ID)
-    assert catalog.inspect_migration(locator) == MigrationState("service_store", 2, 2, "ready")
+    assert catalog.inspect_migration(locator) == MigrationState("service_store", 3, 3, "ready")
     assert _domain(root).inspect(locator, compile_manifest(_manifest())) == DomainSchemaState("ready")
     assert _audit_rows(root) == [("materialise", "completed", str(_SERVICE_ID))]
 
@@ -233,7 +233,7 @@ def test_prepared_materialise_adopts_exact_physical_target_after_restart(tmp_pat
     prepared = _admit(adapter, command)
     assert isinstance(prepared, PreparedLifecycleClaim)
     locator = catalog.allocate(_SERVICE_ID)
-    assert catalog.migrate(locator) == MigrationState("service_store", 2, 2, "ready")
+    assert catalog.migrate(locator) == MigrationState("service_store", 3, 3, "ready")
     assert _domain(root).materialise(locator, compile_manifest(manifest)) == DomainSchemaState("ready")
 
     result = _coordinator(adapter, catalog, _domain(root)).execute(command)
@@ -335,7 +335,7 @@ def test_partial_domain_state_becomes_recovery_required_without_automatic_repair
     command = _materialise("materialise-incompatible")
     assert isinstance(_admit(adapter, command), PreparedLifecycleClaim)
     locator = catalog.allocate(_SERVICE_ID)
-    assert catalog.migrate(locator) == MigrationState("service_store", 2, 2, "ready")
+    assert catalog.migrate(locator) == MigrationState("service_store", 3, 3, "ready")
     database = root / "service-stores" / f"{locator.namespace}.sqlite"
     with sqlite3.connect(database) as connection:
         connection.execute('CREATE TABLE "unexpected" ("id" TEXT PRIMARY KEY) STRICT')

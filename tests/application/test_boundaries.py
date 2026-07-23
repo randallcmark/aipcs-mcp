@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import subprocess
+import sys
 from collections.abc import Iterable
 from dataclasses import fields
 from pathlib import Path
@@ -164,6 +166,43 @@ def test_application_does_not_depend_on_storage_contracts() -> None:
         }, module
 
 
+def test_standalone_application_boundary_gate_passes_and_fails_closed(tmp_path: Path) -> None:
+    script = ROOT / "scripts" / "check_application_boundaries.py"
+    passed = subprocess.run(
+        [sys.executable, str(script), "--root", str(ROOT)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    assert passed.stdout.strip() == "application boundary checks passed"
+
+    fixture = tmp_path / "fixture"
+    application = fixture / "src" / "aipcs_mcp" / "application"
+    storage = fixture / "src" / "aipcs_mcp" / "storage"
+    application.mkdir(parents=True)
+    storage.mkdir()
+    (application / "__init__.py").write_text("import sqlite3\n", encoding="utf-8")
+    for name in ("__init__.py", "contracts.py", "errors.py"):
+        (storage / name).write_text("", encoding="utf-8")
+    (fixture / "src" / "aipcs_mcp" / "relational.py").write_text(
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "import re\n"
+        "from typing import Literal\n"
+        "from .manifest_v2 import ManifestV2\n",
+        encoding="utf-8",
+    )
+    failed = subprocess.run(
+        [sys.executable, str(script), "--root", str(fixture)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert failed.returncode == 1
+    assert "src/aipcs_mcp/application/__init__.py: forbidden imports: sqlite3" in failed.stdout
+
+
 def test_storage_values_are_allowlisted_and_reject_hostile_locator_input() -> None:
     from aipcs_mcp.storage import (  # noqa: PLC0415
         MigrationState,
@@ -223,10 +262,14 @@ def test_migration_state_keeps_readiness_separate_from_adapter_information() -> 
         "registry"
     }
     assert MigrationState("registry", 0, 1, "uninitialised").applied_revision == 0
+    assert MigrationState("service_store", 2, 3, "outdated").status == "outdated"
     assert MigrationState("service_store", 1, 1, "ready").status == "ready"
     for invalid in (
         ("registry", 1, 1, "uninitialised"),
         ("registry", 0, 1, "ready"),
+        ("service_store", 0, 3, "outdated"),
+        ("service_store", 3, 3, "outdated"),
+        ("service_store", 4, 3, "outdated"),
         ("registry", -1, 1, "dirty"),
         ("registry", 1, 0, "dirty"),
         ("domain", 1, 1, "ready"),

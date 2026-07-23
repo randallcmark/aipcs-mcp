@@ -20,7 +20,7 @@ from aipcs_mcp.relational import classify_transition, compile_manifest
 from aipcs_mcp.storage import DomainSchemaState, DomainSchemaStore, ServiceStoreLocator
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
 from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
-from aipcs_mcp.storage.sqlite.service_store_migrations import META, MIGRATION, R2_POLICY
+from aipcs_mcp.storage.sqlite.service_store_migrations import R3 as SERVICE_STORE_R3
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = ROOT / "src" / "aipcs_mcp"
@@ -32,6 +32,20 @@ _TOOL_NAMES = [
     "aipcs_service_design",
     "aipcs_service_materialise",
     "aipcs_service_evolve",
+    "aipcs_record_create",
+    "aipcs_record_get",
+    "aipcs_record_list",
+    "aipcs_record_search",
+    "aipcs_record_update",
+    "aipcs_record_delete",
+    "aipcs_record_history",
+    "aipcs_bootstrap",
+    "aipcs_service_summary",
+    "aipcs_branch_create",
+    "aipcs_branch_list",
+    "aipcs_branch_update",
+    "aipcs_branch_assign_records",
+    "aipcs_maintenance_scan",
 ]
 _PRIVATE_RELATIONAL_MODULES = frozenset(
     {
@@ -108,13 +122,10 @@ def _assert_only_foundation_and_target_objects(database: Path) -> None:
         rows = tuple(connection.execute("SELECT type,name FROM sqlite_schema"))
 
     assert set(rows) == {
-        ("table", META),
-        ("table", MIGRATION),
-        ("table", R2_POLICY.table_name),
+        *(("table", name) for name in SERVICE_STORE_R3.table_xinfo),
+        *(("index", name) for name in SERVICE_STORE_R3.index_xinfo),
         ("table", "project"),
         ("table", "task"),
-        ("index", "sqlite_autoindex___aipcs_service_store_migration_1"),
-        ("index", "sqlite_autoindex___aipcs_service_store_migration_2"),
         ("index", "sqlite_autoindex_project_1"),
         ("index", "sqlite_autoindex_task_1"),
         ("index", "project_owner_idx"),

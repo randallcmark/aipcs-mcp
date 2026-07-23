@@ -24,6 +24,14 @@ from aipcs_mcp.storage.sqlite import (
     SQLiteServiceStoreCatalog,
 )
 from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
+from aipcs_mcp.storage.sqlite.service_store_migrations import (
+    META,
+    MIGRATION,
+    R3_BRANCH_TABLE,
+    R3_HISTORY_TABLE,
+    R3_MUTATION_TABLE,
+    R3_RECORD_BRANCH_TABLE,
+)
 
 _WATCHDOG_SECONDS = 8.0
 _PRINCIPAL = "coordinator-process"
@@ -82,6 +90,44 @@ class _FailIfCatalogTouched:
         self._unexpected()
 
 
+class _TraceStorage:
+    """Attach bounded storage-call provenance to rare process-race failures."""
+
+    def __init__(self, wrapped: object, trace: list[tuple[str, str]]) -> None:
+        self._wrapped = wrapped
+        self._trace = trace
+
+    def __getattr__(self, name: str) -> object:
+        value = getattr(self._wrapped, name)
+        if not callable(value):
+            return value
+
+        def traced(*args: object, **kwargs: object) -> object:
+            try:
+                result = value(*args, **kwargs)
+            except Exception as error:
+                self._trace.append((name, type(error).__name__))
+                raise
+            self._trace.append((name, "ok"))
+            return result
+
+        return traced
+
+
+class _TraceUow(_TraceStorage):
+    @property
+    def services(self) -> _TraceUow:
+        return self
+
+    @property
+    def mutations(self) -> _TraceUow:
+        return self
+
+    @property
+    def audits(self) -> _TraceUow:
+        return self
+
+
 def _send(peer: Connection, state: str, **values: object) -> None:
     assert state in _STATES
     peer.send({"state": state, **values})
@@ -113,13 +159,29 @@ def _execute_materialise_process(
     adapter = SQLiteRegistryAdapter(location, busy_timeout_ms=busy_timeout_ms)
     catalog = SQLiteServiceStoreCatalog(location, busy_timeout_ms=busy_timeout_ms)
     domain = SQLiteDomainSchemaStore(location, busy_timeout_ms=busy_timeout_ms)
+    trace: list[tuple[str, str]] = []
+
+    def traced_uow() -> _TraceUow:
+        try:
+            return _TraceUow(adapter.open_uow(), trace)
+        except Exception as error:
+            trace.append(("open_uow", type(error).__name__))
+            raise
+
     try:
-        injected_catalog: object = catalog
+        traced_catalog = _TraceStorage(catalog, trace)
+        traced_domain = _TraceStorage(domain, trace)
+        injected_catalog: object = traced_catalog
         if mode == "gate":
-            injected_catalog = _GateCatalog(catalog, peer)
+            injected_catalog = _GateCatalog(traced_catalog, peer)  # type: ignore[arg-type]
         elif mode == "forbid_catalog":
-            injected_catalog = _FailIfCatalogTouched(catalog, peer)
-        coordinator = LifecycleCoordinator(adapter.open_uow, _Clock(), injected_catalog, domain)  # type: ignore[arg-type]
+            injected_catalog = _FailIfCatalogTouched(traced_catalog, peer)  # type: ignore[arg-type]
+        coordinator = LifecycleCoordinator(
+            traced_uow,  # type: ignore[arg-type]
+            _Clock(),
+            injected_catalog,  # type: ignore[arg-type]
+            traced_domain,  # type: ignore[arg-type]
+        )
         command = MaterialiseCommand(
             principal_id=_PRINCIPAL,
             created_via="coordinator-process-test",
@@ -132,9 +194,9 @@ def _execute_materialise_process(
         _wait_release(peer)
         _send(peer, "BEGIN_ATTEMPT")
         result = coordinator.execute(command)
-        _send(peer, "RESULT", category=_category(result))
+        _send(peer, "RESULT", category=_category(result), trace=trace)
     except Exception as error:
-        _send(peer, "RESULT", category="error", error=type(error).__name__)
+        _send(peer, "RESULT", category="error", error=type(error).__name__, trace=trace)
     finally:
         _send(peer, "EXIT")
         peer.close()
@@ -250,6 +312,35 @@ def _store_path(root: Path, service_id: UUID) -> Path:
     return root / "service-stores" / f"svc_{service_id.hex}.sqlite"
 
 
+def _seed_exact_clean_r2(root: Path, service_id: UUID) -> None:
+    catalog = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(root), busy_timeout_ms=1_000)
+    locator = catalog.allocate(service_id)
+    assert catalog.migrate(locator) == MigrationState("service_store", 3, 3, "ready")
+    database = _store_path(root, service_id)
+    connection = sqlite3.connect(database)
+    try:
+        for table in (
+            R3_RECORD_BRANCH_TABLE,
+            R3_BRANCH_TABLE,
+            R3_HISTORY_TABLE,
+            R3_MUTATION_TABLE,
+        ):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute(
+            f'DELETE FROM "{MIGRATION}" WHERE "component"=? AND "revision"=?',
+            ("service_store", 3),
+        )
+        connection.execute(
+            f'UPDATE "{META}" SET "applied_revision"=2,"dirty"=0 WHERE "singleton"=1'
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    assert catalog.inspect_migration(locator) == MigrationState(
+        "service_store", 2, 3, "outdated"
+    )
+
+
 def _phase(root: Path, key: str) -> str | None:
     with sqlite3.connect(root / "registry.sqlite") as connection:
         row = connection.execute(
@@ -350,7 +441,8 @@ def test_simultaneous_same_key_workers_reconcile_one_exact_target(tmp_path: Path
         _event(first_peer, "PREPARED")
         _event(second_peer, "PREPARED")
         _release_all(first_peer, second_peer)
-        outcomes = [_event(first_peer, "RESULT")["category"], _event(second_peer, "RESULT")["category"]]
+        result_events = [_event(first_peer, "RESULT"), _event(second_peer, "RESULT")]
+        outcomes = [event["category"] for event in result_events]
         _exit(first, first_peer)
         _exit(second, second_peer)
     finally:
@@ -376,13 +468,54 @@ def test_simultaneous_same_key_workers_reconcile_one_exact_target(tmp_path: Path
         domain,
         _service_state(adapter, service_id).design_state,
         _terminal_audits(root, service_id),
+        [event["trace"] for event in result_events],
     )
-    assert set(outcomes) <= {"completed", "operation_uncertain", "storage_busy"}, evidence
+    assert set(outcomes) <= {
+        "completed",
+        "operation_uncertain",
+        "storage_busy",
+    }, repr(evidence)
     assert retry == "completed", evidence
     assert _phase(root, "same-key-race") == LifecyclePhase.COMPLETED.value, evidence
     assert foundation == "ready", evidence
     assert domain == "ready", evidence
     assert _terminal_audits(root, service_id) == [("materialise", "completed")], evidence
+
+
+def test_materialise_process_adopts_exact_clean_r2_without_terminal_recovery(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    service_id = UUID("00000000-0000-0000-0000-000000000118")
+    _add(_adapter(root), _service(service_id))
+    _seed_exact_clean_r2(root, service_id)
+    worker, worker_peer = _spawn(
+        _execute_materialise_process,
+        str(root),
+        str(service_id),
+        "outdated-r2",
+        1_000,
+        "normal",
+    )
+    try:
+        _event(worker_peer, "READY")
+        _release(worker_peer)
+        _event(worker_peer, "BEGIN_ATTEMPT")
+        assert _event(worker_peer, "RESULT")["category"] == "completed"
+        _exit(worker, worker_peer)
+    finally:
+        _terminate(worker, worker_peer)
+
+    catalog = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(root), busy_timeout_ms=1_000)
+    locator = catalog.allocate(service_id)
+    assert catalog.inspect_migration(locator) == MigrationState(
+        "service_store", 3, 3, "ready"
+    )
+    assert SQLiteDomainSchemaStore(SQLiteLocationPolicy(root)).inspect(
+        locator, compile_manifest(_manifest())
+    ) == DomainSchemaState("ready")
+    assert _phase(root, "outdated-r2") == LifecyclePhase.COMPLETED.value
+    assert _terminal_audits(root, service_id) == [("materialise", "completed")]
 
 
 def test_different_key_loser_is_blocked_before_any_service_store_work(tmp_path: Path) -> None:
@@ -457,7 +590,7 @@ def test_service_store_lock_preserves_prepared_intent_then_retry_completes(tmp_p
     _add(adapter, _service(service_id))
     catalog = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(root), busy_timeout_ms=1_000)
     locator = catalog.allocate(service_id)
-    assert catalog.migrate(locator) == MigrationState("service_store", 2, 2, "ready")
+    assert catalog.migrate(locator) == MigrationState("service_store", 3, 3, "ready")
     holder, holder_peer = _spawn(_locked_writer_process, str(_store_path(root, service_id)))
     worker, worker_peer = _spawn(
         _execute_materialise_process, str(root), str(service_id), "store-busy", 120, "normal"
@@ -490,7 +623,7 @@ def test_independent_service_store_progresses_while_peer_store_writer_is_held(tm
     _add(adapter, _service(worker_id))
     catalog = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(root), busy_timeout_ms=1_000)
     held_locator = catalog.allocate(held_id)
-    assert catalog.migrate(held_locator) == MigrationState("service_store", 2, 2, "ready")
+    assert catalog.migrate(held_locator) == MigrationState("service_store", 3, 3, "ready")
     holder, holder_peer = _spawn(_locked_writer_process, str(_store_path(root, held_id)))
     worker, worker_peer = _spawn(
         _execute_materialise_process, str(root), str(worker_id), "independent", 500, "normal"

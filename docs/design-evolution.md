@@ -1,36 +1,58 @@
 # Design evolution
 
-AIPCS started as a broad design for agent-instantiated persistent context
-services. Dogfooding narrowed the public product toward one primitive server,
-stable generic MCP tools, and an agent-designed relational memory model.
+AIPCS began as a broad research design for agent-instantiated persistent
+context services. Dogfooding narrowed the public product to one primitive
+server, stable generic tools, and schemas that agents can design and evolve.
 
-The current code establishes the manifest and trust boundaries plus a
-local-stdio SQLite registry lifecycle. It persists service seeds and initial
-manifest designs, but public service-store materialisation and records remain
-future slices. Private SQLite adapter seams do not alter that public boundary.
-
-| Earlier direction | Public-v1 direction |
+| Earlier direction | Current public direction |
 | --- | --- |
-| Generate MCP tools from every schema. | The server will own stable generic tools; schemas describe data and retrieval only. |
-| Generate a web service for every memory domain. | One local-first primitive server will manage many services. |
+| Generate MCP tools from each schema. | One stable 21-tool surface operates over agent-defined schemas. |
+| Generate a web service for every memory domain. | One local-first primitive server manages many services. |
 | Treat undeveloped seeds as abandoned. | Seeds are durable cues; archive and purge remain explicit future actions. |
-| Use SQLite as the only storage shape. | SQLite is the current registry reference; PostgreSQL remains a future secondary adapter. |
-| Treat local SQLite as general multi-writer storage. | The supported scope is one host on a local POSIX filesystem under one effective user: WAL permits many readers while SQLite serialises one writer. |
-| Store inert relationship and index declarations. | Manifest v2 accepts only declarations it can validate and later enforce. |
-| Retain aliases, confidence scores, and tool declarations. | These are retired from the public input contract; agents evolve the schema directly. |
-| Defer recovery and administration. | Portability, recovery, and an operator CLI remain planned release requirements. |
-| Treat local transport proof as remote readiness. | Public v1 supports local stdio only. |
+| Make SQLite the product model. | SQLite is the first adapter; backend-neutral application contracts preserve a later PostgreSQL path. |
+| Treat local SQLite as general multi-writer storage. | One local POSIX host and effective user; WAL permits readers and serialises one writer. |
+| Retain aliases and generated pointers. | Agents evolve schemas and move records explicitly. |
+| Persist classification confidence and session counters as registry concepts. | Those concepts are retired; domain schemas may declare their own useful fields. |
+| Keep tool definitions inside schemas. | Tool definitions belong to the fixed server contract, not manifest data. |
+| Let discovery infer relevance or authority. | Bootstrap is shape-only; summary and maintenance expose bounded declared/mechanical facts without ranking truth. |
+| Defer concurrency evidence. | Lifecycle uses registry durable intent; record/topology mutations use a separate completed-only local replay ledger. |
+| Treat local transport proof as remote readiness. | The current runtime is stdio-only; remote MCP is deferred. |
 
-The current registry lifecycle exposes fixed seed, list, inspect, and design
-tools only after SQLite startup is ready. Design stores a validated manifest;
-it does not materialise a store, create domain tables, create records, or
-generate tools. PostgreSQL, remote operation, general multi-host or multi-user
-writer support, and administration remain out of scope.
+## What 1.2 establishes
 
-Manifest v2 makes relationships, indexes, retrieval intent, and
-server-managed record fields explicit. Its legacy converter is intentionally
-one-way: it returns provenance and warnings rather than silently preserving
-ambiguous or retired constructs.
+Manifest v2 describes relational records, relationships, indexes, retrieval
+intent, discovery facets, and server-managed record fields. Materialise and
+evolve make that schema operational. Generic record CRUD/history, structured
+exact and membership search, branch topology, bootstrap, summary, and
+read-only maintenance complete the usable local memory loop.
 
-This public summary records the product boundary without carrying operational
-history or private artifacts into the repository.
+Branches are topology above records, not aliases. A record may have one
+primary branch and multiple related branches. Effective topology changes are
+record mutations and therefore advance record revision and history.
+
+Discovery remains intentionally lightweight. Bootstrap helps an agent choose a
+service without opening service storage. Summary supplies the service's actual
+retrieval affordances and bounded observations. Maintenance reports candidates
+for agent judgment and never mutates, merges, archives, deletes, or decides
+which memory is true.
+
+## Concepts considered but not retained
+
+Generated per-schema tools, aliases, registry classification confidence,
+`session_count`, schema-owned tool declarations, and dedicated merge/split
+operations were explored but are not part of the current contract. Parent
+service links were also removed from the registry model; deeper hierarchy is
+represented where needed through agent-defined record relationships and branch
+parent topology.
+
+The legacy manifest converter records discarded fields and warnings so this
+evolution remains visible without carrying obsolete behavior into the live
+contract.
+
+## Still deferred
+
+The current implementation remains local-first and pre-release. PostgreSQL,
+semantic search, export/import/purge, an administration CLI, supported `uvx`
+installation, remote MCP, hosted identity, and maintenance/deprecation policy
+remain separate future work. Their absence is deliberate and is not filled by
+private modules, examples, or research artifacts.

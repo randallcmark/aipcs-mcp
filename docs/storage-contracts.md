@@ -1,292 +1,233 @@
 # Storage contracts
 
-The storage layer defines pure, backend-neutral contracts. The current SQLite
-registry adapter implements the registry portion and is composed only by the
-local stdio runtime. A private SQLite service-store catalog implements the
-separate service-store portion. A private top-level lifecycle coordinator
-composes the registry, catalog, and domain-schema protocols. The ready SQLite
-runtime binds it behind the two generic lifecycle MCP tools; it remains absent
-from the registry-only application package, standalone CLI, configuration
-surface, and public object API. None is a general adapter plugin API or a
-PostgreSQL implementation.
+AIPCS keeps storage mechanics behind backend-neutral ports. Portable contracts
+use opaque locators, pure commands/specifications, detached values, bounded
+failure categories, and explicit transaction ownership. Paths, DSNs, SQL,
+connections, cursors, driver exceptions, filesystem layouts, and migration
+table names are private adapter details.
 
-The reference adapter is certified only for local POSIX filesystems on Linux
-and macOS, one host, Python 3.12+, SQLite 3.51.3+, and cooperating processes
-running as the same effective user. It uses a descriptor-anchored `0700` root
-and `0600` database/WAL/SHM files. Persistent WAL permits concurrent readers
-and one native SQLite writer at a time. Native rollback-journal recovery is
-owned only by explicit migration. Windows, network filesystems, and multi-host
-SQLite are unsupported.
+SQLite is the current implementation. PostgreSQL is deferred; its future
+adapter must preserve the behavioral contract rather than reproduce SQLite
+DDL.
 
-These filesystem controls operate within a local same-effective-user trust
-boundary. They reject unsafe modes, links, nonregular files, and observable
-root or main-database replacement. SQLite-managed WAL/SHM pathnames may
-legitimately disappear or be recreated by a cooperating peer while another
-connection retains an internal descriptor, so every current pathname is
-revalidated but cross-process sidecar inode continuity is not claimed. Full
-no-follow open/fstat validation is restricted to before SQLite opens and after
-it closes; live checks use descriptor-relative no-follow metadata lookup so
-the adapter never closes an independently opened descriptor onto an inode
-whose POSIX advisory locks SQLite may hold. These controls are not a sandbox
-against a malicious process running as the same operating-system user. Keep
-the data root private and do not run untrusted same-user processes against it.
+## Adapter vocabulary
 
-`aipcs serve --profile sqlite` is the sole public composition path: it obtains
-the opaque location from resolved configuration, calls `migrate()` once before
-MCP construction, and proceeds only at the exact ready revision. `config show`
-and `config validate` do not construct an adapter, open the registry, create a
-directory, or migrate. A failed startup does not start a partial MCP server.
+`StorageAdapterInfo` identifies a backend and its closed capabilities. Current
+capabilities include registry, service-store foundation, domain schema, and
+materialised data behavior. Capability information does not expose a location
+or credential.
 
-`ServiceStoreLocator` is an opaque logical identifier for a service-store
-allocation. It is exactly `svc_` followed by the lowercase
-32-character hexadecimal form of a non-zero service UUID. It is not a path,
-URI, DSN, host, database name, credential, SQL identifier, or agent-authored
-domain name.
-`StorageSummary` exposes only that exact namespace component when it is later
-projected publicly; it is never a second free-form label or the private
-`ServiceStoreLocator` object.
+`ServiceStoreLocator` is an opaque logical backend/namespace pair. The public
+SQLite namespace has the safe form `svc_<uuid hex>` and is not a path,
+database name, endpoint, or secret.
 
-`StorageAdapterInfo` says which of the closed `registry` and `service_store`
-components a SQLite or future PostgreSQL adapter owns. It does not say that a
-configured store is present, compatible, migrated, or ready. That dynamic
-state is represented separately by `MigrationState`.
+Migration state is component-scoped and finite. Registry and service-store
+adapter revisions are independent from manifest, schema, service, record,
+branch, MCP, and future export versions.
 
-Migration revisions are adapter-private positive integers. `applied_revision`
-uses zero only when no adapter migration is applied. `ready` means it equals the
-adapter target revision; `uninitialised` means zero and is migratable only after
-the future adapter verifies an absent or empty physical store. An unversioned
-non-empty store, unknown/newer revision, missing required ledger, or checksum
-mismatch is `incompatible`; an interrupted known migration is `dirty`. Ordinary
-migration does not repair either state. Revisions are not package, MCP,
-manifest, schema, record, or export versions.
+## Registry storage
 
-`inspect_migration()` is observation only. `migrate()` is the sole explicit
-initialisation or layout-changing operation. SQLite startup migrates only the
-registry and then composes the lifecycle seams without service-store I/O; an
-admitted materialise/evolve tool call may allocate or migrate its service
-store. Inspection uses one read snapshot and changes no application,
-schema, ledger, or journal-mode state. A valid SQLite WAL open may still
-create, rebuild, retain, replace, or remove SQLite-managed WAL/SHM operational
-files; every observable file remains inside the same secured location policy.
-Safe diagnostics remain intentionally bounded.
+The registry is the authority for:
 
-Registry R3 and service-store R2 record the WAL physical policy as exact
-checksummed migrations. Each database contains one permanent singleton policy
-row for `aipcs.sqlite.wal.v1`, in `prepared` or `ready` phase. Explicit
-migration commits a dirty prepared predecessor in DELETE mode, switches the
-persistent header to WAL, then commits the ready policy and target history.
-Only exact predecessor/DELETE, prepared/DELETE, prepared/WAL, and ready/WAL
-states are adopted; every other marker/header/ledger combination fails closed.
-Each successful ready migration runs one PASSIVE checkpoint and independently
-re-observes readiness.
+- principal-scoped service metadata;
+- the current accepted manifest and schema version;
+- service revision and operational/materialisation state;
+- safe logical storage identity;
+- global principal/idempotency replay evidence;
+- lifecycle prepared/completed/recovery-required intent; and
+- metadata-only audit.
 
-`sqlite_busy_timeout_ms` configures Python connection waiting and SQLite's one
-busy handler, from 1 through 30,000 ms (default 5,000). `StorageBusy` is created
-only from a numeric SQLite BUSY-family primary result or a PASSIVE-checkpoint
-busy indicator. It is not inferred from driver text, `SQLITE_LOCKED`, elapsed
-wall time, or an uncertain post-commit outcome. The adapters contain no retry
-loop.
+One registry unit of work atomically owns a registry mutation, its replay
+result, and audit append. Repository values are detached snapshots; they do not
+retain connection state after close.
 
-The historical V1-08B registry R2 migration is a private sequential,
-checksummed upgrade beneath the current R3 WAL policy.
-It admits only an exact, clean, public-reachable R1 registry and otherwise
-fails closed; it does not recalculate R1 evidence, relabel an R1 database, or
-offer repair. Fresh creation applies the same R1 then R2 migration history.
-The public `MigrationState` remains `uninitialised`, `ready`, `dirty`, or
-`incompatible`: exact R1 below the target has no public upgradeable state.
-R2 adds an internal positive `service_revision` epoch and nullable safe logical
-materialisation values. The latter are only a closed backend choice and the
-opaque `ServiceStoreLocator` namespace grammar already described here—never a
-physical location, connection detail, credential, or service-store ledger.
-Explicit R2 inspection and migration finalization validate both the exact
-physical signatures and every stored service, typed mutation phase/result, and
-audit row. Canonical but semantically forged row data therefore fails closed as
-incompatible without a repair write. Ordinary unit-of-work open does not add an
-unbounded full-registry scan; each row codec remains strict when that row is
-used.
+SQLite registry R3 is the current exact target. It retains immutable
+checksummed migration history and the crash-resumable WAL policy introduced by
+earlier revisions. Migration accepts only exact known predecessor/prepared
+states. Unknown, altered, partial, dirty, substituted, or future storage fails
+closed. The metadata-only audit retains the newest 1,000 rows per principal;
+that cap never prunes mutation or lifecycle evidence and has no public query or
+configuration surface.
 
-The historical R2 layout retains one global registry mutation/idempotency ledger across legacy and
-lifecycle work. Exact legacy completed replays keep their stored result
-bytes; a lifecycle intent is `prepared`, `completed`, or
-`recovery_required`, with prepared and recovery-required rows acting as the
-per-service transition blocker and completion releasing it. This describes
-durable registry state only. V1-08D's private coordinator consumes that
-evidence; the registry repository itself still does not inspect a service
-store or expose a lifecycle operation.
+## Service-store foundation
 
-Registry unit-of-work callers close every successfully acquired unit exactly
-once. A successful commit or rollback ends its transaction attempt, then close
-releases resources. Closing an unterminated unit performs adapter-safe rollback
-cleanup. The original application failure wins over rollback or close failures;
-a close failure after an otherwise successful operation becomes a bounded
-internal failure. A commit exception has indeterminate durable outcome, so a
-caller receives a bounded failure, resources are closed, and a retry relies on
-the existing idempotency replay semantics.
+Each materialised service has one private service store selected by its opaque
+locator. The foundation binds itself to that namespace, maintains its own
+checksummed history, and reserves adapter-owned object names. Copying an exact
+database under another locator cannot report ready.
 
-The private coordinator keeps registry transactions short: it resolves a key,
-loads the exact admitted source only for prepared work, commits a new prepared
-intent, and closes the UoW before catalog or domain-schema access. Terminal
-completion or recovery-required uses a fresh registry UoW. An unprovable
-commit or post-action outcome is `operation_uncertain`; it is never converted
-to recovery-required from exception text.
+Service-store revisions are:
 
-Because the WAL policy's exact committed `prepared` phases are visible as
-`dirty`, the coordinator gives a dirty foundation one call to the catalog's
-existing migration action and then re-observes. That action serialises and
-resumes only the adapter's exact prepared WAL states. Generic historical dirt
-remains unchanged and becomes recovery-required on fresh observation; there
-is no repair loop, lease, fencing token, or process mutex.
+- R1: foundation metadata and migration history;
+- R2: exact persistent-WAL policy; and
+- R3: completed local mutation replay, record history, branch topology, and
+  record-branch membership foundations.
 
-Repository and mutation-ledger values cross the port as detached snapshots.
-They must not retain a connection-backed cursor or a mutable reference to
-durable adapter state after the unit of work closes.
+R3 reserved data contains service-local operational evidence, not a copy of
+the manifest, schema version, service lifecycle phase, principal registry,
+audit stream, path, or DSN. Domain entity tables remain non-reserved objects
+compiled from the registry-authoritative manifest.
 
-A registry adapter's information includes `registry`, and its migration state
-is always for that component. The current public lifecycle persists registry
-metadata, idempotency outcomes, and metadata-only audit information within one
-unit of work. Audit data and principal identity are never projected by MCP.
+### Exact R2-to-R3 upgrade
 
-R2 bounds that metadata-only audit store to the newest 1,000 rows per principal
-by audit identifier. The migration removes only older over-cap audit rows, and
-an audit append trims older rows for its own principal in the same registry
-transaction. The cap never prunes mutation, idempotency, or lifecycle evidence;
-it has no configuration, environment, CLI, MCP, or audit-query surface.
+An exact clean R2 store is a recognised `outdated` predecessor. Inspection is
+read-only and never upgrades it.
 
-The private SQLite service-store catalog declares only `service_store`
-ownership. `allocate()` purely derives the canonical locator and performs no
-filesystem or registry I/O. `inspect_migration()` does not create a directory,
-database, table, migration row, or journal-mode change, subject to SQLite's
-documented operational WAL/SHM open effects above. Explicit `migrate()` maps a
-validated locator to the adapter-private layout below and initialises the R1
-predecessor followed by the R2 WAL policy:
+- bootstrap remains available because it does not open the store;
+- summary reports `data_status: "migration_required"` and leaves unavailable
+  observations unknown;
+- record/history/branch/maintenance reads return
+  `storage_migration_required`; and
+- only an admitted lifecycle, record, or topology mutation may run exact
+  R2-to-R3 migration before its local transaction. A prepared materialise
+  intent may therefore adopt a clean R2 window left by a cooperating peer.
 
-```text
-<sqlite-data-root>/
-  registry.sqlite
-  service-stores/
-    svc_<32 lowercase hexadecimal characters>.sqlite
-```
+The mutation path accepts only exact R2, exact adapter-prepared R3, or exact
+ready R3 evidence. It performs no general repair and never accepts altered,
+partial, generic dirty, unknown, or newer storage. Concurrent migrators
+re-observe exact state after writer-lock acquisition and converge on one
+immutable migration history.
 
-The container is `0700`; every selected database is an owned, single-link
-regular `0600` file. The database contains three reserved adapter tables:
-service-store metadata, its independent checksummed migration ledger, and the
-WAL policy marker. The
-metadata binds the database to the exact locator namespace, so copying or
-renaming a valid database to a different locator cannot report ready. It stores
-no principal, domain name, manifest, schema version, lifecycle state, audit,
-record, branch, or idempotency data. Adapter readiness validates its reserved
-objects only; future manifest-aware validation of domain objects belongs to the
-materialisation slice.
+## Domain schema store
 
-The catalog rejects a foreign-backend locator before I/O, reports migration
-state only for `service_store`, and does not repair dirty or incompatible
-state. The ready SQLite runtime constructs it behind the V1-08D coordinator;
-the registry-only application does not. Direct catalog initialisation can
-still create an orphan database because it bypasses registry intent and the
-coordinator. Public materialise/evolve use the composed coordinator only. No
-record operation, PostgreSQL adapter, repair, backup, import/export, or
-cross-store transaction exists yet.
+The private `DomainSchemaStore` accepts an opaque locator and a detached
+relational specification compiled from a validated manifest. It can:
 
-The reusable test-only conformance cases in `tests/storage_contracts/` assert
-registry application and service-catalog behavior without treating SQL,
-filesystem layout, connections, or drivers as portable contract details. They
-are not shipped as a storage adapter.
+- inspect layout relative to that supplied specification;
+- materialise an exact schema-version-1 layout; and
+- apply one supported adjacent additive transition.
 
-## Private SQLite domain-schema store
+It stores no second manifest, schema ledger, transition fingerprint, or current
+schema authority. Inspection returns only unmaterialised, ready, or
+incompatible relative to the supplied target. Initial materialisation and
+evolution are exact and transactional.
 
-`SQLiteDomainSchemaStore` is the private SQLite implementation of the
-`DomainSchemaStore` protocol. It uses the same descriptor-anchored location
-policy and opaque locator mapping as `SQLiteServiceStoreCatalog`: a valid
-SQLite locator selects only
-`service-stores/svc_<32 lowercase hexadecimal characters>.sqlite` below the
-configured SQLite data root. It does not allocate a locator, create a
-directory or database, compose with the registry, or add a public storage
-adapter surface.
+Supported transitions include new entity tables, nullable appended fields,
+new indexes, and approved metadata-only changes. The adapter never rebuilds,
+renames, drops, copies, backfills, rewrites, or repairs domain tables. Exact
+foreign keys use immediate `ON UPDATE RESTRICT ON DELETE RESTRICT`.
 
-Every `inspect()` and `materialise()` call first requires that selected,
-already-existing database to pass the exact revision-2 WAL-ready service-store foundation
-inspection on the very connection used for the domain operation. A missing,
-empty, dirty, incompatible, copied, or otherwise non-ready foundation is a
-`StorageMigrationError`, not a domain `unmaterialised` result. In particular,
-all domain objects being absent is `unmaterialised` only after the exact
-foundation metadata and migration ledger prove readiness; without that ledger,
-the store must not infer whether the empty domain is a fresh service or an
-unknown database. Invalid locators, specifications, and transitions are
-`StorageContractError`; unavailable or unsafe storage remains a bounded
-`StorageUnavailable` error.
+## Materialised-data port
 
-Against a ready foundation, inspection compares the non-reserved database
-objects exactly with the supplied compiled relational specification. It returns
-`unmaterialised` when every domain table and index is absent, `ready` only for
-the complete exact layout with a clean foreign-key check, and `incompatible`
-for any partial, extra, altered, or orphaned domain layout. These states are
-relative to that supplied specification and are not persisted as a manifest,
-schema version, fingerprint, or second ledger. Inspection never repairs.
-Because no domain-schema ledger is stored, a ready foundation after complete external deletion of
-every domain object is observationally identical to a never-materialised domain and is therefore
-also `unmaterialised`; any partial disappearance remains detectable as `incompatible`. Later
-registry-lifecycle composition supplies the historical context needed to treat an unexpectedly
-empty previously materialised service as a cross-store recovery case.
+The backend-neutral materialised-data port receives:
 
-For domain tables only, exact SQL fidelity means the same fail-closed SQLite
-lexical-token sequence with inter-token ASCII whitespace ignored. Quoted
-identifiers and literals, case, spelling, punctuation, constraints, comments,
-and every other token remain exact; malformed or unsupported SQL is
-incompatible. This accommodates SQLite's whitespace rewrite after an accepted
-`ALTER TABLE ... ADD COLUMN` without accepting a semantic rewrite. Object
-names, table and foreign-key signatures, internal objects, explicit-index SQL
-and signatures, and `foreign_key_check` remain exact.
+- an opaque service locator;
+- principal and fixed provenance context;
+- a detached `RecordSpecification`;
+- a typed command or query; and
+- detached pure outcomes only.
 
-`materialise()` supports initial physical DDL only, and therefore accepts only
-`schema_version == 1`. It atomically creates the deterministic tables and
-ordered explicit indexes only from `unmaterialised`; repeat materialisation of
-the exact layout is a no-op, and an incompatible layout is preserved. SQLite
-foreign keys are named, `ON DELETE RESTRICT ON UPDATE RESTRICT`, immediate,
-and never `DEFERRABLE`; nullable foreign-key fields are the supported way to
-stage otherwise cyclic data. `evolve()` deeply revalidates one caller-supplied,
-adjacent additive transition, then under one `BEGIN IMMEDIATE` transaction accepts an
-exact target as a no-op or an exact current layout as the source for canonical
-DDL. It may create new entity tables, append nullable fields to existing
-tables, and create new explicit indexes; relationships are emitted only from a
-new source table. It never rebuilds, renames, drops, copies, backfills,
-rewrites, or repairs a table. If neither current nor target is exact, the
-layout is `incompatible` and remains untouched. The target is the physical
-authority for repeat safety, including metadata-only transitions; no schema
-version, transition, or ledger is persisted. Python object identity is not a
-provenance seal.
+The current SQLite adapter requires an exact ready R3 foundation and exact
+domain layout on the same selected service database.
 
-The ready SQLite runtime composes this private store only through the
-coordinator behind materialise/evolve; it is not independently available from
-MCP, CLI, configuration, or the registry-only application. It provides no
-domain rows, record operations, migration history, schema repair, service
-allocation API, or cross-store transaction.
+### Record transactions
 
-## Private relational schema contract
+Create, update, and delete validate all domain values before persistence.
+Callers cannot provide server-managed fields. The adapter supplies UUID,
+principal ownership, UTC timestamps, `created_via`, and `record_version`.
 
-`DomainSchemaStore` is a private, backend-neutral protocol for a later domain
-schema adapter. It accepts an opaque `ServiceStoreLocator` and an immutable
-compiled relational specification, or a deeply revalidated additive transition. Its
-only operations are inspection relative to a supplied specification, exact
-initial materialisation, and exact transition. Inspection reports only
-`unmaterialised`, `ready`, or `incompatible` relative to that supplied target.
+Create, update, and delete commit atomically with:
 
-The specification is a pure projection of a validated manifest: schema version;
-named entities and declared-order fields; named relationships; and named,
-ordered indexes. Relationships carry the fixed v1 `restrict` update/delete
-policy and `immediate` constraint timing. Required relationship cycles are rejected; nullable
-cycles are staged through null relationship values rather than temporarily invalid transactions.
-The specification excludes descriptions, retrieval
-metadata, facets, query patterns, and allowed values. Its exact immutable value
-is the comparison authority; the port stores no manifest, schema version,
-fingerprint, history, path, DSN, SQL, credentials, or schema ledger.
+- relationship/constraint checks;
+- a before/after record-history event where applicable; and
+- completed local mutation replay evidence.
 
-The supported transition grammar is intentionally additive: new entities,
-nullable append-only fields, explicit new indexes, and approved application-only
-metadata changes (including typed allowed-value expansion). It rejects
-renames/removals, rebuilds, required additions, relationship retrofit on an
-existing source table, index mutation, and allowed-value narrowing. The
-registry-held manifest is the architectural authority, but this private store
-does not read or cross-check registry state; the lifecycle coordinator owns
-that coordination. The ready SQLite runtime composes this port behind the
-generic materialise/evolve tools. The port itself is not a public adapter and
-does not alter MCP, CLI, or configuration contracts.
+Update/delete compare the exact expected record revision. One winner advances
+the record revision once; stale callers fail without a partial write.
+Delete removes the current row but preserves its detached history event.
+
+The service-local replay ledger is keyed by principal and idempotency key and
+binds operation kind plus canonical payload fingerprint. Same-key/same-request
+returns the stored result; changed content fails. It has no prepared phase and
+is not lifecycle, schema, or cross-store authority.
+
+### Retrieval
+
+Record get/list/search/history are read-only and principal-scoped. List,
+search, history, and branch list use opaque query-bound cursors and page sizes
+from 1 through 100.
+
+Filter compilation accepts only manifest-declared domain fields:
+
+- exact scalar comparison;
+- one string member against declared membership `string_list`; and
+- no filter for annotations.
+
+Unknown, malformed, server-managed, annotation, or unsupported filters fail
+before SQL construction. No caller SQL, identifier, sort expression, or
+backend predicate crosses the port.
+
+The adapter hydrates `string_list` values as JSON arrays and projects no
+principal/owner field. Record/history JSON is bounded to 64 KiB.
+
+## Branch topology
+
+Branches are service-local topology above records. R3 stores branch metadata
+and principal/entity/record membership mappings.
+
+A branch has a UUID, unique principal-scoped 3–64 character lowercase
+alphanumeric-and-hyphen slug, title, intent, optional type, optional parent,
+status, retrieval summary, timestamps, and positive `branch_revision`. A slug
+starts with a letter and ends with an alphanumeric character. Parent references
+are restricted. Archiving or superseding is a status update; there is no branch
+delete operation.
+
+Each record has at most one primary branch and may have multiple related
+branches. Assignment/unassignment accepts 1–100 distinct targets, each with an
+expected record revision. The transaction:
+
+- validates branch and every target;
+- replaces prior primary membership when assigning primary;
+- adds/removes only requested related membership;
+- advances each effectively changed record once;
+- appends the corresponding record-history event; and
+- commits one completed replay result.
+
+The whole request succeeds or fails; there is no partial target set. Exact
+no-op behavior remains deterministic and does not create duplicate mappings.
+
+## Discovery reads
+
+Bootstrap is registry-only and never allocates, opens, inspects, or migrates a
+service store.
+
+Summary reads a ready service store using bounded `SELECT` operations:
+
+- truthful per-entity principal-scoped counts;
+- up to 20 values per declared domain facet;
+- up to 100 branch cards;
+- records lacking a primary branch; and
+- optional 0–3 principal-scoped record samples per entity.
+
+Manifest-derived affordances, authority-field availability, and query guidance
+come from the authoritative manifest, not from inferred database shape.
+
+Maintenance is deterministic, principal-scoped, bounded to 100 candidates, and
+read-only. It supports only declared/mechanical signals: expired validity,
+stale age, low numeric confidence, supersession, missing declared authority,
+unbranched records, exact duplicate authority references, and oversized
+declared annotations. A signal is unavailable when requisite fields are not
+declared. Maintenance stores no score and performs no update.
+
+## SQLite physical policy
+
+SQLite storage is supported on a local POSIX filesystem under one effective
+user. The location policy requires an operator-owned `0700` root and `0600`
+database/WAL/SHM files, rejects unsafe links/types/ownership, and uses
+descriptor-relative checks.
+
+Ready databases use persistent WAL, `synchronous=FULL`,
+`wal_autocheckpoint=1000`, a configured busy timeout from 1 through 30,000 ms,
+and SQLite `BEGIN IMMEDIATE` writer serialisation. Numeric BUSY-family outcomes
+map to bounded `storage_busy`; the adapter does not retry internally.
+
+SQLite operational sidecars are durable state. The adapter does not copy,
+delete, edit, or repair them. Network filesystems, multi-host sharing, Windows
+SQLite, and hostile same-user processes are unsupported.
+
+## Deferred adapter work
+
+The current ports do not imply implemented PostgreSQL, adapter discovery,
+export/import, online backup, repair, archive/resume, purge, an administration
+CLI, or a cross-store transaction. Those features require explicit contracts
+and validation rather than exposure of private SQLite modules.

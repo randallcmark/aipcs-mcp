@@ -23,7 +23,7 @@ from . import __version__
 from .errors import AipcsContractError, ErrorCode, error_from_validation
 from .manifest_v2 import RETIRED_INPUT_FIELDS, ManifestV2
 
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.2.0"
 PACKAGE_VERSION = __version__
 TRANSPORT_ENV_KEYS = ("AIPCS_TRANSPORT", "AIPCS_MCP_TRANSPORT")
 LISTENER_ENV_KEYS = (
@@ -200,6 +200,8 @@ class ServerFeatures(PublicModel):
     stdio_preflight: bool = True
     registry_lifecycle: bool = False
     materialisation_lifecycle: bool = False
+    record_runtime: bool = False
+    discovery_topology: bool = False
 
 
 class ServerInfo(PublicModel):
@@ -213,14 +215,24 @@ class ServerInfo(PublicModel):
 
 
 def public_server_info(
-    *, registry_lifecycle: bool = False, materialisation_lifecycle: bool = False
+    *,
+    registry_lifecycle: bool = False,
+    materialisation_lifecycle: bool = False,
+    record_runtime: bool = False,
+    discovery_topology: bool = False,
 ) -> ServerInfo:
     """Return a safe, snapshot-testable capability document."""
 
+    if record_runtime != discovery_topology or (
+        record_runtime and not (registry_lifecycle and materialisation_lifecycle)
+    ):
+        raise ValueError("The record and discovery runtime capabilities are all-or-nothing.")
     return ServerInfo(
         features=ServerFeatures(
             registry_lifecycle=registry_lifecycle,
             materialisation_lifecycle=materialisation_lifecycle,
+            record_runtime=record_runtime,
+            discovery_topology=discovery_topology,
         )
     )
 

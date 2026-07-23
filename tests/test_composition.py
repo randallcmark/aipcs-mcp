@@ -125,6 +125,14 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
             coordinator_clock = clock
             calls.append("coordinator")
 
+    class DataStore:
+        def __init__(self, value: object, **kwargs: object) -> None:
+            assert value is location
+            assert kwargs["busy_timeout_ms"] == 123
+            assert callable(kwargs["clock"])
+            assert callable(kwargs["record_ids"])
+            calls.append("data_store")
+
     server = object()
 
     def create(**kwargs: object) -> object:
@@ -134,6 +142,7 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
         assert kwargs["principal_id"] == "configured-principal"
         assert kwargs["registry_lifecycle"] is True
         assert kwargs["lifecycle_executor"] is coordinator
+        assert isinstance(kwargs["data_application"], runtime.DataApplication)
         calls.append("server")
         return server
 
@@ -142,9 +151,12 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
     monkeypatch.setattr(runtime, "SQLiteServiceStoreCatalog", Catalog)
     monkeypatch.setattr(runtime, "SQLiteDomainSchemaStore", Domain)
     monkeypatch.setattr(runtime, "LifecycleCoordinator", Coordinator)
+    monkeypatch.setattr(runtime, "SQLiteMaterialisedDataStore", DataStore)
     monkeypatch.setattr(runtime, "create_server", create)
     assert runtime.compose_server(_config(root, busy_timeout_ms=123)) is server
-    assert calls == ["location", "adapter", "migrate", "catalog", "domain", "coordinator", "server"]
+    assert calls == [
+        "location", "adapter", "migrate", "catalog", "domain", "coordinator", "data_store", "server"
+    ]
 
 
 def test_ready_sqlite_server_info_does_not_allocate_or_migrate_a_service_store(tmp_path: Path) -> None:
@@ -159,6 +171,20 @@ def test_ready_sqlite_server_info_does_not_allocate_or_migrate_a_service_store(t
         "aipcs_service_design",
         "aipcs_service_materialise",
         "aipcs_service_evolve",
+        "aipcs_record_create",
+        "aipcs_record_get",
+        "aipcs_record_list",
+        "aipcs_record_search",
+        "aipcs_record_update",
+        "aipcs_record_delete",
+        "aipcs_record_history",
+        "aipcs_bootstrap",
+        "aipcs_service_summary",
+        "aipcs_branch_create",
+        "aipcs_branch_list",
+        "aipcs_branch_update",
+        "aipcs_branch_assign_records",
+        "aipcs_maintenance_scan",
     ]
     assert (root / "registry.sqlite").is_file()
     assert not (root / "service-stores").exists()

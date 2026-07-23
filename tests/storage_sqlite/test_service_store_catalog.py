@@ -12,7 +12,11 @@ import pytest
 from storage_contracts.conformance import assert_service_store_catalog_conformance
 
 from aipcs_mcp.storage import MigrationState, ServiceStoreLocator, StorageContractError
-from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
+from aipcs_mcp.storage.errors import (
+    StorageMigrationError,
+    StorageTransientJournal,
+    StorageUnavailable,
+)
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
 from aipcs_mcp.storage.sqlite import service_store as catalog_module
 from aipcs_mcp.storage.sqlite import service_store_inspection as inspection_module
@@ -376,7 +380,7 @@ def test_postcommit_exception_is_bounded_and_idempotently_ready(
         with pytest.raises(StorageMigrationError) as captured:
             catalog.migrate(locator)
         _assert_bounded(captured.value, root)
-    assert catalog.inspect_migration(locator).status == "ready"
+    assert catalog.inspect_migration(locator).status == "outdated"
     assert catalog.migrate(locator).status == "ready"
 
 
@@ -424,12 +428,63 @@ def test_service_store_unsafe_sidecars_fail_closed(
         descriptor = os.open(sidecar, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.write(descriptor, b"synthetic-sidecar")
         os.close(descriptor)
-    with pytest.raises(StorageUnavailable):
+    with pytest.raises(StorageUnavailable) as inspected:
         catalog.inspect_migration(locator)
-    with pytest.raises(StorageUnavailable):
+    with pytest.raises(StorageUnavailable) as migrated:
         catalog.migrate(locator)
+    assert type(inspected.value) is StorageUnavailable
+    assert type(migrated.value) is StorageUnavailable
     assert sidecar.exists()
     assert str(root) not in repr(catalog)
+
+
+def test_safe_rollback_journal_has_narrow_transient_inspection_signal(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    container = root / "service-stores"
+    container.mkdir(mode=0o700)
+    locator = _locator()
+    database = _database(root, locator)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version=0")
+    database.chmod(0o600)
+    journal = Path(str(database) + "-journal")
+    journal.write_bytes(b"synthetic-journal")
+    journal.chmod(0o600)
+    before = database.read_bytes()
+
+    with pytest.raises(StorageTransientJournal) as captured:
+        _catalog(root).inspect_migration(locator)
+
+    _assert_bounded(captured.value, root)
+    assert journal.read_bytes() == b"synthetic-journal"
+    assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize("main_contents", [b"", b"not-a-sqlite-database"])
+def test_journal_with_non_sqlite_main_is_generic_unavailable(
+    tmp_path: Path, main_contents: bytes
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    container = root / "service-stores"
+    container.mkdir(mode=0o700)
+    locator = _locator()
+    database = _database(root, locator)
+    database.write_bytes(main_contents)
+    database.chmod(0o600)
+    journal = Path(str(database) + "-journal")
+    journal.write_bytes(b"synthetic-journal")
+    journal.chmod(0o600)
+
+    with pytest.raises(StorageUnavailable) as captured:
+        _catalog(root).inspect_migration(locator)
+
+    assert type(captured.value) is StorageUnavailable
+    assert database.read_bytes() == main_contents
+    assert journal.read_bytes() == b"synthetic-journal"
 
 
 def test_ready_wal_header_without_sidecars_is_inspectable(tmp_path: Path) -> None:

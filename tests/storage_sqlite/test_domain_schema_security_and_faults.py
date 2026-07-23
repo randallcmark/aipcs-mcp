@@ -34,6 +34,7 @@ from aipcs_mcp.storage import (
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
 from aipcs_mcp.storage.sqlite import domain_schema as domain_module
 from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
+from aipcs_mcp.storage.sqlite.service_store_migrations import R3 as SERVICE_STORE_R3
 
 
 def _locator(value: int = 1) -> ServiceStoreLocator:
@@ -429,11 +430,7 @@ def test_identity_and_reacquire_unavailability_take_precedence_after_domain_ddl(
                 "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name, 1, 7) <> 'sqlite_'"
             )
         }
-    assert names == {
-        "__aipcs_service_store_meta",
-        "__aipcs_service_store_migration",
-        "__aipcs_service_store_policy",
-    }
+        assert names == set(SERVICE_STORE_R3.table_xinfo)
 
     store, locator, root, _, specification = _ready(tmp_path)
     policy = store._location

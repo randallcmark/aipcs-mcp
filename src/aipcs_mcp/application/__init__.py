@@ -1,1 +1,1 @@
-"""Internal application boundary; no public runtime composition is supplied yet."""
+"""Backend-neutral application boundary for lifecycle and data operations."""

@@ -12,6 +12,7 @@ from mcp.server.stdio import stdio_server
 from pydantic import TypeAdapter
 
 from . import __version__
+from .application.data import DataApplication, SummaryView
 from .application.errors import Conflict, InternalFailure, InvalidCommand, InvalidState, NotFound
 from .application.models import (
     ApplicationContext,
@@ -39,7 +40,82 @@ from .contracts import (
     parse_service_seed,
     public_server_info,
 )
+from .data_requests import (
+    BootstrapRequest,
+    BranchAssignRecordsRequest,
+    BranchCreateRequest,
+    BranchListRequest,
+    BranchUpdateRequest,
+    MaintenanceScanRequest,
+    RecordCreateRequest,
+    RecordDeleteRequest,
+    RecordGetRequest,
+    RecordHistoryRequest,
+    RecordListRequest,
+    RecordSearchRequest,
+    RecordUpdateRequest,
+    ServiceSummaryRequest,
+    parse_bootstrap,
+    parse_branch_assign_records,
+    parse_branch_create,
+    parse_branch_list,
+    parse_branch_update,
+    parse_maintenance_scan,
+    parse_record_create,
+    parse_record_delete,
+    parse_record_get,
+    parse_record_history,
+    parse_record_list,
+    parse_record_search,
+    parse_record_update,
+    parse_service_summary,
+)
+from .data_results import (
+    BootstrapResult as PublicBootstrapResult,
+)
+from .data_results import (
+    BranchAssignmentResult as PublicBranchAssignmentResult,
+)
+from .data_results import (
+    BranchMutationResult as PublicBranchMutationResult,
+)
+from .data_results import (
+    BranchPageResult as PublicBranchPageResult,
+)
+from .data_results import (
+    MaintenanceResult as PublicMaintenanceResult,
+)
+from .data_results import (
+    RecordDeleteResult as PublicRecordDeleteResult,
+)
+from .data_results import (
+    RecordDocument,
+    project_bootstrap,
+    project_branch_assignment,
+    project_branch_mutation,
+    project_branch_page,
+    project_maintenance,
+    project_record_delete,
+    project_record_document,
+    project_record_history,
+    project_record_mutation,
+    project_record_page,
+    project_service_summary,
+)
+from .data_results import (
+    RecordHistoryResult as PublicRecordHistoryResult,
+)
+from .data_results import (
+    RecordMutationResult as PublicRecordMutationResult,
+)
+from .data_results import (
+    RecordPageResult as PublicRecordPageResult,
+)
+from .data_results import (
+    ServiceSummaryResult as PublicServiceSummaryResult,
+)
 from .errors import (
+    DATA_ERROR_CODES,
     AipcsContractError,
     ErrorCode,
     FailureEnvelope,
@@ -53,6 +129,24 @@ from .lifecycle import (
     LifecycleResultCategory,
     MaterialiseCommand,
     RecoveryState,
+)
+from .records import (
+    AssignBranchRecordsCommand,
+    BranchAssignmentTarget,
+    CreateBranchCommand,
+    CreateRecordCommand,
+    DataFailure,
+    DeleteRecordCommand,
+    FrozenJsonObject,
+    GetRecordQuery,
+    ListBranchesQuery,
+    ListRecordsQuery,
+    MaintenanceQuery,
+    PageCursor,
+    PageRequest,
+    RecordHistoryQuery,
+    UpdateBranchCommand,
+    UpdateRecordCommand,
 )
 
 
@@ -76,6 +170,24 @@ _EMPTY_SCHEMA: dict[str, object] = {
     "required": [],
     "additionalProperties": False,
 }
+_DATA_TOOL_NAMES = frozenset(
+    {
+        "aipcs_record_create",
+        "aipcs_record_get",
+        "aipcs_record_list",
+        "aipcs_record_search",
+        "aipcs_record_update",
+        "aipcs_record_delete",
+        "aipcs_record_history",
+        "aipcs_bootstrap",
+        "aipcs_service_summary",
+        "aipcs_branch_create",
+        "aipcs_branch_list",
+        "aipcs_branch_update",
+        "aipcs_branch_assign_records",
+        "aipcs_maintenance_scan",
+    }
+)
 _INTERNAL_RESULT = types.CallToolResult(
     content=[
         types.TextContent(
@@ -103,6 +215,7 @@ def create_server(
     principal_id: str | None = None,
     registry_lifecycle: bool = False,
     lifecycle_executor: LifecycleExecutor | None = None,
+    data_application: DataApplication | None = None,
 ) -> Server:
     """Build the finite server catalogue; configuration is composed elsewhere."""
 
@@ -115,8 +228,11 @@ def create_server(
     ):
         raise ValueError("Incomplete materialisation lifecycle binding.")
     materialisation_lifecycle = lifecycle_executor is not None
+    if data_application is not None and (not registry_lifecycle or not materialisation_lifecycle):
+        raise ValueError("Incomplete data runtime binding.")
+    data_runtime = data_application is not None
     server = Server("aipcs-mcp", version=__version__)
-    tools = _tools(registry_lifecycle, materialisation_lifecycle)
+    tools = _tools(registry_lifecycle, materialisation_lifecycle, data_runtime)
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
@@ -133,6 +249,7 @@ def create_server(
                 principal_id,
                 registry_lifecycle,
                 lifecycle_executor,
+                data_application,
             )
             return _result(envelope)
         except Exception:
@@ -148,7 +265,11 @@ async def run_stdio(server: Server) -> None:
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-def _tools(registry_lifecycle: bool, materialisation_lifecycle: bool = False) -> list[types.Tool]:
+def _tools(
+    registry_lifecycle: bool,
+    materialisation_lifecycle: bool = False,
+    data_runtime: bool = False,
+) -> list[types.Tool]:
     values = [
         _tool(
             "aipcs_server_info",
@@ -203,6 +324,25 @@ def _tools(registry_lifecycle: bool, materialisation_lifecycle: bool = False) ->
                 ),
             ]
         )
+    if data_runtime:
+        values.extend(
+            [
+                _tool("aipcs_record_create", "Create one record in a materialised service.", RecordCreateRequest, PublicRecordMutationResult),
+                _tool("aipcs_record_get", "Get one record by entity and identifier.", RecordGetRequest, RecordDocument),
+                _tool("aipcs_record_list", "List records with bounded exact branch scope.", RecordListRequest, PublicRecordPageResult),
+                _tool("aipcs_record_search", "Search records using declared exact filters.", RecordSearchRequest, PublicRecordPageResult),
+                _tool("aipcs_record_update", "Update one record with an exact version precondition.", RecordUpdateRequest, PublicRecordMutationResult),
+                _tool("aipcs_record_delete", "Delete one record with an exact version precondition.", RecordDeleteRequest, PublicRecordDeleteResult),
+                _tool("aipcs_record_history", "List bounded record history.", RecordHistoryRequest, PublicRecordHistoryResult),
+                _tool("aipcs_bootstrap", "Orient to service topology without reading service stores.", BootstrapRequest, PublicBootstrapResult),
+                _tool("aipcs_service_summary", "Summarise one materialised service with bounded discovery facts.", ServiceSummaryRequest, PublicServiceSummaryResult),
+                _tool("aipcs_branch_create", "Create one durable memory branch.", BranchCreateRequest, PublicBranchMutationResult),
+                _tool("aipcs_branch_list", "List direct memory branches with bounded pagination.", BranchListRequest, PublicBranchPageResult),
+                _tool("aipcs_branch_update", "Update one memory branch with an exact revision precondition.", BranchUpdateRequest, PublicBranchMutationResult),
+                _tool("aipcs_branch_assign_records", "Assign or unassign bounded records from one branch.", BranchAssignRecordsRequest, PublicBranchAssignmentResult),
+                _tool("aipcs_maintenance_scan", "Return bounded, read-only mechanical maintenance signals.", MaintenanceScanRequest, PublicMaintenanceResult),
+            ]
+        )
     return values
 
 
@@ -230,6 +370,7 @@ def _dispatch(
     principal_id: str | None,
     registry_lifecycle: bool,
     lifecycle_executor: LifecycleExecutor | None = None,
+    data_application: DataApplication | None = None,
 ) -> SuccessEnvelope | FailureEnvelope:
     if not isinstance(name, str):
         return _failure(ErrorCode.UNSUPPORTED_OPERATION, "The requested MCP tool is unavailable.")
@@ -244,12 +385,18 @@ def _dispatch(
             public_server_info(
                 registry_lifecycle=registry_lifecycle,
                 materialisation_lifecycle=lifecycle_executor is not None,
+                record_runtime=data_application is not None,
+                discovery_topology=data_application is not None,
             ).model_dump(mode="json")
         )
     if not registry_lifecycle or application is None or principal_id is None:
         return _failure(ErrorCode.UNSUPPORTED_OPERATION, "The requested MCP tool is unavailable.")
     context = ApplicationContext(principal_id=principal_id, created_via="mcp")
     try:
+        if name in _DATA_TOOL_NAMES:
+            if data_application is None:
+                return _failure(ErrorCode.UNSUPPORTED_OPERATION, "The requested MCP tool is unavailable.")
+            return _data_envelope(_dispatch_data(name, arguments, data_application, context))
         if name == "aipcs_service_seed":
             request = parse_service_seed(arguments)
             result = application.seed(
@@ -340,6 +487,178 @@ def _dispatch(
         return _failure(ErrorCode.INTERNAL_ERROR, "The request could not be completed safely.")
     try:
         return success(result.model_dump(mode="json", by_alias=True, warnings="error"))
+    except Exception:
+        return _failure(ErrorCode.INTERNAL_ERROR, "The request could not be completed safely.")
+
+
+def _dispatch_data(
+    name: str,
+    arguments: Mapping[str, object],
+    application: DataApplication,
+    context: ApplicationContext,
+) -> object:
+    """Parse strict request JSON and construct only detached pure data values."""
+
+    if name == "aipcs_record_create":
+        request = parse_record_create(arguments)
+        return _project_data(application.create_record(
+            context, request.service_id,
+            CreateRecordCommand(request.entity_name, FrozenJsonObject.from_mapping(request.record), request.idempotency_key),
+        ), project_record_mutation)
+    if name == "aipcs_record_get":
+        request = parse_record_get(arguments)
+        return _project_data(
+            application.get_record(context, request.service_id, GetRecordQuery(request.entity_name, request.record_id)),
+            project_record_document,
+        )
+    if name == "aipcs_record_list":
+        request = parse_record_list(arguments)
+        return _project_data(
+            application.list_records(
+                context, request.service_id,
+                ListRecordsQuery(request.entity_name, request.branch_id, request.branch_role, _page(request)),
+            ),
+            project_record_page,
+        )
+    if name == "aipcs_record_search":
+        request = parse_record_search(arguments)
+        return _project_data(
+            application.search_records_from_filters(
+                context, request.service_id, request.entity_name, request.filters,
+                branch_id=request.branch_id, branch_role=request.branch_role, page=_page(request),
+            ),
+            project_record_page,
+        )
+    if name == "aipcs_record_update":
+        request = parse_record_update(arguments)
+        return _project_data(application.update_record(
+            context, request.service_id,
+            UpdateRecordCommand(
+                request.entity_name, request.record_id, FrozenJsonObject.from_mapping(request.updates),
+                request.expected_record_version, request.idempotency_key,
+            ),
+        ), project_record_mutation)
+    if name == "aipcs_record_delete":
+        request = parse_record_delete(arguments)
+        return _project_data(application.delete_record(
+            context, request.service_id,
+            DeleteRecordCommand(
+                request.entity_name, request.record_id, request.expected_record_version, request.idempotency_key,
+            ),
+        ), project_record_delete)
+    if name == "aipcs_record_history":
+        request = parse_record_history(arguments)
+        return _project_data(application.record_history(
+            context, request.service_id, RecordHistoryQuery(request.entity_name, request.record_id, _page(request)),
+        ), project_record_history)
+    if name == "aipcs_bootstrap":
+        request = parse_bootstrap(arguments)
+        value = application.bootstrap(context, request.limit)
+        if type(value) is DataFailure:
+            return value
+        return project_bootstrap(value.services, value.truncated)
+    if name == "aipcs_service_summary":
+        request = parse_service_summary(arguments)
+        value = application.service_summary_sample(context, request.service_id, request.sample)
+        if type(value) is DataFailure:
+            return value
+        if type(value) is not SummaryView:
+            raise ValueError
+        return project_service_summary(value.summary, value.specification)
+    if name == "aipcs_branch_create":
+        request = parse_branch_create(arguments)
+        return _project_data(application.create_branch(
+            context, request.service_id,
+            CreateBranchCommand(
+                request.slug, request.title, request.intent, request.branch_type,
+                request.parent_branch_id, request.retrieval_summary, request.idempotency_key,
+            ),
+        ), project_branch_mutation)
+    if name == "aipcs_branch_list":
+        request = parse_branch_list(arguments)
+        return _project_data(application.list_branches(
+            context, request.service_id,
+            ListBranchesQuery(request.status, request.branch_type, request.parent_branch_id, _page(request)),
+        ), project_branch_page)
+    if name == "aipcs_branch_update":
+        request = parse_branch_update(arguments)
+        updates = request.updates.model_dump(exclude_unset=True)
+        if "parent_branch_id" in updates and updates["parent_branch_id"] is not None:
+            updates["parent_branch_id"] = str(updates["parent_branch_id"])
+        return _project_data(application.update_branch(
+            context, request.service_id,
+            UpdateBranchCommand(
+                request.branch_id, FrozenJsonObject.from_mapping(updates), request.expected_branch_revision,
+                request.idempotency_key,
+            ),
+        ), project_branch_mutation)
+    if name == "aipcs_branch_assign_records":
+        request = parse_branch_assign_records(arguments)
+        targets = tuple(
+            BranchAssignmentTarget(target.entity_name, target.record_id, target.expected_record_version)
+            for target in request.records
+        )
+        return _project_data(application.assign_branch_records(
+            context, request.service_id,
+            AssignBranchRecordsCommand(
+                request.branch_id, request.role, request.operation, targets, request.idempotency_key,
+            ),
+        ), project_branch_assignment)
+    if name == "aipcs_maintenance_scan":
+        request = parse_maintenance_scan(arguments)
+        scans = tuple(request.scan_types or (
+            "expired", "stale", "low_confidence", "superseded", "missing_authority", "unbranched",
+            "duplicate_authority", "blob_candidate",
+        ))
+        return _project_data(application.maintenance_scan(
+            context, request.service_id,
+            MaintenanceQuery(
+                scans, request.entity_name, request.branch_id, request.limit,
+                request.stale_after_days, request.low_confidence_below,
+            ),
+        ), project_maintenance)
+    raise ValueError
+
+
+def _page(request: Any) -> PageRequest:
+    cursor = request.cursor
+    limit = request.limit
+    return PageRequest(limit, None if cursor is None else PageCursor(cursor))
+
+
+def _project_data(value: object, projector: object) -> object:
+    if type(value) is DataFailure:
+        return value
+    if not callable(projector):
+        raise ValueError
+    return projector(value)
+
+
+_DATA_FAILURES: dict[str, tuple[ErrorCode, str, bool]] = {
+    "validation_failed": (ErrorCode.VALIDATION_FAILED, "Request failed public contract validation.", False),
+    "not_found": (ErrorCode.NOT_FOUND, "The requested record or branch was not found.", False),
+    "already_exists": (ErrorCode.ALREADY_EXISTS, "The requested record or branch already exists.", False),
+    "changed_fingerprint": (ErrorCode.CHANGED_FINGERPRINT, "The idempotency key cannot be reused for a different request.", False),
+    "stale_record_version": (ErrorCode.STALE_RECORD_VERSION, "The record version precondition is stale.", False),
+    "stale_branch_revision": (ErrorCode.STALE_BRANCH_REVISION, "The branch revision precondition is stale.", False),
+    "constraint_violation": (ErrorCode.CONSTRAINT_VIOLATION, "The requested data relationship is not permitted.", False),
+    "storage_migration_required": (ErrorCode.STORAGE_MIGRATION_REQUIRED, "Service storage requires migration.", False),
+    "storage_busy": (ErrorCode.STORAGE_BUSY, "Storage is temporarily busy.", True),
+    "operation_uncertain": (ErrorCode.OPERATION_UNCERTAIN, "The operation outcome is uncertain.", True),
+    "storage_unavailable": (ErrorCode.STORAGE_UNAVAILABLE, "Storage is unavailable.", False),
+    "internal_error": (ErrorCode.INTERNAL_ERROR, "The request could not be completed safely.", False),
+}
+
+
+def _data_envelope(value: object) -> SuccessEnvelope | FailureEnvelope:
+    if type(value) is DataFailure:
+        mapped = _DATA_FAILURES.get(value.code)
+        if mapped is None or mapped[0] not in DATA_ERROR_CODES:
+            return _failure(ErrorCode.INTERNAL_ERROR, "The request could not be completed safely.")
+        code, message, retryable = mapped
+        return FailureEnvelope(error={"code": code, "message": message, "retryable": retryable})
+    try:
+        return success(value.model_dump(mode="json", by_alias=True, warnings="error"))
     except Exception:
         return _failure(ErrorCode.INTERNAL_ERROR, "The request could not be completed safely.")
 

@@ -25,6 +25,10 @@ class StorageUnavailable(StorageError):
     message = "The requested storage is unavailable."
 
 
+class StorageTransientJournal(StorageUnavailable):
+    """A safe rollback journal blocks read-only inspection during migration."""
+
+
 class StorageBusy(StorageError):
     """SQLite reported bounded, retryable cross-process contention."""
 

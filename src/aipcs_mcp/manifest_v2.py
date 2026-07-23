@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from math import isfinite
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -16,6 +15,8 @@ from pydantic import (
     StrictStr,
     model_validator,
 )
+
+from .numeric_domain import is_exact_number, is_signed_64_integer
 
 MAX_ENTITIES = 32
 MAX_ATTRIBUTES_PER_ENTITY = 64
@@ -81,6 +82,11 @@ class AttributeDefinition(PublicModel):
             typed_values = [(type(value), value) for value in self.allowed_values]
             if len(typed_values) != len(set(typed_values)):
                 raise ValueError("allowed_values must not contain duplicates.")
+            if self.type == "number" and any(
+                type(value) is float and not is_exact_number(value)
+                for value in self.allowed_values
+            ):
+                raise ValueError("Numeric allowed_values must be finite.")
             if not all(
                 _allowed_value_matches_type(value, self.type) for value in self.allowed_values
             ):
@@ -92,8 +98,6 @@ class AttributeDefinition(PublicModel):
                 for value in self.allowed_values
             ):
                 raise ValueError("String allowed_values must contain 1 to 96 characters.")
-            if any(type(value) is float and not isfinite(value) for value in self.allowed_values):
-                raise ValueError("Numeric allowed_values must be finite.")
             if any(type(value) is str and "\x00" in value for value in self.allowed_values):
                 raise ValueError("String allowed_values must not contain NUL characters.")
         if self.retrieval_mode == "membership" and self.type != "string_list":
@@ -323,9 +327,9 @@ def _allowed_value_matches_type(value: AllowedValue, attribute_type: str) -> boo
     if attribute_type in {"string", "string_list"}:
         return type(value) is str
     if attribute_type == "integer":
-        return type(value) is int
+        return is_signed_64_integer(value)
     if attribute_type == "number":
-        return type(value) in {int, float}
+        return is_exact_number(value)
     if attribute_type == "boolean":
         return type(value) is bool
     return False

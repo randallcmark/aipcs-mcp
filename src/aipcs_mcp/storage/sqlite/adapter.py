@@ -209,6 +209,8 @@ class SQLiteRegistryAdapter:
             row = connection.execute("PRAGMA journal_mode=WAL").fetchone()
             if row is None or row[0] != "wal":
                 raise StorageMigrationError()
+            anchored.verify_live_database_identity()
+            anchored.record_connection_header_mode("wal")
             _require_policy_state(connection, WALPolicyState.PREPARED_WAL)
             anchored.adopt_live_sidecars(allow_journal=False)
             anchored.verify_live_sidecars(allow_journal=False)

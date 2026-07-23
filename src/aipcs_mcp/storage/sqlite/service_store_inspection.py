@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import suppress
+from enum import StrEnum
 
 from aipcs_mcp.storage.contracts import MigrationState
 from aipcs_mcp.storage.errors import StorageMigrationError
@@ -16,6 +17,7 @@ from .service_store_migrations import (
     R1,
     R2,
     R2_POLICY,
+    R3,
     RESERVED_PREFIX,
     TARGET_REVISION,
 )
@@ -24,13 +26,35 @@ from .wal_policy import (
     WALPolicyState,
     classify_wal_policy,
     history_matches,
+    journal_mode_matches,
+    policy_row_matches,
+    policy_table_matches,
 )
+
+
+class R3FoundationState(StrEnum):
+    """Exact R3 data-foundation evidence layered over the immutable R2 WAL policy."""
+
+    CLEAN_R2 = "clean_r2"
+    PREPARED_R3 = "prepared_r3"
+    READY_R3 = "ready_r3"
+    INCOMPATIBLE = "incompatible"
 
 
 def inspect_connection(
     connection: sqlite3.Connection, namespace: str, *, integrity: bool
 ) -> MigrationState:
     """Classify one open connection without changing its transaction ownership."""
+
+    r3_state, revision = classify_r3_foundation(connection, namespace)
+    if r3_state is R3FoundationState.READY_R3:
+        if integrity:
+            _quick_check(connection)
+        return _state(TARGET_REVISION, "ready")
+    if r3_state is R3FoundationState.PREPARED_R3:
+        return _state(revision, "dirty")
+    if r3_state is R3FoundationState.CLEAN_R2:
+        return _state(revision, "outdated")
 
     state, revision = classify_connection(connection, namespace)
     if state is WALPolicyState.READY_WAL:
@@ -46,6 +70,53 @@ def inspect_connection(
     if revision == 0 and _has_no_objects(connection):
         return _state(0, "uninitialised")
     return _state(revision, "incompatible")
+
+
+def classify_r3_foundation(
+    connection: sqlite3.Connection, namespace: str
+) -> tuple[R3FoundationState, int]:
+    """Classify only exact R2-to-R3 data-foundation states without changing storage."""
+
+    try:
+        objects = _objects(connection)
+        meta = _bound_meta(connection, objects, namespace)
+        revision = meta[0] if meta is not None else 0
+        dirty = meta[1] if meta is not None else -1
+        policy_sql, policy_rows = _policy_evidence(connection, objects)
+        policy_ready = (
+            policy_table_matches(policy_sql, R2_POLICY)
+            and policy_row_matches(policy_rows, R2_POLICY, "ready")
+            and journal_mode_matches(_journal_mode(connection), "wal")
+        )
+        if (
+            revision == R3.revision
+            and dirty == 0
+            and policy_ready
+            and _layout_matches(connection, objects, R3)
+            and history_matches(_history_rows(connection), "service_store", MIGRATIONS, R3.revision)
+        ):
+            return R3FoundationState.READY_R3, revision
+        if (
+            revision == R2.revision
+            and dirty == 1
+            and policy_ready
+            and _layout_matches(connection, objects, R3)
+            and history_matches(_history_rows(connection), "service_store", MIGRATIONS, R2.revision)
+        ):
+            return R3FoundationState.PREPARED_R3, revision
+        if (
+            revision == R2.revision
+            and dirty == 0
+            and policy_ready
+            and _layout_matches(connection, objects, R2)
+            and history_matches(_history_rows(connection), "service_store", MIGRATIONS, R2.revision)
+        ):
+            return R3FoundationState.CLEAN_R2, revision
+        return R3FoundationState.INCOMPATIBLE, revision
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise
+        return R3FoundationState.INCOMPATIBLE, 0
 
 
 def classify_connection(
@@ -181,6 +252,7 @@ def _layout_matches(
         table_xinfo = descriptor.table_xinfo  # type: ignore[attr-defined]
         index_list = descriptor.index_list  # type: ignore[attr-defined]
         index_xinfo = descriptor.index_xinfo  # type: ignore[attr-defined]
+        foreign_keys = descriptor.foreign_keys  # type: ignore[attr-defined]
         reserved = {row["name"]: row for row in objects if _is_reserved(row["name"])}
         if set(reserved) != set(expected_sql):
             return False
@@ -192,6 +264,9 @@ def _layout_matches(
             return False
         for table, expected in table_xinfo.items():
             if tuple(map(tuple, connection.execute(f'PRAGMA table_xinfo("{table}")'))) != expected:
+                return False
+        for table, expected in foreign_keys.items():
+            if tuple(map(tuple, connection.execute(f'PRAGMA foreign_key_list("{table}")'))) != expected:
                 return False
         for table, expected in index_list.items():
             rows = connection.execute(f'PRAGMA index_list("{table}")')

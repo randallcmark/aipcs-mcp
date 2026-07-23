@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from aipcs_mcp.storage.errors import StorageUnavailable
+from aipcs_mcp.storage.errors import StorageTransientJournal, StorageUnavailable
 
 _BASENAME = "registry.sqlite"
 _SERVICE_STORES = "service-stores"
@@ -33,6 +33,7 @@ class AnchoredLocation:
     _database_stat: os.stat_result | None
     journal_present: bool
     _database_name: str = _BASENAME
+    _acquired_header_mode: SQLiteHeaderMode | None = None
     _live_sidecars: dict[str, _FileIdentity] | None = None
 
     def __repr__(self) -> str:
@@ -115,6 +116,13 @@ class AnchoredLocation:
                 with suppress(OSError):
                     os.close(descriptor)
 
+    def record_connection_header_mode(self, mode: SQLiteHeaderMode) -> None:
+        """Cache an exact mode reported by an identity-verified SQLite handle."""
+
+        if mode not in {"delete", "wal"}:
+            raise StorageUnavailable()
+        self._acquired_header_mode = mode
+
     def adopt_live_sidecars(self, *, allow_journal: bool) -> None:
         """Record one safe observation of SQLite-owned operational siblings."""
 
@@ -122,6 +130,7 @@ class AnchoredLocation:
             self._root_fd,
             self._database_name,
             self._database_stat,
+            self._acquired_header_mode,
             allow_journal=allow_journal,
         )
 
@@ -138,6 +147,7 @@ class AnchoredLocation:
             self._root_fd,
             self._database_name,
             self._database_stat,
+            self._acquired_header_mode,
             allow_journal=allow_journal,
         )
 
@@ -148,6 +158,7 @@ class AnchoredLocation:
             self._root_fd,
             self._database_name,
             self._database_stat,
+            self._acquired_header_mode,
             allow_journal=allow_journal,
         )
 
@@ -214,12 +225,22 @@ class SQLiteLocationPolicy:
                 database_stat,
                 allow_journal=allow_journal,
             )
+            header_mode = (
+                _database_header_mode(root_fd, _BASENAME, database_stat)
+                if database_stat is not None
+                else None
+            )
             return AnchoredLocation(
                 root_fd,
                 self._root,
                 database_stat,
                 _JOURNAL_SUFFIX in sidecars,
+                _BASENAME,
+                header_mode,
             )
+        except StorageTransientJournal:
+            os.close(root_fd)
+            failure = StorageTransientJournal()
         except Exception:
             os.close(root_fd)
             failure = StorageUnavailable()
@@ -250,6 +271,11 @@ class SQLiteLocationPolicy:
                 database_stat,
                 allow_journal=allow_journal,
             )
+            header_mode = (
+                _database_header_mode(container_fd, database_name, database_stat)
+                if database_stat is not None
+                else None
+            )
             os.close(root_fd)
             root_fd = -1
             result = AnchoredLocation(
@@ -258,9 +284,12 @@ class SQLiteLocationPolicy:
                 database_stat,
                 _JOURNAL_SUFFIX in sidecars,
                 database_name,
+                header_mode,
             )
             container_fd = None
             return result
+        except StorageTransientJournal:
+            failure = StorageTransientJournal()
         except Exception:
             failure = StorageUnavailable()
         finally:
@@ -522,8 +551,6 @@ def _sidecars(
         value = _open_existing_file(root_fd, name, required=False)
         if value is None:
             continue
-        if suffix == _JOURNAL_SUFFIX and not allow_journal:
-            raise StorageUnavailable()
         found[suffix] = (value.st_dev, value.st_ino)
     if found and database_stat is None:
         raise StorageUnavailable()
@@ -540,6 +567,10 @@ def _sidecars(
         or header_mode == "wal"
     ):
         raise StorageUnavailable()
+    if _JOURNAL_SUFFIX in found and not allow_journal:
+        if header_mode == "delete":
+            raise StorageTransientJournal()
+        raise StorageUnavailable()
     return found
 
 
@@ -547,6 +578,7 @@ def _live_sidecars(
     root_fd: int,
     database_name: str,
     database_stat: os.stat_result | None,
+    acquired_header_mode: SQLiteHeaderMode | None,
     *,
     allow_journal: bool,
 ) -> dict[str, _FileIdentity]:
@@ -565,14 +597,16 @@ def _live_sidecars(
         except Exception:
             raise StorageUnavailable() from None
         _validate_file_stat(value)
-        if suffix == _JOURNAL_SUFFIX and not allow_journal:
-            raise StorageUnavailable()
         found[suffix] = (value.st_dev, value.st_ino)
     if found and database_stat is None:
         raise StorageUnavailable()
     if _JOURNAL_SUFFIX in found and (
         _WAL_SUFFIX in found or _SHM_SUFFIX in found
     ):
+        raise StorageUnavailable()
+    if _JOURNAL_SUFFIX in found and not allow_journal:
+        if acquired_header_mode == "delete":
+            raise StorageTransientJournal()
         raise StorageUnavailable()
     return found
 

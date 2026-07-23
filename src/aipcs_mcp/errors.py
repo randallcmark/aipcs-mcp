@@ -20,20 +20,46 @@ class ErrorCode(StrEnum):
     MANIFEST_VERSION_UNSUPPORTED = "manifest_version_unsupported"
     LEGACY_IMPORT_REQUIRED = "legacy_import_required"
     NOT_FOUND = "not_found"
+    ALREADY_EXISTS = "already_exists"
     INVALID_STATE = "invalid_state"
     UNSUPPORTED_OPERATION = "unsupported_operation"
     CONFLICT = "conflict"
     UNSUPPORTED_TRANSITION = "unsupported_transition"
     STALE_REVISION = "stale_revision"
+    STALE_RECORD_VERSION = "stale_record_version"
+    STALE_BRANCH_REVISION = "stale_branch_revision"
     CHANGED_FINGERPRINT = "changed_fingerprint"
+    CONSTRAINT_VIOLATION = "constraint_violation"
     OPERATION_IN_PROGRESS = "operation_in_progress"
     RECOVERY_REQUIRED = "recovery_required"
     STORAGE_BUSY = "storage_busy"
+    STORAGE_MIGRATION_REQUIRED = "storage_migration_required"
     OPERATION_UNCERTAIN = "operation_uncertain"
     STORAGE_UNAVAILABLE = "storage_unavailable"
     FORBIDDEN = "forbidden"
     TRANSPORT_NOT_SUPPORTED = "transport_not_supported"
     INTERNAL_ERROR = "internal_error"
+
+
+# Data-runtime operations intentionally use this closed vocabulary.  Lifecycle
+# compatibility errors remain defined above because those existing tools retain
+# their already-published behaviour.
+DATA_ERROR_CODES = frozenset(
+    {
+        ErrorCode.VALIDATION_FAILED,
+        ErrorCode.NOT_FOUND,
+        ErrorCode.ALREADY_EXISTS,
+        ErrorCode.CHANGED_FINGERPRINT,
+        ErrorCode.STALE_RECORD_VERSION,
+        ErrorCode.STALE_BRANCH_REVISION,
+        ErrorCode.CONSTRAINT_VIOLATION,
+        ErrorCode.STORAGE_MIGRATION_REQUIRED,
+        ErrorCode.STORAGE_BUSY,
+        ErrorCode.OPERATION_UNCERTAIN,
+        ErrorCode.STORAGE_UNAVAILABLE,
+        ErrorCode.INTERNAL_ERROR,
+    }
+)
 
 
 class ErrorIssue(PublicModel):

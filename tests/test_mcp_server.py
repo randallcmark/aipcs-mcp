@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import anyio
 import pytest
 from mcp import types
 
 import aipcs_mcp.mcp_server as mcp_server
+from aipcs_mcp.records import (
+    BranchMutationOutcome,
+    BranchValue,
+    CreateBranchCommand,
+    DataFailure,
+)
 
 _NAMES = [
     "aipcs_server_info",
@@ -134,6 +142,135 @@ def test_incomplete_lifecycle_binding_fails_during_construction() -> None:
         mcp_server.create_server(application=object(), principal_id="configured-principal")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="Incomplete materialisation lifecycle binding"):
         mcp_server.create_server(lifecycle_executor=object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Incomplete data runtime binding"):
+        mcp_server.create_server(data_application=object())  # type: ignore[arg-type]
+
+
+def test_complete_data_binding_exposes_exact_21_tools_and_fixed_context() -> None:
+    class Executor:
+        def execute(self, command: object) -> object:
+            raise AssertionError("data dispatch must not execute lifecycle work")
+
+    seen: list[tuple[object, object]] = []
+
+    class DataApplication:
+        def create_record(self, context: object, service_id: object, command: object) -> DataFailure:
+            seen.append((context, command))
+            return DataFailure("storage_busy")
+
+    server = mcp_server.create_server(
+        application=object(),  # type: ignore[arg-type]
+        principal_id="configured-principal",
+        registry_lifecycle=True,
+        lifecycle_executor=Executor(),  # type: ignore[arg-type]
+        data_application=DataApplication(),  # type: ignore[arg-type]
+    )
+    tools = anyio.run(_catalogue, server)
+    assert len(tools) == 21
+    assert [tool.name for tool in tools][-14:] == [
+        "aipcs_record_create", "aipcs_record_get", "aipcs_record_list", "aipcs_record_search",
+        "aipcs_record_update", "aipcs_record_delete", "aipcs_record_history", "aipcs_bootstrap",
+        "aipcs_service_summary", "aipcs_branch_create", "aipcs_branch_list", "aipcs_branch_update",
+        "aipcs_branch_assign_records", "aipcs_maintenance_scan",
+    ]
+    result = anyio.run(
+        _call,
+        server,
+        "aipcs_record_create",
+        {
+            "service_id": "00000000-0000-0000-0000-000000000101",
+            "entity_name": "project",
+            "record": {"title": "A"},
+            "idempotency_key": "create",
+        },
+    )
+    assert result.structuredContent["error"] == {
+        "code": "storage_busy", "message": "Storage is temporarily busy.", "issues": [], "retryable": True,
+    }
+    assert seen[0][0].principal_id == "configured-principal"
+    assert seen[0][0].created_via == "mcp"
+    assert seen[0][1].record.to_dict() == {"title": "A"}
+
+
+def test_public_branch_slug_boundaries_never_become_internal_errors() -> None:
+    class Executor:
+        def execute(self, command: object) -> object:
+            raise AssertionError("branch dispatch must not execute lifecycle work")
+
+    seen: list[CreateBranchCommand] = []
+
+    class DataApplication:
+        def create_branch(
+            self, context: object, service_id: object, command: CreateBranchCommand
+        ) -> BranchMutationOutcome:
+            seen.append(command)
+            now = datetime(2026, 7, 23, tzinfo=UTC)
+            return BranchMutationOutcome(
+                BranchValue(
+                    UUID("00000000-0000-0000-0000-000000000201"),
+                    command.slug,
+                    command.title,
+                    command.intent,
+                    command.branch_type,
+                    command.parent_branch_id,
+                    "active",
+                    command.retrieval_summary,
+                    now,
+                    now,
+                    1,
+                ),
+                False,
+            )
+
+    server = mcp_server.create_server(
+        application=object(),  # type: ignore[arg-type]
+        principal_id="configured-principal",
+        registry_lifecycle=True,
+        lifecycle_executor=Executor(),  # type: ignore[arg-type]
+        data_application=DataApplication(),  # type: ignore[arg-type]
+    )
+    valid_slug = "a" + "b" * 63
+    valid = anyio.run(
+        _call,
+        server,
+        "aipcs_branch_create",
+        {
+            "service_id": "00000000-0000-0000-0000-000000000101",
+            "slug": valid_slug,
+            "title": "Boundary",
+            "intent": "Exercise the published branch slug boundary.",
+            "idempotency_key": "branch-boundary-valid",
+        },
+    )
+    assert valid.isError is False
+    assert valid.structuredContent["result"]["branch"]["slug"] == valid_slug
+    assert seen == [
+        CreateBranchCommand(
+            valid_slug,
+            "Boundary",
+            "Exercise the published branch slug boundary.",
+            None,
+            None,
+            None,
+            "branch-boundary-valid",
+        )
+    ]
+
+    invalid = anyio.run(
+        _call,
+        server,
+        "aipcs_branch_create",
+        {
+            "service_id": "00000000-0000-0000-0000-000000000101",
+            "slug": "a" + "b" * 64,
+            "title": "Boundary",
+            "intent": "Reject an overlong branch slug.",
+            "idempotency_key": "branch-boundary-invalid",
+        },
+    )
+    assert invalid.isError is True
+    assert invalid.structuredContent["error"]["code"] == "validation_failed"
+    assert len(seen) == 1
 
 
 @pytest.mark.parametrize("fault", ["dispatch", "result"])

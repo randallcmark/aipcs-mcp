@@ -6,11 +6,12 @@ import sqlite3
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
+from typing import cast
 from urllib.parse import quote
 
-from aipcs_mcp.storage.errors import StorageBusy, StorageUnavailable
+from aipcs_mcp.storage.errors import StorageBusy, StorageTransientJournal, StorageUnavailable
 
-from .location import AnchoredLocation
+from .location import AnchoredLocation, SQLiteHeaderMode
 from .result_codes import is_sqlite_busy
 
 
@@ -103,7 +104,9 @@ def connect(
         _require_pragma(connection, "synchronous", 2)
         _require_pragma(connection, "wal_autocheckpoint", 1_000)
         _require_pragma(connection, "query_only", 1 if purpose.query_only else 0)
-        _require_journal_mode(connection, purpose.journal_modes)
+        header_mode = _require_journal_mode(connection, purpose.journal_modes)
+        location.verify_live_database_identity()
+        location.record_connection_header_mode(header_mode)
         location.adopt_live_sidecars(allow_journal=allow_journal)
         sidecars_adopted = True
         location.verify_live_sidecars(allow_journal=allow_journal)
@@ -111,22 +114,29 @@ def connect(
         return connection
     except Exception as error:
         unsafe_sidecars = False
+        transient_journal = isinstance(error, StorageTransientJournal)
         if connection is not None:
             try:
                 if sidecars_adopted:
                     location.verify_live_sidecars(allow_journal=allow_journal)
                 else:
                     location.adopt_live_sidecars(allow_journal=allow_journal)
+            except StorageTransientJournal:
+                pass
             except Exception:
                 unsafe_sidecars = True
             with suppress(Exception):
                 connection.close()
         try:
             location.verify_closed_sidecars(allow_journal=allow_journal)
+        except StorageTransientJournal:
+            pass
         except Exception:
             unsafe_sidecars = True
         if unsafe_sidecars:
             failure = StorageUnavailable()
+        elif transient_journal:
+            failure = StorageTransientJournal()
         elif isinstance(error, StorageBusy) or is_sqlite_busy(error):
             failure = StorageBusy()
         else:
@@ -168,7 +178,15 @@ def _require_pragma(connection: sqlite3.Connection, name: str, expected: object)
         raise ValueError
 
 
-def _require_journal_mode(connection: sqlite3.Connection, allowed: frozenset[str]) -> None:
+def _require_journal_mode(
+    connection: sqlite3.Connection, allowed: frozenset[str]
+) -> SQLiteHeaderMode:
     row = connection.execute("PRAGMA journal_mode").fetchone()
-    if row is None or type(row[0]) is not str or row[0].lower() not in allowed:
+    if (
+        row is None
+        or type(row[0]) is not str
+        or row[0].lower() not in {"delete", "wal"}
+        or row[0].lower() not in allowed
+    ):
         raise ValueError
+    return cast(SQLiteHeaderMode, row[0].lower())

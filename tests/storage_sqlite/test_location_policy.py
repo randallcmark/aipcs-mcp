@@ -12,7 +12,7 @@ import pytest
 
 from aipcs_mcp.configuration.models import ConfigOverrides
 from aipcs_mcp.configuration.resolver import resolve_configuration
-from aipcs_mcp.storage.errors import StorageUnavailable
+from aipcs_mcp.storage.errors import StorageTransientJournal, StorageUnavailable
 from aipcs_mcp.storage.sqlite import (
     SQLiteLocationPolicy,
     SQLiteRegistryAdapter,
@@ -434,6 +434,39 @@ def test_live_metadata_checks_never_open_or_close_sqlite_locked_files(
         connection.close()
         anchored.verify_database_identity()
         anchored.verify_closed_sidecars(allow_journal=False)
+        anchored.close()
+
+
+def test_late_safe_journal_uses_cached_header_without_opening_locked_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    database = root / "registry.sqlite"
+    with sqlite3.connect(database) as raw:
+        raw.execute("CREATE TABLE example (value INTEGER)")
+    database.chmod(0o600)
+    anchored = SQLiteLocationPolicy(root).acquire(
+        create_root=False,
+        allow_journal=False,
+    )
+    assert anchored is not None
+    journal = root / "registry.sqlite-journal"
+    journal.write_bytes(b"journal")
+    journal.chmod(0o600)
+    try:
+        with monkeypatch.context() as live:
+            live.setattr(
+                location_module.os,
+                "open",
+                lambda *args, **kwargs: pytest.fail(
+                    f"live validation opened SQLite file: {args!r} {kwargs!r}"
+                ),
+            )
+            with pytest.raises(StorageTransientJournal):
+                anchored.adopt_live_sidecars(allow_journal=False)
+    finally:
         anchored.close()
 
 

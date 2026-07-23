@@ -107,7 +107,7 @@ or `error`.
 | Profile | Structural availability | `serve` behavior |
 | --- | --- | --- |
 | stateless | Available | Starts a server-info-only stdio process. |
-| sqlite on Linux or macOS with SQLite 3.51.3+ | Available | Performs the sole explicit registry migration, then starts the seven-tool lifecycle server only if storage is ready; service stores are created only by admitted materialise/evolve calls. |
+| sqlite on Linux or macOS with SQLite 3.51.3+ | Available | Performs the sole explicit registry migration, then starts the 21-tool lifecycle/data server only if storage is ready; service stores are created by admitted materialise/evolve calls, and exact R2 service stores are upgraded to R3 only by admitted lifecycle/data/topology mutations. Read-side calls never migrate. |
 | sqlite on Windows | Unavailable | Rejected before server construction. |
 | postgresql | Unavailable | Rejected before server construction. |
 

@@ -20,6 +20,14 @@ from aipcs_mcp.storage.sqlite import (
     SQLiteRegistryAdapter,
     SQLiteServiceStoreCatalog,
 )
+from aipcs_mcp.storage.sqlite.service_store_migrations import (
+    META,
+    MIGRATION,
+    R3_BRANCH_TABLE,
+    R3_HISTORY_TABLE,
+    R3_MUTATION_TABLE,
+    R3_RECORD_BRANCH_TABLE,
+)
 
 _TOOL_NAMES = [
     "aipcs_server_info",
@@ -29,6 +37,20 @@ _TOOL_NAMES = [
     "aipcs_service_design",
     "aipcs_service_materialise",
     "aipcs_service_evolve",
+    "aipcs_record_create",
+    "aipcs_record_get",
+    "aipcs_record_list",
+    "aipcs_record_search",
+    "aipcs_record_update",
+    "aipcs_record_delete",
+    "aipcs_record_history",
+    "aipcs_bootstrap",
+    "aipcs_service_summary",
+    "aipcs_branch_create",
+    "aipcs_branch_list",
+    "aipcs_branch_update",
+    "aipcs_branch_assign_records",
+    "aipcs_maintenance_scan",
 ]
 _PRIVATE_FIELDS = {
     "principal_id",
@@ -95,6 +117,38 @@ def _prepare_materialise(
         uow.close()
 
 
+def _seed_exact_clean_r2(root: Path, service_id: str) -> None:
+    catalog = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(root))
+    locator = catalog.allocate(UUID(service_id))
+    assert catalog.migrate(locator).status == "ready"
+    database = root / "service-stores" / f"{locator.namespace}.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        for table in (
+            R3_RECORD_BRANCH_TABLE,
+            R3_BRANCH_TABLE,
+            R3_HISTORY_TABLE,
+            R3_MUTATION_TABLE,
+        ):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute(
+            f'DELETE FROM "{MIGRATION}" WHERE "component"=? AND "revision"=?',
+            ("service_store", 3),
+        )
+        connection.execute(
+            f'UPDATE "{META}" SET "applied_revision"=2,"dirty"=0 WHERE "singleton"=1'
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    state = catalog.inspect_migration(locator)
+    assert (state.applied_revision, state.target_revision, state.status) == (
+        2,
+        3,
+        "outdated",
+    )
+
+
 def _assert_no_private_fields(value: object) -> None:
     if isinstance(value, dict):
         assert _PRIVATE_FIELDS.isdisjoint(value)
@@ -147,9 +201,11 @@ def test_sqlite_ready_lifecycle_and_design(tmp_path: Path) -> None:
             info, failed = await call_envelope(session, "aipcs_server_info", {})
             assert failed is False
             capability = successful(info)
-            assert capability["aipcs_mcp_contract"] == "1.1.0"
+            assert capability["aipcs_mcp_contract"] == "1.2.0"
             assert capability["features"]["registry_lifecycle"] is True
             assert capability["features"]["materialisation_lifecycle"] is True
+            assert capability["features"]["record_runtime"] is True
+            assert capability["features"]["discovery_topology"] is True
 
             seeded_envelope, failed = await call_envelope(
                 session, "aipcs_service_seed", _seed("seed-a")
@@ -508,6 +564,7 @@ def test_two_same_key_stdio_processes_resume_one_prepared_materialise_once(tmp_p
 
     service_id = anyio.run(seed_and_design)
     _prepare_materialise(root, principal, service_id, request_key)
+    _seed_exact_clean_r2(root, service_id)
     request = {
         "service_id": service_id,
         "expected_service_revision": 2,
@@ -529,10 +586,32 @@ def test_two_same_key_stdio_processes_resume_one_prepared_materialise_once(tmp_p
 
     outcomes = anyio.run(cooperate)
     assert len(outcomes) == 2
-    assert all(failed is False for _envelope, failed in outcomes)
-    first, second = (successful(envelope) for envelope, _failed in outcomes)
-    assert first == second
-    _assert_public_metadata(first, revision=3, schema_version=1, materialised=True)
+    initial_completed: list[dict[str, object]] = []
+    for envelope, failed in outcomes:
+        if failed:
+            assert envelope["result"] is None
+            error = envelope["error"]
+            assert isinstance(error, dict)
+            assert error["code"] in {"operation_uncertain", "storage_busy"}, outcomes
+            assert error["retryable"] is True
+        else:
+            initial_completed.append(successful(envelope))
+
+    async def retry_and_replay() -> list[tuple[dict[str, object], bool]]:
+        async with async_session(sqlite_parameters(root, principal)) as session:
+            return [
+                await call_envelope(session, "aipcs_service_materialise", request),
+                await call_envelope(session, "aipcs_service_materialise", request),
+            ]
+
+    final_outcomes = anyio.run(retry_and_replay)
+    assert all(failed is False for _envelope, failed in final_outcomes), final_outcomes
+    final, replay = (
+        successful(envelope) for envelope, _failed in final_outcomes
+    )
+    assert final == replay
+    assert all(completed == final for completed in initial_completed)
+    _assert_public_metadata(final, revision=3, schema_version=1, materialised=True)
 
     with sqlite3.connect(root / "registry.sqlite") as connection:
         service = connection.execute(

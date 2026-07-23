@@ -34,6 +34,7 @@ from aipcs_mcp.storage.sqlite.service_store_migrations import META as SERVICE_ST
 from aipcs_mcp.storage.sqlite.service_store_migrations import MIGRATION as SERVICE_STORE_MIGRATION
 from aipcs_mcp.storage.sqlite.service_store_migrations import R1 as SERVICE_STORE_R1
 from aipcs_mcp.storage.sqlite.service_store_migrations import R2 as SERVICE_STORE_R2
+from aipcs_mcp.storage.sqlite.service_store_migrations import R3 as SERVICE_STORE_R3
 
 _WATCHDOG_SECONDS = 8.0
 _ALLOWED_STATES = frozenset(
@@ -685,7 +686,20 @@ def test_two_processes_converge_on_one_exact_service_store_history(
         _event(second_peer, "BEGIN_ATTEMPT")
         results = [_result(first_peer), _result(second_peer)]
         outcomes = [result["outcome"] for result in results]
-        assert Counter(outcomes) == Counter(["ready", "ready"]), results
+        # A fresh-store contender can legitimately meet the other writer at
+        # the required PASSIVE checkpoint.  That indicator is a bounded
+        # StorageBusy result and the adapter deliberately has no retry loop.
+        # Require one exact winner and reject every other failure category;
+        # the final observation below proves the shared target converged.
+        assert "ready" in outcomes, results
+        assert all(
+            result["outcome"] == "ready"
+            or (
+                result["outcome"] == "error"
+                and result.get("error") == "StorageBusy"
+            )
+            for result in results
+        ), results
         _exit(first, first_peer)
         _exit(second, second_peer)
     finally:
@@ -699,6 +713,7 @@ def test_two_processes_converge_on_one_exact_service_store_history(
     assert _service_store_history(database) == [
         (SERVICE_STORE_R1.revision, SERVICE_STORE_R1.migration_id, SERVICE_STORE_R1.checksum),
         (SERVICE_STORE_R2.revision, SERVICE_STORE_R2.migration_id, SERVICE_STORE_R2.checksum),
+        (SERVICE_STORE_R3.revision, SERVICE_STORE_R3.migration_id, SERVICE_STORE_R3.checksum),
     ]
     if predecessor:
         with sqlite3.connect(database) as connection:

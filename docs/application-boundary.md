@@ -1,174 +1,146 @@
 # Application boundary
 
-The application boundary is an internal construction seam. It separates stdio
-MCP and CLI adapters from registry lifecycle use cases and keeps storage
-mechanics outside the application layer. It is not a public adapter extension
-mechanism or a standalone administration API.
+The application boundary separates MCP request/projection code from registry,
+lifecycle, and materialised-data storage. It is an internal construction seam,
+not a public adapter plugin or administration API.
 
 ## Principal context
 
-Every lifecycle use case receives an explicit opaque `principal_id` and
-`created_via` context from its transport adapter. The SQLite stdio transport
-uses one configured principal for its full process lifetime and fixes
-`created_via` to `mcp`. Neither value is request-controlled or publicly
-observable. The application must not infer identity, ownership, or authority
-from environment values, filesystem state, connection details, or a storage
-backend. This keeps ownership checks testable and allows future authentication
-work to remain a transport concern.
+Every use case receives an opaque `principal_id` and fixed `created_via`
+context from the transport. The SQLite stdio process uses one configured
+principal for its lifetime and fixes `created_via` to `mcp`. Neither value is
+request-controlled. Principal identity is never projected in tools, errors,
+configuration reports, logs, or representations.
 
-## Unit of work ownership
+Ownership is therefore explicit at the port boundary. Application code does
+not infer it from the operating-system user, environment, current directory,
+filesystem path, database, or MCP client.
 
-A service seed or initial-design mutation, its idempotency-ledger outcome, and
-its metadata-only audit entry belong to the same unit of work. The application
-use case owns the requested operation and business outcome; the adapter owns
-transaction scope, rollback, and durable commit. A failed ledger or audit write
-must fail the mutation rather than leave an unaccounted state change.
+## Cohesive application seams
 
-The SQLite registry provides the current production unit of work, mutation
-ledger, and metadata-only audit store for seed and initial-design operations.
-It does not provide a service-store or record unit of work. The packaged
-private SQLite service-store catalog is not injected into the application and
-has no application port for materialisation or records. The private
-`DomainSchemaStore` relational-schema protocol is composed only by the
-top-level transport-neutral lifecycle coordinator; that coordinator remains
-outside the registry-only `application/` package and outside runtime, MCP, CLI,
-and configuration. A successfully acquired registry unit is always closed
-exactly once. `commit()` and `rollback()`
-terminate its transaction attempt; `close()` releases resources and performs
-adapter-safe cleanup of an unterminated attempt. The application preserves the
-original failure when rollback or close also fail. A close failure after an
-otherwise successful operation is a bounded internal failure. A commit failure
-has indeterminate durable outcome, so callers retry through idempotency rather
-than assuming a rollback erased it.
+The registry application owns:
 
-## Independent versions
+- seed, list, inspect, and initial design;
+- service metadata and current authoritative manifest;
+- server-owned `service_revision`;
+- registry idempotency and metadata-only audit; and
+- lifecycle admission/finalisation repositories.
 
-The current application keeps version dimensions separate:
+The transport-neutral lifecycle coordinator owns materialise/evolve use cases.
+It prepares registry intent, closes the registry unit of work, performs exact
+service-store and domain actions, re-observes state, then finalises through a
+fresh registry unit of work.
 
-- `manifest_version` describes the schema-document interpretation; normal public design input is
-  manifest v2.
-- `schema_version` describes agent-defined additive evolution and is a lifecycle concurrency
-  input, not a manifest or MCP compatibility version.
-- The server-owned `service_revision` is the lifecycle compare-and-swap revision; a successful
-  design/materialise/evolve/operational transition increments it once, while exact replay does not.
-- A future `record_version` is a per-record mutation revision reserved for V1-08F.
-- Adapter migration revisions describe physical storage layout and adapter-owned migration state.
+The data application owns generic record, branch, discovery, and maintenance
+use cases. It receives the registry-authoritative materialised service and a
+detached pure `RecordSpecification`, then delegates to a backend-neutral
+materialised-data store. It does not parse SQL, paths, DSNs, connections, or
+driver errors.
 
-Cross-store operation state (`prepared`, `completed`, or `recovery_required`) is distinct
-from all of these values. A schema change is not an adapter migration, and neither is a substitute
-for a durable operation/recovery record.
+## Transaction and replay ownership
 
-The service-store catalog demonstrates that separation: its private
-R2 WAL-ready foundation can make adapter metadata ready without reading a
-manifest or changing registry state. Such a database is not a materialised
-service. Direct initialisation may leave it orphaned because it bypasses the
-private coordinator and its durable operation record.
+Seed/design mutations, their replay evidence, and their metadata-only audit
+entry commit in one registry unit of work.
 
-The relational specification is also not a second schema authority. It is an
-immutable, backend-neutral projection supplied by the registry-authoritative
-manifest at the point an adapter needs comparison. No schema ledger,
-manifest copy, schema-version row, or fingerprint is introduced into a service
-store by this boundary.
+Materialise/evolve are cross-store lifecycle operations. Registry intent is
+the only transition-lock and recovery authority and may be `prepared`,
+`completed`, or `recovery_required`. A prepared intent commits before physical
+service-store I/O. There is deliberately no cross-database transaction, hidden
+process mutex, or second current-manifest ledger.
 
-## Private lifecycle coordination and public boundary
+Record and topology mutations are different. Their service-local R3 mutation
+ledger stores only completed outcomes and commits atomically with the record,
+history, branch, or assignment change. The key namespace is
+`(principal_id, idempotency_key)` within that service store, so changing the
+operation or payload under the same key fails. Exact retries replay the
+completed result. This ledger has no prepared phase, schema authority,
+lifecycle blocker, recovery state, or cross-store role.
 
-V1-08A froze materialise/evolve use cases, V1-08D implemented them behind a
-private coordinator, and V1-08E composes that coordinator through two generic
-MCP tools in the ready SQLite runtime. Materialise
-requires `service_id`, `expected_service_revision`, `expected_schema_version`,
-and an idempotency key. Evolve requires the same inputs plus a complete, deeply
-validated adjacent manifest-v2 target; it does not accept SQL, a migration
-delta, or history prose. Admission validates and detaches the request, computes
-the principal-scoped fingerprint, and resolves any existing idempotency
-claim before reading current expected revisions. Exact completed claims replay even after their
-successful operation incremented the service revision.
+A potentially committed failure is never guessed from exception text.
+Lifecycle may return `operation_uncertain`; a local mutation retry uses the
+same request and key to discover a completed replay or safely retry. The
+physical `dirty` observation is deliberately coarse and can describe valid
+peer progress, so repeated dirt after the bounded reconciliation budget
+returns retryable uncertainty and leaves the registry intent prepared. It is
+not terminal recovery evidence.
 
-The registry intent is the only cross-store recovery and transition-lock authority. It may
-retain one immutable admitted target snapshot, but that evidence never becomes a second current
-manifest. The private coordinator adopts an exact contained physical target only within the documented
-same-operating-system-owner boundary, because no domain provenance seal exists to distinguish a prior
-exact target from a crash-completed one. It must report recovery-required rather than infer or
-repair deleted, partial, extra, altered, or incompatible state. New work proves
-relational support before prepared insertion, commits and closes prepared
-registry intent before service-store I/O, and drives finite actions from fresh
-observation through the pure recovery planner. MCP only parses typed commands,
-invokes the coordinator, and maps its bounded result. The operation evidence,
-physical adapters, and recovery mechanics remain private, and there is no
-recovery command.
+An exact `outdated` foundation is also resumable for a prepared materialise
+intent. It can be the clean predecessor committed by a cooperating migration
+before the exact target revision becomes visible. The coordinator migrates it
+through the adapter boundary, re-observes the foundation, and only then
+inspects or creates the domain schema. It does not mark the registry intent
+recovery-required merely because this predecessor window was observed.
 
-### V1-08B durable registry prerequisite
+## Independent revisions
 
-V1-08B is the private registry-only prerequisite for that coordinator. Its SQLite registry R2
-migration is sequential and transactional: it accepts only an exact, clean, public-reachable R1
-registry, preserves the immutable R1 migration evidence, and otherwise fails closed. R1 is not
-silently treated as R2, and an interrupted, altered, partial, unknown, newer, or privately
-injected registry has no repair path in this slice. Fresh registry creation applies the same R1
-then R2 migration history. The public migration-state vocabulary remains bounded; an exact R1
-observed below the target is not a new public "upgradeable" state.
+The application keeps these dimensions separate:
 
-R2 gives every service a server-owned `service_revision`, beginning at 1 for migrated
-and newly seeded services. Lifecycle-relevant registry changes use it as a compare-and-swap
-counter; exact replay and failed or stale work do not advance it. R2 also reserves the existing
-public nullable materialisation fields for a safe logical storage projection: a closed backend
-name and opaque `svc_` namespace, never a path, endpoint, DSN, credential, or service-store
-ledger. Current service projections expose the revision and aggregate recovery
-state; `materialised_at` and `storage` remain null until materialise completes.
+- `manifest_version`: interpretation of the schema document;
+- `schema_version`: agent-authored additive schema evolution;
+- `service_revision`: lifecycle compare-and-swap revision;
+- `record_version`: per-record mutation and topology revision;
+- `branch_revision`: branch metadata compare-and-swap revision;
+- adapter revision: private physical storage layout; and
+- `aipcs_mcp_contract`: public MCP shape and behavior.
 
-R2 generalises the one global `(principal_id, idempotency_key)` mutation ledger rather than adding
-a lifecycle ledger or key namespace. Historical seed/design rows remain strict completed `legacy`
-replays with their stored result bytes unchanged. Materialise/evolve evidence has only the
-phase `prepared`, `completed`, or `recovery_required`; a prepared intent acts as the per-service
-transition blocker, recovery-required remains blocked for explicit future reconciliation, and only
-completion releases the blocker. This is durable registry evidence only:
-V1-08B does not observe a service store, reconcile a target, run a coordinator, or make an
-operation runnable.
+A successful service lifecycle transition increments `service_revision` once.
+A successful record mutation increments `record_version` once. An effective
+branch assignment/unassignment is a record mutation and advances every affected
+record once. A branch metadata update increments `branch_revision`. Exact
+completed replays and no-op failures do not advance revisions.
 
-Registry audit remains metadata-only. R2 retains the newest 1,000 audit rows per principal by
-`audit_id`, trimming historical over-cap rows during migration and older rows for that principal
-with the audit append transaction. It never prunes idempotency or lifecycle evidence, has no audit
-query API, and adds no configuration, environment, CLI, or MCP control.
+## Record and branch behavior
 
-Their frozen result meaning is also exact: malformed input, unsupported transition, stale
-expected revision, changed-fingerprint reuse, recovery-required, storage-unavailable, and generic
-internal failure are non-retryable; storage-busy, different-key operation-in-progress, and
-operation-uncertain are retryable. An exact same-key prepared claim resumes reconciliation rather
-than returning operation-in-progress.
+The pure record contract validates domain values before the adapter sees them.
+Server-managed identity, principal, timestamps, provenance, and record revision
+are not caller fields. Relationships and constraints are enforced in the same
+local transaction as the mutation.
 
-## Migration and serving rule
+Record list/search/history and branch list are bounded cursor reads. Cursors
+are opaque, query-bound values created below the transport seam. Search filters
+are compiled only from declared fields:
 
-A SQLite adapter applies its required registry migration once before it reports
-the process ready to serve. Migration failure prevents MCP construction. The
-ready runtime then constructs the service-store catalog, domain-schema store,
-and coordinator without allocating, inspecting, or migrating a service store.
-Read operations do not execute DDL, and opening a unit of work does not
-opportunistically alter storage layout.
+- scalar equality;
+- one-string membership for declared `string_list` membership fields; and
+- no filter for annotations or server-managed fields.
 
-V1-08B did not alter the runtime composition rule, configuration, MCP tool
-registration, SQLite WAL settings, busy policy, or service-store behavior.
-V1-08C subsequently fixes the registry at R3 and the private service-store
-foundation at R2 with persistent WAL, `synchronous=FULL`, a 1..30,000 ms
-busy timeout (default 5,000), and no adapter retry after `StorageBusy`. It
-did not alter runtime composition, MCP registration, or public service-store
-behavior. V1-08D packaged the private coordinator; V1-08E composes it without
-changing physical migration revisions.
+Branches form server-managed topology above records. A record may have one
+primary branch and many related branches. Assigning primary replaces the
+previous primary. Related assignment adds membership. Assignment requests are
+bounded, all-or-nothing, idempotent, and carry an expected record revision for
+each target. Effective topology changes append record-history events.
 
-The application layer requests behavior through its boundary; it never creates
-tables, parses storage locations, opens database connections, or selects a
-backend.
+## Discovery and maintenance
 
-See [storage contracts](storage-contracts.md) for the pure adapter vocabulary
-and migration-state boundary.
+Bootstrap is a registry-only application read. It returns bounded shape cards
+and never allocates, opens, inspects, or migrates service storage.
 
-## Current capability
+Summary combines manifest-derived affordances with data-store observations:
+record counts, declared domain facets, branch cards, unbranched count, and
+optional 0–3 samples per entity. For an exact R2 service store it returns
+`data_status: "migration_required"` and does not invent zero counts.
 
-Stateless exposes only `aipcs_server_info` over stdio. A ready SQLite profile
-adds seed, list, inspect, design, materialise, and evolve. Design validates and stores an initial
-manifest but does not apply it to physical tables: a resulting service remains
-`seeded`, has no storage projection, and cannot hold records. Materialise and
-evolve call the top-level coordinator without bringing storage mechanics into
-the registry-only application package. There is no standalone lifecycle/admin
-CLI, record API, export/import, public repair, PostgreSQL, remote transport, or
-adapter discovery mechanism. The concrete catalog/domain adapters and
-coordinator internals remain outside the application and public object surface.
+Maintenance is a deterministic read over declared/mechanical facts. It may
+report expired, stale-age, low-confidence, superseded, missing-authority,
+unbranched, duplicate-authority, and annotation-blob candidates. It never
+mutates data or decides truth, relevance, merge, archival, or deletion.
 
-See [compatibility](compatibility.md) and [security](security.md).
+## Migration and serving rules
+
+`serve` explicitly migrates the registry before MCP construction. Runtime
+composition alone does not touch service stores.
+
+Service-store reads perform no DDL. Missing/unready data operations fail
+safely. An exact clean R2 service store is reported as migration-required.
+Only an admitted lifecycle, record, or topology mutation may request the exact
+R2-to-R3 migration. A prepared materialise intent can resume the clean R2
+intermediate committed by its own or a cooperating migration; read-side calls
+still never upgrade it. Altered, generic dirty, partial, unknown, or future
+foundations remain fail-closed.
+
+The application layer never creates tables itself, discovers storage plugins,
+or exposes concrete adapters. SQLite catalog, relational, record, topology,
+and discovery implementations remain private compositions behind the ports.
+
+See [storage contracts](storage-contracts.md),
+[security](security.md), and [compatibility](compatibility.md).

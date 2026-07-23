@@ -560,20 +560,41 @@ def run_source_gates(
 ) -> tuple[StageResult, ...]:
     """Run direct source gates.  This function never invokes this verifier."""
 
+    source_environment = dict(environment)
+    source_environment["PYTHONPATH"] = str(root / "src")
     commands = (
         ("git diff --check", ["git", "diff", "--check"]),
         ("git diff --cached --check", ["git", "diff", "--cached", "--check"]),
         ("git fsck", ["git", "fsck", "--no-dangling"]),
         ("public hygiene", [sys.executable, "scripts/check_public_hygiene.py", "--history"]),
         (
-            "pytest",
+            "source environment",
             [
                 uv,
-                "run",
+                "sync",
                 "--locked",
                 "--offline",
                 "--extra",
                 "dev",
+                "--no-install-project",
+            ],
+        ),
+        (
+            "application boundaries",
+            [
+                uv,
+                "run",
+                "--no-sync",
+                "python",
+                "scripts/check_application_boundaries.py",
+            ],
+        ),
+        (
+            "pytest",
+            [
+                uv,
+                "run",
+                "--no-sync",
                 "pytest",
                 "-q",
                 "-p",
@@ -585,10 +606,7 @@ def run_source_gates(
             [
                 uv,
                 "run",
-                "--locked",
-                "--offline",
-                "--extra",
-                "dev",
+                "--no-sync",
                 "ruff",
                 "check",
                 ".",
@@ -601,7 +619,7 @@ def run_source_gates(
             label,
             command,
             cwd=root,
-            environment=environment,
+            environment=source_environment,
             redaction_roots=redaction_roots,
         )
         for label, command in commands
@@ -704,34 +722,120 @@ def prove_site_packages_import(
 
 
 def _smoke_client_program() -> str:
-    """Standalone installed public-lifecycle proof with no checkout test imports."""
+    """Standalone installed public 1.2 lifecycle, data, restart, and isolation proof."""
 
     return r"""
 import json
 import sqlite3
 import sys
 from pathlib import Path
+
 import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-exe, root, principal, mode = sys.argv[1:]
-manifest = {"manifest_version": 2, "schema_version": 1, "entities": [{"name": "note", "attributes": [{"name": "id", "type": "uuid", "required": True, "primary_key": True}, {"name": "owner_id", "type": "string", "required": True}, {"name": "created_at", "type": "datetime", "required": True}, {"name": "updated_at", "type": "datetime", "required": True}, {"name": "created_via", "type": "string", "required": True}, {"name": "record_version", "type": "integer", "required": True}, {"name": "title", "type": "string", "required": True}]}], "relationships": [], "indices": [], "query_patterns": [], "discovery_facets": [], "migration_history": []}
+exe, root_text, principal, mode = sys.argv[1:]
+root = Path(root_text)
+state_path = root.parent / f"{root.name}-release-data-state.json"
+managed = [
+    {"name": "id", "type": "uuid", "required": True, "primary_key": True},
+    {"name": "owner_id", "type": "string", "required": True},
+    {"name": "created_at", "type": "datetime", "required": True},
+    {"name": "updated_at", "type": "datetime", "required": True},
+    {"name": "created_via", "type": "string", "required": True},
+    {"name": "record_version", "type": "integer", "required": True},
+]
+manifest = {
+    "manifest_version": 2,
+    "schema_version": 1,
+    "entities": [{
+        "name": "note",
+        "attributes": managed + [
+            {"name": "title", "type": "string", "required": True},
+            {"name": "category", "type": "string", "required": True},
+            {"name": "tags", "type": "string_list", "retrieval_mode": "membership"},
+            {"name": "status", "type": "string"},
+            {"name": "confidence", "type": "number"},
+        ],
+    }],
+    "relationships": [],
+    "indices": [{
+        "name": "note_owner_category_idx",
+        "entity": "note",
+        "fields": ["owner_id", "category"],
+    }],
+    "query_patterns": ["Find release notes by category or tag."],
+    "discovery_facets": [
+        {"entity": "note", "field": "category"},
+        {"entity": "note", "field": "tags"},
+        {"entity": "note", "field": "status"},
+    ],
+    "retrieval_guidance": "Use exact category filters and membership tag filters.",
+    "migration_history": [],
+}
 evolved_manifest = json.loads(json.dumps(manifest))
 evolved_manifest["schema_version"] = 2
-evolved_manifest["migration_history"] = [{"from_schema_version": 1, "to_schema_version": 2, "operations": ["add note summary"]}]
-evolved_manifest["entities"][0]["attributes"].append({"name": "summary", "type": "string"})
-metadata_fields = {"service_id", "domain_name", "domain_class", "intent_description", "design_state", "operational_status", "schema", "schema_version", "service_revision", "recovery_state", "created_at", "updated_at", "last_activity_at", "materialised_at", "storage"}
-secrets = (principal, "release-seed", "release-design", "release-materialise", "release-evolve", "release-stale", "release-recovery-seed", "release-recovery-design", "release-recovery-materialise", str(Path(root).resolve()), "registry.sqlite", "service-stores")
+evolved_manifest["migration_history"] = [{
+    "from_schema_version": 1,
+    "to_schema_version": 2,
+    "operations": ["add optional note summary"],
+}]
+evolved_manifest["entities"][0]["attributes"].append(
+    {"name": "summary", "type": "string"}
+)
+metadata_fields = {
+    "service_id", "domain_name", "domain_class", "intent_description",
+    "design_state", "operational_status", "schema", "schema_version",
+    "service_revision", "recovery_state", "created_at", "updated_at",
+    "last_activity_at", "materialised_at", "storage",
+}
+tool_names = [
+    "aipcs_server_info",
+    "aipcs_service_seed",
+    "aipcs_service_list",
+    "aipcs_service_inspect",
+    "aipcs_service_design",
+    "aipcs_service_materialise",
+    "aipcs_service_evolve",
+    "aipcs_record_create",
+    "aipcs_record_get",
+    "aipcs_record_list",
+    "aipcs_record_search",
+    "aipcs_record_update",
+    "aipcs_record_delete",
+    "aipcs_record_history",
+    "aipcs_bootstrap",
+    "aipcs_service_summary",
+    "aipcs_branch_create",
+    "aipcs_branch_list",
+    "aipcs_branch_update",
+    "aipcs_branch_assign_records",
+    "aipcs_maintenance_scan",
+]
+secrets = (
+    principal,
+    "release-seed",
+    "release-design",
+    "release-materialise",
+    "release-evolve",
+    "release-record-create",
+    "release-record-update",
+    "release-loose-create",
+    "release-root-create",
+    "release-child-create",
+    "release-root-update",
+    "release-primary-assign",
+    "release-primary-move",
+    "release-related-assign",
+    "release-related-unassign",
+    "release-recovery-seed",
+    "release-recovery-design",
+    "release-recovery-materialise",
+    str(root.resolve()),
+    "registry.sqlite",
+    "service-stores",
+)
 
-async def call(session, name, arguments):
-    with anyio.fail_after(10):
-        result = await session.call_tool(name, arguments)
-    assert result.structuredContent is not None
-    payload = result.structuredContent
-    assert json.loads(result.content[0].text) == payload
-    assert_redacted(payload)
-    return payload
 
 def assert_redacted(value):
     if isinstance(value, dict):
@@ -746,27 +850,16 @@ def assert_redacted(value):
         for secret in secrets:
             assert secret not in value
 
-def assert_metadata(value, *, state, schema_version, revision, storage=False, recovery_state="clear"):
-    assert set(value) == metadata_fields
-    assert value["design_state"] == state
-    assert value["operational_status"] == "active"
-    assert value["service_revision"] == revision
-    assert value["recovery_state"] == recovery_state
-    if schema_version is not None:
-        assert isinstance(value["schema"], dict)
-        assert value["schema"]["manifest_version"] == 2
-        assert value["schema"]["schema_version"] == schema_version
-        assert value["schema"]["entities"][0]["name"] == "note"
-        assert value["schema_version"] == schema_version
-    else:
-        assert value["schema"] is None
-        assert value["schema_version"] is None
-    if storage:
-        assert isinstance(value["materialised_at"], str)
-        assert value["storage"] == {"backend": "sqlite", "namespace": f"svc_{value['service_id'].replace('-', '')}"}
-    else:
-        assert value["materialised_at"] is None
-        assert value["storage"] is None
+
+async def call(session, name, arguments):
+    with anyio.fail_after(10):
+        result = await session.call_tool(name, arguments)
+    assert result.structuredContent is not None
+    payload = result.structuredContent
+    assert json.loads(result.content[0].text) == payload
+    assert_redacted(payload)
+    return payload
+
 
 def assert_failure(value, code, retryable=False):
     assert value["ok"] is False
@@ -774,105 +867,620 @@ def assert_failure(value, code, retryable=False):
     assert value["error"]["code"] == code
     assert value["error"]["retryable"] is retryable
 
+
+def assert_metadata(value, *, state, schema_version, revision, storage=False, recovery_state="clear"):
+    assert set(value) == metadata_fields
+    assert value["design_state"] == state
+    assert value["operational_status"] == "active"
+    assert value["service_revision"] == revision
+    assert value["recovery_state"] == recovery_state
+    if schema_version is None:
+        assert value["schema"] is None and value["schema_version"] is None
+    else:
+        assert value["schema"]["manifest_version"] == 2
+        assert value["schema"]["schema_version"] == schema_version
+        assert value["schema"]["entities"][0]["name"] == "note"
+        assert value["schema_version"] == schema_version
+    if storage:
+        assert isinstance(value["materialised_at"], str)
+        assert value["storage"] == {
+            "backend": "sqlite",
+            "namespace": f"svc_{value['service_id'].replace('-', '')}",
+        }
+    else:
+        assert value["materialised_at"] is None and value["storage"] is None
+
+
+def record_arguments(service_id, record, key):
+    return {
+        "service_id": service_id,
+        "entity_name": "note",
+        "record": record,
+        "idempotency_key": key,
+    }
+
+
+def downgrade_exact_r3_to_r2(database):
+    with sqlite3.connect(database) as connection:
+        for table in (
+            "__aipcs_record_branch",
+            "__aipcs_memory_branch",
+            "__aipcs_record_history",
+            "__aipcs_record_mutation",
+        ):
+            connection.execute(f'DROP TABLE "{table}"')
+        connection.execute(
+            'DELETE FROM "__aipcs_service_store_migration" WHERE "revision"=3'
+        )
+        connection.execute(
+            'UPDATE "__aipcs_service_store_meta" '
+            'SET "applied_revision"=2,"dirty"=0 WHERE "singleton"=1'
+        )
+        connection.commit()
+
+
+def r3_objects(database):
+    with sqlite3.connect(database) as connection:
+        return {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_schema WHERE "
+                "name IN ('__aipcs_record_mutation','__aipcs_record_history',"
+                "'__aipcs_memory_branch','__aipcs_record_branch')"
+            )
+        }
+
+
+async def prove_data_runtime(session, service_id, database, restarting):
+    primary_document = {
+        "title": "Primary release note",
+        "category": "release",
+        "tags": ["alpha", "shared"],
+        "status": "active",
+        "confidence": 0.9,
+    }
+    primary_create = record_arguments(
+        service_id, primary_document, "release-record-create"
+    )
+    if not restarting:
+        downgrade_exact_r3_to_r2(database)
+        assert r3_objects(database) == set()
+        before = database.read_bytes()
+        migration_summary = await call(
+            session, "aipcs_service_summary", {"service_id": service_id, "sample": 1}
+        )
+        assert migration_summary["ok"] is True
+        assert migration_summary["result"]["data_status"] == "migration_required"
+        assert_failure(
+            await call(
+                session,
+                "aipcs_record_list",
+                {"service_id": service_id, "entity_name": "note"},
+            ),
+            "storage_migration_required",
+        )
+        assert database.read_bytes() == before
+        assert r3_objects(database) == set()
+
+    created = await call(session, "aipcs_record_create", primary_create)
+    assert created["ok"] is True
+    assert created["result"]["replayed"] is restarting
+    created_record = created["result"]["record"]
+    assert created_record["record_version"] == 1
+    assert created_record["created_via"] == "mcp"
+    assert created_record["fields"]["title"] == primary_document["title"]
+    record_id = created_record["id"]
+    if not restarting:
+        assert r3_objects(database) == {
+            "__aipcs_record_mutation",
+            "__aipcs_record_history",
+            "__aipcs_memory_branch",
+            "__aipcs_record_branch",
+        }
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                'SELECT "applied_revision","dirty" '
+                'FROM "__aipcs_service_store_meta"'
+            ).fetchone() == (3, 0)
+
+    replay = await call(session, "aipcs_record_create", primary_create)
+    assert replay["ok"] is True and replay["result"]["replayed"] is True
+    assert replay["result"]["record"] == created_record
+    changed = record_arguments(
+        service_id,
+        {**primary_document, "title": "Changed request"},
+        "release-record-create",
+    )
+    assert_failure(
+        await call(session, "aipcs_record_create", changed),
+        "changed_fingerprint",
+    )
+
+    loose_create = record_arguments(
+        service_id,
+        {
+            "title": "Loose release note",
+            "category": "release",
+            "tags": ["shared", "loose"],
+            "status": "stale",
+            "confidence": 0.2,
+        },
+        "release-loose-create",
+    )
+    loose = await call(session, "aipcs_record_create", loose_create)
+    assert loose["ok"] is True
+    assert loose["result"]["replayed"] is restarting
+    loose_id = loose["result"]["record"]["id"]
+
+    fetched = await call(
+        session,
+        "aipcs_record_get",
+        {"service_id": service_id, "entity_name": "note", "record_id": record_id},
+    )
+    assert fetched["ok"] is True
+    assert fetched["result"]["id"] == record_id
+    listed = await call(
+        session,
+        "aipcs_record_list",
+        {"service_id": service_id, "entity_name": "note", "limit": 10},
+    )
+    assert listed["ok"] is True
+    assert {record["id"] for record in listed["result"]["records"]} == {
+        record_id,
+        loose_id,
+    }
+    exact = await call(
+        session,
+        "aipcs_record_search",
+        {
+            "service_id": service_id,
+            "entity_name": "note",
+            "filters": {"category": "release"},
+        },
+    )
+    assert exact["ok"] is True and len(exact["result"]["records"]) == 2
+    membership = await call(
+        session,
+        "aipcs_record_search",
+        {
+            "service_id": service_id,
+            "entity_name": "note",
+            "filters": {"tags": "alpha"},
+        },
+    )
+    assert membership["ok"] is True
+    assert [record["id"] for record in membership["result"]["records"]] == [record_id]
+
+    update = {
+        "service_id": service_id,
+        "entity_name": "note",
+        "record_id": record_id,
+        "updates": {"title": "Primary release note updated"},
+        "expected_record_version": 1,
+        "idempotency_key": "release-record-update",
+    }
+    updated = await call(session, "aipcs_record_update", update)
+    assert updated["ok"] is True
+    assert updated["result"]["replayed"] is restarting
+    assert updated["result"]["record"]["record_version"] == 2
+    assert_failure(
+        await call(
+            session,
+            "aipcs_record_update",
+            {**update, "idempotency_key": "release-record-stale"},
+        ),
+        "stale_record_version",
+    )
+
+    root_create = {
+        "service_id": service_id,
+        "slug": "release-root",
+        "title": "Release root",
+        "intent": "Primary release retrieval.",
+        "branch_type": "release",
+        "idempotency_key": "release-root-create",
+    }
+    root_branch = await call(session, "aipcs_branch_create", root_create)
+    assert root_branch["ok"] is True
+    assert root_branch["result"]["replayed"] is restarting
+    root_id = root_branch["result"]["branch"]["id"]
+    root_replay = await call(session, "aipcs_branch_create", root_create)
+    assert root_replay["ok"] is True and root_replay["result"]["replayed"] is True
+    child_create = {
+        "service_id": service_id,
+        "slug": "release-child",
+        "title": "Release child",
+        "intent": "Focused release retrieval.",
+        "parent_branch_id": root_id,
+        "idempotency_key": "release-child-create",
+    }
+    child_branch = await call(session, "aipcs_branch_create", child_create)
+    assert child_branch["ok"] is True
+    assert child_branch["result"]["replayed"] is restarting
+    child_id = child_branch["result"]["branch"]["id"]
+    root_update = {
+        "service_id": service_id,
+        "branch_id": root_id,
+        "updates": {"title": "Release root updated"},
+        "expected_branch_revision": 1,
+        "idempotency_key": "release-root-update",
+    }
+    root_updated = await call(session, "aipcs_branch_update", root_update)
+    assert root_updated["ok"] is True
+    assert root_updated["result"]["replayed"] is restarting
+    assert root_updated["result"]["branch"]["branch_revision"] == 2
+    branches = await call(
+        session, "aipcs_branch_list", {"service_id": service_id, "limit": 10}
+    )
+    assert branches["ok"] is True
+    assert {branch["slug"] for branch in branches["result"]["branches"]} == {
+        "release-root",
+        "release-child",
+    }
+
+    async def assign(branch_id, role, operation, version, key):
+        value = await call(
+            session,
+            "aipcs_branch_assign_records",
+            {
+                "service_id": service_id,
+                "branch_id": branch_id,
+                "role": role,
+                "operation": operation,
+                "records": [{
+                    "entity_name": "note",
+                    "record_id": record_id,
+                    "expected_record_version": version,
+                }],
+                "idempotency_key": key,
+            },
+        )
+        assert value["ok"] is True
+        assert value["result"]["replayed"] is restarting
+        return value["result"]["records"][0]["record_version"]
+
+    assert await assign(
+        root_id, "primary", "assign", 2, "release-primary-assign"
+    ) == 3
+    assert await assign(
+        child_id, "primary", "assign", 3, "release-primary-move"
+    ) == 4
+    assert await assign(
+        root_id, "related", "assign", 4, "release-related-assign"
+    ) == 5
+    assert await assign(
+        root_id, "related", "unassign", 5, "release-related-unassign"
+    ) == 6
+
+    history = await call(
+        session,
+        "aipcs_record_history",
+        {"service_id": service_id, "entity_name": "note", "record_id": record_id},
+    )
+    assert history["ok"] is True
+    assert [
+        (event["record_version"], event["kind"])
+        for event in history["result"]["events"]
+    ] == [
+        (1, "create"),
+        (2, "update"),
+        (3, "primary_assign"),
+        (4, "primary_move"),
+        (5, "related_assign"),
+        (6, "related_unassign"),
+    ]
+    current = await call(
+        session,
+        "aipcs_record_get",
+        {"service_id": service_id, "entity_name": "note", "record_id": record_id},
+    )
+    assert current["ok"] is True
+    assert current["result"]["record_version"] == 6
+    assert current["result"]["fields"]["title"] == "Primary release note updated"
+
+    summary = await call(
+        session, "aipcs_service_summary", {"service_id": service_id, "sample": 1}
+    )
+    assert summary["ok"] is True
+    result = summary["result"]
+    assert result["data_status"] == "ready"
+    assert result["record_counts"] == [{"entity_name": "note", "count": 2}]
+    assert result["unbranched_record_count"] == 1
+    facets = {(item["entity_name"], item["field_name"]): item["values"] for item in result["facets"]}
+    assert facets[("note", "category")] == [{"value": "release", "count": 2}]
+    assert {item["value"] for item in facets[("note", "tags")]} == {
+        "alpha", "shared", "loose"
+    }
+    cards = {card["branch"]["slug"]: card for card in result["branches"]}
+    assert cards["release-child"]["primary_record_count"] == 1
+    assert cards["release-root"]["primary_record_count"] == 0
+    assert cards["release-root"]["related_record_count"] == 0
+    assert result["samples"][0]["entity_name"] == "note"
+    assert len(result["samples"][0]["records"]) == 1
+
+    maintenance = await call(
+        session,
+        "aipcs_maintenance_scan",
+        {
+            "service_id": service_id,
+            "entity_name": "note",
+            "scan_types": ["unbranched"],
+            "limit": 10,
+        },
+    )
+    assert maintenance["ok"] is True
+    assert [
+        candidate["record"]["id"]
+        for candidate in maintenance["result"]["candidates"]
+        if candidate["scan_type"] == "unbranched"
+    ] == [loose_id]
+    return {
+        "service_id": service_id,
+        "record_id": record_id,
+        "loose_id": loose_id,
+        "root_id": root_id,
+        "child_id": child_id,
+    }
+
+
 async def main():
-    args = ["serve"] if mode == "stateless" else ["serve", "--profile", "sqlite", "--sqlite-data-root", root, "--principal-id", principal]
-    params = StdioServerParameters(command=exe, args=args, cwd=str(Path(root).parent), env={"PYTHONNOUSERSITE": "1"})
-    with anyio.fail_after(45):
-      async with stdio_client(params) as (reader, writer), ClientSession(reader, writer) as session:
-        with anyio.fail_after(10):
-            await session.initialize()
-        with anyio.fail_after(10):
-            tools = await session.list_tools()
-        names = [tool.name for tool in tools.tools]
-        if mode == "stateless":
-            assert names == ["aipcs_server_info"]
+    args = (
+        ["serve"]
+        if mode == "stateless"
+        else [
+            "serve",
+            "--profile",
+            "sqlite",
+            "--sqlite-data-root",
+            str(root),
+            "--principal-id",
+            principal,
+        ]
+    )
+    params = StdioServerParameters(
+        command=exe,
+        args=args,
+        cwd=str(root.parent),
+        env={"PYTHONNOUSERSITE": "1"},
+    )
+    with anyio.fail_after(55):
+        async with (
+            stdio_client(params) as (reader, writer),
+            ClientSession(reader, writer) as session,
+        ):
+            with anyio.fail_after(10):
+                await session.initialize()
+            with anyio.fail_after(10):
+                tools = await session.list_tools()
+            names = [tool.name for tool in tools.tools]
+            if mode == "stateless":
+                assert names == ["aipcs_server_info"]
+                info = await call(session, "aipcs_server_info", {})
+                assert info["ok"] is True
+                assert info["result"]["aipcs_mcp_contract"] == "1.2.0"
+                assert info["result"]["features"]["registry_lifecycle"] is False
+                assert info["result"]["features"]["materialisation_lifecycle"] is False
+                assert info["result"]["features"]["record_runtime"] is False
+                assert info["result"]["features"]["discovery_topology"] is False
+                return
+            assert names == tool_names and len(names) == 21
             info = await call(session, "aipcs_server_info", {})
             assert info["ok"] is True
-            assert info["result"]["features"]["registry_lifecycle"] is False
-            assert info["result"]["features"]["materialisation_lifecycle"] is False
-            return
-        assert names == ["aipcs_server_info", "aipcs_service_seed", "aipcs_service_list", "aipcs_service_inspect", "aipcs_service_design", "aipcs_service_materialise", "aipcs_service_evolve"]
-        info = await call(session, "aipcs_server_info", {})
-        assert info["ok"] is True
-        assert info["result"]["aipcs_mcp_contract"] == "1.1.0"
-        assert info["result"]["features"]["registry_lifecycle"] is True
-        assert info["result"]["features"]["materialisation_lifecycle"] is True
-        seed = {"domain_name": "release_smoke", "domain_class": "release", "intent_description": "installed distribution smoke", "idempotency_key": "release-seed"}
-        listed = await call(session, "aipcs_service_list", {})
-        if mode == "principal_b":
-            assert listed["ok"] is True and listed["result"]["services"] == []
-            service_id = (Path(root).parent / "release-service-id.txt").read_text(encoding="utf-8")
-            missing = await call(session, "aipcs_service_inspect", {"service_id": service_id})
-            assert_failure(missing, "not_found")
-            concealed = await call(session, "aipcs_service_materialise", {"service_id": service_id, "expected_service_revision": 4, "expected_schema_version": 1, "idempotency_key": "release-principal-b"})
-            assert_failure(concealed, "stale_revision")
-            created = await call(session, "aipcs_service_seed", seed)
-            assert created["ok"] is True
-            assert_metadata(created["result"], state="seeded", schema_version=None, revision=1)
-            return
-        if mode == "recovery":
-            recovery_seed = {"domain_name": "release_recovery", "domain_class": "release", "intent_description": "installed public recovery smoke", "idempotency_key": "release-recovery-seed"}
-            created = await call(session, "aipcs_service_seed", recovery_seed)
-            assert created["ok"] is True
-            assert_metadata(created["result"], state="seeded", schema_version=None, revision=1)
-            service_id = created["result"]["service_id"]
-            recovery_design = {"service_id": service_id, "schema": manifest, "idempotency_key": "release-recovery-design"}
-            designed = await call(session, "aipcs_service_design", recovery_design)
-            assert designed["ok"] is True
-            assert_metadata(designed["result"], state="seeded", schema_version=1, revision=2)
-            store_root = Path(root) / "service-stores"
-            store_root.mkdir(mode=0o700, exist_ok=True)
-            store_root.chmod(0o700)
-            database = store_root / f"svc_{service_id.replace('-', '')}.sqlite"
-            with sqlite3.connect(database) as connection:
-                connection.execute('CREATE TABLE "unexpected" ("id" INTEGER PRIMARY KEY)')
-            database.chmod(0o600)
-            materialise = {"service_id": service_id, "expected_service_revision": 2, "expected_schema_version": 1, "idempotency_key": "release-recovery-materialise"}
-            recovery = await call(session, "aipcs_service_materialise", materialise)
-            assert_failure(recovery, "recovery_required")
-            assert recovery["error"]["issues"] == []
-            replay = await call(session, "aipcs_service_materialise", materialise)
-            assert replay == recovery
-            inspected = await call(session, "aipcs_service_inspect", {"service_id": service_id})
-            assert inspected["ok"] is True
-            assert_metadata(inspected["result"], state="seeded", schema_version=1, revision=2, recovery_state="recovery_required")
-            return
-        assert listed["ok"] is True and len(listed["result"]["services"]) in {0, 1}
-        created = await call(session, "aipcs_service_seed", seed)
-        assert created["ok"] is True
-        assert_metadata(created["result"], state="seeded", schema_version=None, revision=1)
-        service_id = created["result"]["service_id"]
-        (Path(root).parent / "release-service-id.txt").write_text(service_id, encoding="utf-8")
-        design = {"service_id": service_id, "schema": manifest, "idempotency_key": "release-design"}
-        designed = await call(session, "aipcs_service_design", design)
-        assert designed["ok"] is True
-        assert_metadata(designed["result"], state="seeded", schema_version=1, revision=2)
-        design_replay = await call(session, "aipcs_service_design", design)
-        assert design_replay == designed
-        materialise = {"service_id": service_id, "expected_service_revision": 2, "expected_schema_version": 1, "idempotency_key": "release-materialise"}
-        materialised = await call(session, "aipcs_service_materialise", materialise)
-        assert materialised["ok"] is True
-        assert_metadata(materialised["result"], state="materialised", schema_version=1, revision=3, storage=True)
-        materialise_replay = await call(session, "aipcs_service_materialise", materialise)
-        assert materialise_replay == materialised
-        changed = dict(materialise, expected_service_revision=3)
-        assert_failure(await call(session, "aipcs_service_materialise", changed), "changed_fingerprint")
-        stale = {"service_id": service_id, "expected_service_revision": 2, "expected_schema_version": 1, "idempotency_key": "release-stale", "schema": evolved_manifest}
-        assert_failure(await call(session, "aipcs_service_evolve", stale), "stale_revision")
-        evolve = {"service_id": service_id, "expected_service_revision": 3, "expected_schema_version": 1, "idempotency_key": "release-evolve", "schema": evolved_manifest}
-        evolved = await call(session, "aipcs_service_evolve", evolve)
-        assert evolved["ok"] is True
-        assert_metadata(evolved["result"], state="materialised", schema_version=2, revision=4, storage=True)
-        assert evolved["result"]["storage"] == materialised["result"]["storage"]
-        assert evolved["result"]["materialised_at"] == materialised["result"]["materialised_at"]
-        evolve_replay = await call(session, "aipcs_service_evolve", evolve)
-        assert evolve_replay == evolved
-        inspected = await call(session, "aipcs_service_inspect", {"service_id": service_id})
-        assert inspected["ok"] is True
-        assert inspected["result"] == evolved["result"]
-        final_list = await call(session, "aipcs_service_list", {})
-        assert final_list["ok"] is True and len(final_list["result"]["services"]) == 1
-        assert final_list["result"]["services"][0] == evolved["result"]
+            assert info["result"]["aipcs_mcp_contract"] == "1.2.0"
+            assert info["result"]["features"]["registry_lifecycle"] is True
+            assert info["result"]["features"]["materialisation_lifecycle"] is True
+            assert info["result"]["features"]["record_runtime"] is True
+            assert info["result"]["features"]["discovery_topology"] is True
+            listed = await call(session, "aipcs_service_list", {})
+
+            if mode == "principal_b":
+                assert listed["ok"] is True and listed["result"]["services"] == []
+                bootstrap = await call(session, "aipcs_bootstrap", {})
+                assert bootstrap["ok"] is True and bootstrap["result"]["services"] == []
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                assert_failure(
+                    await call(
+                        session,
+                        "aipcs_record_get",
+                        {
+                            "service_id": state["service_id"],
+                            "entity_name": "note",
+                            "record_id": state["record_id"],
+                        },
+                    ),
+                    "not_found",
+                )
+                assert_failure(
+                    await call(
+                        session,
+                        "aipcs_service_summary",
+                        {"service_id": state["service_id"], "sample": 1},
+                    ),
+                    "not_found",
+                )
+                assert_failure(
+                    await call(
+                        session,
+                        "aipcs_service_inspect",
+                        {"service_id": state["service_id"]},
+                    ),
+                    "not_found",
+                )
+                seed = {
+                    "domain_name": "release_smoke",
+                    "domain_class": "release",
+                    "intent_description": "isolated installed distribution smoke",
+                    "idempotency_key": "release-principal-b-seed",
+                }
+                created = await call(session, "aipcs_service_seed", seed)
+                assert created["ok"] is True
+                assert_metadata(
+                    created["result"],
+                    state="seeded",
+                    schema_version=None,
+                    revision=1,
+                )
+                return
+
+            if mode == "recovery":
+                recovery_seed = {
+                    "domain_name": "release_recovery",
+                    "domain_class": "release",
+                    "intent_description": "installed public recovery smoke",
+                    "idempotency_key": "release-recovery-seed",
+                }
+                created = await call(session, "aipcs_service_seed", recovery_seed)
+                assert created["ok"] is True
+                service_id = created["result"]["service_id"]
+                designed = await call(
+                    session,
+                    "aipcs_service_design",
+                    {
+                        "service_id": service_id,
+                        "schema": manifest,
+                        "idempotency_key": "release-recovery-design",
+                    },
+                )
+                assert designed["ok"] is True
+                store_root = root / "service-stores"
+                store_root.mkdir(mode=0o700, exist_ok=True)
+                store_root.chmod(0o700)
+                database = store_root / f"svc_{service_id.replace('-', '')}.sqlite"
+                with sqlite3.connect(database) as connection:
+                    connection.execute(
+                        'CREATE TABLE "unexpected" ("id" INTEGER PRIMARY KEY)'
+                    )
+                database.chmod(0o600)
+                materialise = {
+                    "service_id": service_id,
+                    "expected_service_revision": 2,
+                    "expected_schema_version": 1,
+                    "idempotency_key": "release-recovery-materialise",
+                }
+                recovery = await call(
+                    session, "aipcs_service_materialise", materialise
+                )
+                assert_failure(recovery, "recovery_required")
+                assert await call(
+                    session, "aipcs_service_materialise", materialise
+                ) == recovery
+                inspected = await call(
+                    session, "aipcs_service_inspect", {"service_id": service_id}
+                )
+                assert_metadata(
+                    inspected["result"],
+                    state="seeded",
+                    schema_version=1,
+                    revision=2,
+                    recovery_state="recovery_required",
+                )
+                return
+
+            assert listed["ok"] is True
+            restarting = len(listed["result"]["services"]) == 1
+            seed = {
+                "domain_name": "release_smoke",
+                "domain_class": "release",
+                "intent_description": "installed distribution smoke",
+                "idempotency_key": "release-seed",
+            }
+            seeded = await call(session, "aipcs_service_seed", seed)
+            assert_metadata(
+                seeded["result"],
+                state="seeded",
+                schema_version=None,
+                revision=1,
+            )
+            service_id = seeded["result"]["service_id"]
+            design = {
+                "service_id": service_id,
+                "schema": manifest,
+                "idempotency_key": "release-design",
+            }
+            designed = await call(session, "aipcs_service_design", design)
+            assert_metadata(
+                designed["result"],
+                state="seeded",
+                schema_version=1,
+                revision=2,
+            )
+            assert await call(session, "aipcs_service_design", design) == designed
+            materialise = {
+                "service_id": service_id,
+                "expected_service_revision": 2,
+                "expected_schema_version": 1,
+                "idempotency_key": "release-materialise",
+            }
+            materialised = await call(
+                session, "aipcs_service_materialise", materialise
+            )
+            assert_metadata(
+                materialised["result"],
+                state="materialised",
+                schema_version=1,
+                revision=3,
+                storage=True,
+            )
+            assert await call(
+                session, "aipcs_service_materialise", materialise
+            ) == materialised
+            assert_failure(
+                await call(
+                    session,
+                    "aipcs_service_materialise",
+                    {**materialise, "expected_service_revision": 3},
+                ),
+                "changed_fingerprint",
+            )
+            stale = {
+                "service_id": service_id,
+                "expected_service_revision": 2,
+                "expected_schema_version": 1,
+                "idempotency_key": "release-stale",
+                "schema": evolved_manifest,
+            }
+            assert_failure(
+                await call(session, "aipcs_service_evolve", stale),
+                "stale_revision",
+            )
+            evolve = {
+                "service_id": service_id,
+                "expected_service_revision": 3,
+                "expected_schema_version": 1,
+                "idempotency_key": "release-evolve",
+                "schema": evolved_manifest,
+            }
+            evolved = await call(session, "aipcs_service_evolve", evolve)
+            assert_metadata(
+                evolved["result"],
+                state="materialised",
+                schema_version=2,
+                revision=4,
+                storage=True,
+            )
+            assert await call(session, "aipcs_service_evolve", evolve) == evolved
+            database = (
+                root
+                / "service-stores"
+                / f"{evolved['result']['storage']['namespace']}.sqlite"
+            )
+            state = await prove_data_runtime(
+                session, service_id, database, restarting
+            )
+            if restarting:
+                assert json.loads(state_path.read_text(encoding="utf-8")) == state
+            else:
+                state_path.write_text(
+                    json.dumps(state, sort_keys=True), encoding="utf-8"
+                )
+            inspected = await call(
+                session, "aipcs_service_inspect", {"service_id": service_id}
+            )
+            assert inspected["ok"] is True and inspected["result"] == evolved["result"]
+            final_list = await call(session, "aipcs_service_list", {})
+            assert final_list["ok"] is True
+            assert len(final_list["result"]["services"]) == 1
+
 
 anyio.run(main)
 """
@@ -948,13 +1556,13 @@ if mode not in {"baseline", "heavy"}:
 assert not root.exists()
 missing = first.inspect_migration(locator_a)
 assert (missing.component, missing.applied_revision, missing.target_revision, missing.status) == (
-    "service_store", 0, 2, "uninitialised"
+    "service_store", 0, 3, "uninitialised"
 )
 assert not root.exists()
 
 ready = first.migrate(locator_a)
 assert (ready.component, ready.applied_revision, ready.target_revision, ready.status) == (
-    "service_store", 2, 2, "ready"
+    "service_store", 3, 3, "ready"
 )
 db_a = database(locator_a)
 assert db_a.is_file()
@@ -965,7 +1573,20 @@ with sqlite3.connect(f"file:{db_a}?mode=ro", uri=True) as connection:
             "SELECT name FROM sqlite_schema WHERE substr(name,1,7) <> 'sqlite_'"
         )
     }
-assert objects == {"__aipcs_service_store_meta", "__aipcs_service_store_migration", "__aipcs_service_store_policy"}
+assert objects == {
+    "__aipcs_service_store_meta",
+    "__aipcs_service_store_migration",
+    "__aipcs_service_store_policy",
+    "__aipcs_record_mutation",
+    "__aipcs_record_history",
+    "__aipcs_memory_branch",
+    "__aipcs_record_branch",
+    "__aipcs_record_history_record_version",
+    "__aipcs_record_history_entity_sequence",
+    "__aipcs_memory_branch_principal_status_updated",
+    "__aipcs_record_branch_primary",
+    "__aipcs_record_branch_branch_lookup",
+}
 with sqlite3.connect(f"file:{db_a}?mode=ro", uri=True) as connection:
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
 ledger = migration_row(locator_a)
@@ -1796,6 +2417,7 @@ def materialise_valid(phase, foundation, target):
         phase is LifecyclePhase.PREPARED
         and foundation in {
             FoundationObservation.UNINITIALISED,
+            FoundationObservation.OUTDATED,
             FoundationObservation.DIRTY,
             FoundationObservation.INCOMPATIBLE,
             FoundationObservation.BUSY,
@@ -1815,6 +2437,7 @@ def materialise_expected(phase, foundation, target):
         return RecoveryAction.DEFER_OBSERVATION, deferred
     if foundation in {
         FoundationObservation.UNINITIALISED,
+        FoundationObservation.OUTDATED,
         FoundationObservation.DIRTY,
     }:
         return RecoveryAction.PREPARE_FOUNDATION, None
@@ -1844,7 +2467,7 @@ for phase, foundation, target in product(
     materialise_valid_count += 1
     observation = MaterialiseRecoveryObservation(phase, foundation, target)
     assert_plan(materialise_intents[phase], observation, *materialise_expected(phase, foundation, target))
-assert materialise_valid_count == 14
+assert materialise_valid_count == 15
 
 def evolve_valid(phase, foundation, target, source):
     terminal = (
@@ -1898,7 +2521,7 @@ def evolve_expected(phase, foundation, target, source):
     deferred = deferred_expected(foundation) or deferred_expected(target) or deferred_expected(source)
     if deferred is not None:
         return RecoveryAction.DEFER_OBSERVATION, deferred
-    if foundation is FoundationObservation.DIRTY:
+    if foundation in {FoundationObservation.OUTDATED, FoundationObservation.DIRTY}:
         return RecoveryAction.PREPARE_FOUNDATION, None
     if foundation is not FoundationObservation.READY:
         return RecoveryAction.RECOVERY_REQUIRED, None
@@ -1929,7 +2552,7 @@ for phase, foundation, target, source in product(
     assert_plan(
         evolve_intents[phase], observation, *evolve_expected(phase, foundation, target, source)
     )
-assert evolve_valid_count == 21
+assert evolve_valid_count == 22
 
 assert tuple(cwd.iterdir()) == before
 '''
@@ -2599,8 +3222,8 @@ for fixture_mode in ("clean", "prepared-delete", "prepared-wal"): frozen_registr
 
 catalog = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(root))
 locator = catalog.allocate(UUID(int=9))
-assert catalog.migrate(locator) == MigrationState("service_store", 2, 2, "ready")
-assert catalog.inspect_migration(locator) == MigrationState("service_store", 2, 2, "ready")
+assert catalog.migrate(locator) == MigrationState("service_store", 3, 3, "ready")
+assert catalog.inspect_migration(locator) == MigrationState("service_store", 3, 3, "ready")
 service_db = root / "service-stores" / f"{locator.namespace}.sqlite"
 with sqlite3.connect(service_db) as connection:
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
@@ -2667,11 +3290,11 @@ def frozen_service(mode):
     frozen = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(fixture_root))
     fixture_locator = frozen.allocate(UUID(hex=namespace[4:]))
     outcome = frozen.migrate(fixture_locator)
-    assert outcome == MigrationState("service_store", 2, 2, "ready"), (mode, outcome)
-    assert frozen.inspect_migration(fixture_locator) == MigrationState("service_store", 2, 2, "ready")
+    assert outcome == MigrationState("service_store", 3, 3, "ready"), (mode, outcome)
+    assert frozen.inspect_migration(fixture_locator) == MigrationState("service_store", 3, 3, "ready")
     with sqlite3.connect(fixture_db) as connection:
         assert connection.execute('SELECT "body" FROM "note"').fetchone() == ("byte-preserved",)
-        assert connection.execute('SELECT revision,migration_id,checksum FROM "__aipcs_service_store_migration" ORDER BY revision').fetchall() == [(1, "service-store-0001-foundation", service_r1_checksum), (2, "service-store-0002-wal-policy", service_policy_checksum)]
+        assert connection.execute('SELECT revision,migration_id,checksum FROM "__aipcs_service_store_migration" ORDER BY revision').fetchall() == [(1, "service-store-0001-foundation", service_r1_checksum), (2, "service-store-0002-wal-policy", service_policy_checksum), (3, "service-store-0003-record-topology", "8181f28aa6e4f8812ae169ea9754eb13fbfe10b574a88a36968564a4595896d7")]
         assert connection.execute('SELECT phase FROM "__aipcs_service_store_policy"').fetchone() == ("ready",)
 for fixture_mode in ("clean", "prepared-delete", "prepared-wal"): frozen_service(fixture_mode)
 '''
@@ -2715,9 +3338,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+import aipcs_mcp.application.data as data_application_module
+import aipcs_mcp.data_requests as data_requests_module
+import aipcs_mcp.data_results as data_results_module
+import aipcs_mcp.data_store as data_store_module
 import aipcs_mcp.lifecycle_coordinator as lifecycle_coordinator_module
 import aipcs_mcp.mcp_server as mcp_server_module
+import aipcs_mcp.records as records_module
+import aipcs_mcp.runtime as runtime_module
+import aipcs_mcp.storage.sqlite.data_store as sqlite_data_store_module
+import aipcs_mcp.storage.sqlite.discovery as discovery_module
 import aipcs_mcp.storage.sqlite.domain_schema as domain_schema_module
+import aipcs_mcp.storage.sqlite.topology as topology_module
 from aipcs_mcp.application.models import PreparedLifecycleClaim, Service
 from aipcs_mcp.lifecycle import EvolveCommand, MaterialiseCommand
 from aipcs_mcp.lifecycle_coordinator import LifecycleCoordinator
@@ -2735,11 +3367,24 @@ root = Path(sys.argv[1])
 mode = sys.argv[2]
 assert mode in {"initial", "restart"}
 sites = tuple(Path(value).resolve() for value in site.getsitepackages())
-for module in (lifecycle_coordinator_module, domain_schema_module):
+for module in (
+    data_application_module,
+    data_requests_module,
+    data_results_module,
+    data_store_module,
+    lifecycle_coordinator_module,
+    mcp_server_module,
+    records_module,
+    runtime_module,
+    sqlite_data_store_module,
+    discovery_module,
+    domain_schema_module,
+    topology_module,
+):
     origin = Path(module.__file__).resolve()
     assert any(origin.is_relative_to(value) for value in sites), origin
 
-assert tuple(tool.name for tool in mcp_server_module._tools(True, True)) == (
+assert tuple(tool.name for tool in mcp_server_module._tools(True, True, True)) == (
     "aipcs_server_info",
     "aipcs_service_seed",
     "aipcs_service_list",
@@ -2747,6 +3392,20 @@ assert tuple(tool.name for tool in mcp_server_module._tools(True, True)) == (
     "aipcs_service_design",
     "aipcs_service_materialise",
     "aipcs_service_evolve",
+    "aipcs_record_create",
+    "aipcs_record_get",
+    "aipcs_record_list",
+    "aipcs_record_search",
+    "aipcs_record_update",
+    "aipcs_record_delete",
+    "aipcs_record_history",
+    "aipcs_bootstrap",
+    "aipcs_service_summary",
+    "aipcs_branch_create",
+    "aipcs_branch_list",
+    "aipcs_branch_update",
+    "aipcs_branch_assign_records",
+    "aipcs_maintenance_scan",
 )
 
 managed = [
@@ -2884,7 +3543,7 @@ if mode == "initial":
     # Seed an exact physical materialise target while its registry intent remains prepared.
     prepared_adopt = prepare(materialise(adopt_id, "adopt-materialise"))
     adopt_locator = catalog.allocate(adopt_id)
-    assert catalog.migrate(adopt_locator) == MigrationState("service_store", 2, 2, "ready")
+    assert catalog.migrate(adopt_locator) == MigrationState("service_store", 3, 3, "ready")
     assert domain.materialise(adopt_locator, compile_manifest(prepared_adopt.target_manifest)).status == "ready"
 
     # Independently finish physical adjacent evolution before its registry completion.
@@ -2925,13 +3584,13 @@ else:
     for service_id in (first_id, adopt_id, restart_id):
         locator = catalog.allocate(service_id)
         assert catalog.inspect_migration(locator) == MigrationState(
-            "service_store", 2, 2, "ready"
+            "service_store", 3, 3, "ready"
         )
         with sqlite3.connect(service_database(service_id)) as connection:
             assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     recovery_locator = catalog.allocate(recovery_id)
     assert catalog.inspect_migration(recovery_locator) == MigrationState(
-        "service_store", 0, 2, "incompatible"
+        "service_store", 0, 3, "incompatible"
     )
     with sqlite3.connect(service_database(recovery_id)) as connection:
         assert connection.execute(
@@ -3117,6 +3776,30 @@ def _source_state(root: Path, *, environment: Mapping[str, str]) -> str:
     return "dirty" if result.stdout else "clean"
 
 
+def require_exact_tip(root: Path, *, environment: Mapping[str, str]) -> str:
+    """Require the candidate bytes to be exactly the clean checked-out HEAD commit."""
+
+    if _source_state(root, environment=environment) != "clean":
+        raise ReleaseVerificationError(
+            "exact-tip verification requires a clean source checkout."
+        )
+    return _commit(root, environment=environment)
+
+
+def require_same_exact_tip(
+    root: Path,
+    expected_commit: str,
+    *,
+    environment: Mapping[str, str],
+) -> None:
+    """Reject a clean-but-different commit or any byte change after binding."""
+
+    if require_exact_tip(root, environment=environment) != expected_commit:
+        raise ReleaseVerificationError(
+            "exact-tip verification source changed after candidate binding."
+        )
+
+
 def intended_source_sha256(root: Path, paths: Iterable[Path]) -> str:
     """Hash the canonical path, mode, size, and bytes of the intended source set."""
 
@@ -3192,13 +3875,23 @@ def create_workspace() -> Path:
         raise ReleaseVerificationError("release workspace creation failed.") from None
 
 
-def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> None:
+def verify_release(
+    root: Path = ROOT,
+    *,
+    keep_failed_workdir: bool = False,
+    exact_tip: bool = False,
+) -> None:
     """Run the complete source/copy/distribution rehearsal and print a short summary."""
 
     root = root.resolve()
     environment = scrubbed_environment()
     uv = require_local_preconditions(root)
     require_clean_checkout_artifacts(root)
+    exact_commit = (
+        require_exact_tip(root, environment=environment)
+        if exact_tip
+        else None
+    )
     workspace = create_workspace()
     failed = True
     summary: str | None = None
@@ -3212,11 +3905,20 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=source_environment,
             redaction_roots=redaction_roots,
         )
+        if exact_commit is not None:
+            require_same_exact_tip(root, exact_commit, environment=environment)
         source_snapshot = make_clean_copy(
             root,
             workspace / "source-build-snapshot",
             environment=environment,
         )
+        if exact_commit is not None:
+            require_same_exact_tip(
+                source_snapshot.root,
+                exact_commit,
+                environment=environment,
+            )
+            require_same_exact_tip(root, exact_commit, environment=environment)
         source_paths = intended_source_paths(source_snapshot.root, environment=environment)
         source_state = _source_state(source_snapshot.root, environment=environment)
         source_digest = intended_source_sha256(source_snapshot.root, source_paths)
@@ -3228,6 +3930,9 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             redaction_roots=redaction_roots,
         )
         clean_copy = make_clean_copy(root, workspace, environment=environment)
+        if exact_commit is not None:
+            require_same_exact_tip(clean_copy.root, exact_commit, environment=environment)
+            require_same_exact_tip(root, exact_commit, environment=environment)
         copy_paths = intended_source_paths(clean_copy.root, environment=environment)
         if (
             _source_state(clean_copy.root, environment=environment) != source_state
@@ -3402,6 +4107,8 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             redaction_roots=redaction_roots,
         )
         require_clean_checkout_artifacts(root)
+        if exact_commit is not None:
+            require_same_exact_tip(root, exact_commit, environment=environment)
         summary = _summary(
             _commit(source_snapshot.root, environment=environment),
             source_state,
@@ -3433,9 +4140,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="retain only a failed temporary workspace for local diagnosis",
     )
+    parser.add_argument(
+        "--exact-tip",
+        action="store_true",
+        help="require the candidate to be exactly the clean checked-out HEAD commit",
+    )
     args = parser.parse_args(argv)
     try:
-        verify_release(keep_failed_workdir=args.keep_failed_workdir)
+        verify_release(
+            keep_failed_workdir=args.keep_failed_workdir,
+            exact_tip=args.exact_tip,
+        )
     except ReleaseVerificationError as error:
         print(f"release verification failed: {_bounded(str(error))}", file=sys.stderr)
         return 1

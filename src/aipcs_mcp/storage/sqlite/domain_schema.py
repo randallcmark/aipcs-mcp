@@ -16,6 +16,7 @@ from aipcs_mcp.storage.errors import (
     StorageBusy,
     StorageContractError,
     StorageMigrationError,
+    StorageTransientJournal,
     StorageUnavailable,
 )
 
@@ -33,7 +34,7 @@ from .domain_schema_layout import (
 )
 from .location import AnchoredLocation, SQLiteLocationPolicy
 from .result_codes import is_sqlite_busy
-from .service_store_migrations import INDEX_XINFO as FOUNDATION_INDEX_XINFO
+from .service_store_migrations import INTERNAL_INDEX_XINFO as FOUNDATION_INDEX_XINFO
 from .service_store_migrations import RESERVED_PREFIX
 from .sql_tokens import sql_tokens_equal
 
@@ -49,6 +50,8 @@ def _bounded[**P, R](method: Callable[P, R]) -> Callable[P, R]:
             failure: Exception = StorageContractError()
         except StorageBusy:
             failure = StorageBusy()
+        except StorageTransientJournal:
+            failure = StorageTransientJournal()
         except StorageUnavailable:
             failure = StorageUnavailable()
         except StorageMigrationError:

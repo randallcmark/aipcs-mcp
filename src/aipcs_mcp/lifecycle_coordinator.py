@@ -52,6 +52,7 @@ from aipcs_mcp.storage.errors import (
     StorageBusy,
     StorageContractError,
     StorageMigrationError,
+    StorageTransientJournal,
     StorageUnavailable,
 )
 
@@ -106,6 +107,8 @@ class LifecycleCoordinator:
             return compiled
         target, transition = compiled
         attempted: set[RecoveryAction] = set()
+        foundation_result: MigrationState | None = None
+        foundation_reconciled = False
 
         while True:
             try:
@@ -118,6 +121,14 @@ class LifecycleCoordinator:
             if plan.action is RecoveryAction.DEFER_OBSERVATION:
                 if plan.result_category is None:
                     return _result(LifecycleResultCategory.INTERNAL_FAILURE)
+                if (
+                    attempted
+                    and plan.result_category is LifecycleResultCategory.STORAGE_UNAVAILABLE
+                ):
+                    # A physical action may already have committed.  An
+                    # unavailable re-observation cannot prove its durable
+                    # outcome, so the admitted same key must remain replayable.
+                    return _result(LifecycleResultCategory.OPERATION_UNCERTAIN)
                 return _result(plan.result_category)
             if plan.action is RecoveryAction.RECOVERY_REQUIRED:
                 return self._finalize_recovery(intent)
@@ -130,14 +141,53 @@ class LifecycleCoordinator:
                     plan.action is RecoveryAction.PREPARE_FOUNDATION
                     and observed.foundation is FoundationObservation.DIRTY
                 ):
-                    # Migrate was already attempted and its return deliberately discarded.
-                    # Persisting exact dirt after the fresh inspection needs operator recovery.
-                    return self._finalize_recovery(intent)
+                    if foundation_result is not None and foundation_result.status == "dirty":
+                        if not foundation_reconciled:
+                            # Dirt may be a prepared migration owned by a
+                            # cooperating same-key process. Give it one bounded
+                            # mutation-boundary reconciliation. Repeated dirt
+                            # remains uncertain: observation alone cannot prove
+                            # abandonment and must never poison the registry.
+                            foundation_reconciled = True
+                            action_result = self._apply(
+                                RecoveryAction.PREPARE_FOUNDATION,
+                                locator,
+                                target,
+                                transition,
+                            )
+                            if type(action_result) is LifecycleExecutionResult:
+                                return action_result
+                            if type(action_result) is MigrationState:
+                                foundation_result = action_result
+                                continue
+                        return _result(LifecycleResultCategory.OPERATION_UNCERTAIN)
+                    if (
+                        foundation_result is not None
+                        and foundation_result.status == "ready"
+                        and not foundation_reconciled
+                    ):
+                        # Ready followed by dirt is contradictory concurrent
+                        # progress, not persistent evidence. Reconcile once.
+                        foundation_reconciled = True
+                        action_result = self._apply(
+                            RecoveryAction.PREPARE_FOUNDATION,
+                            locator,
+                            target,
+                            transition,
+                        )
+                        if type(action_result) is LifecycleExecutionResult:
+                            return action_result
+                        if type(action_result) is MigrationState:
+                            foundation_result = action_result
+                            continue
+                    return _result(LifecycleResultCategory.OPERATION_UNCERTAIN)
                 return _result(LifecycleResultCategory.OPERATION_UNCERTAIN)
             attempted.add(plan.action)
             action_result = self._apply(plan.action, locator, target, transition)
-            if action_result is not None:
+            if type(action_result) is LifecycleExecutionResult:
                 return action_result
+            if type(action_result) is MigrationState:
+                foundation_result = action_result
 
     def _admit(
         self, command: LifecycleCommand
@@ -267,6 +317,54 @@ class LifecycleCoordinator:
             state = self._catalog.inspect_migration(locator)
         except StorageBusy:
             return FoundationObservation.BUSY
+        except StorageTransientJournal:
+            # The inspection boundary rejects rollback journals. During an
+            # admitted same-key lifecycle race, a cooperating migration may
+            # own that journal briefly. Reconcile once through the catalogue's
+            # mutation boundary, which is the only path allowed to validate
+            # live journal evidence, then let the outer loop reobserve.
+            try:
+                state = self._catalog.migrate(locator)
+            except StorageBusy:
+                return FoundationObservation.BUSY
+            except StorageUnavailable:
+                # Physical work may have committed before the migration path
+                # lost its final identity/sidecar observation. One fresh
+                # read-only inspection can prove an exact peer-completed
+                # target; any continuing failure remains post-action uncertain.
+                try:
+                    state = self._catalog.inspect_migration(locator)
+                except StorageBusy:
+                    return FoundationObservation.BUSY
+                except (StorageUnavailable, StorageMigrationError):
+                    return FoundationObservation.UNCERTAIN
+                except Exception:
+                    return _result(LifecycleResultCategory.INTERNAL_FAILURE)
+            except StorageMigrationError:
+                return FoundationObservation.UNCERTAIN
+            except Exception:
+                return _result(LifecycleResultCategory.INTERNAL_FAILURE)
+            if type(state) is not MigrationState or state.component != "service_store":
+                return _result(LifecycleResultCategory.INTERNAL_FAILURE)
+            if state.status != "ready":
+                # A typed peer-journal path is concurrent-progress evidence.
+                # Its mutation result must never flow into terminal recovery;
+                # only one independent exact-ready read may promote it.
+                try:
+                    refreshed = self._catalog.inspect_migration(locator)
+                except StorageBusy:
+                    return FoundationObservation.BUSY
+                except (StorageUnavailable, StorageMigrationError):
+                    return FoundationObservation.UNCERTAIN
+                except Exception:
+                    return _result(LifecycleResultCategory.INTERNAL_FAILURE)
+                if (
+                    type(refreshed) is not MigrationState
+                    or refreshed.component != "service_store"
+                    or refreshed.status != "ready"
+                ):
+                    return FoundationObservation.UNCERTAIN
+                state = refreshed
         except StorageUnavailable:
             return FoundationObservation.UNAVAILABLE
         except StorageMigrationError:
@@ -277,6 +375,7 @@ class LifecycleCoordinator:
             return _result(LifecycleResultCategory.INTERNAL_FAILURE)
         return {
             "uninitialised": FoundationObservation.UNINITIALISED,
+            "outdated": FoundationObservation.OUTDATED,
             "ready": FoundationObservation.READY,
             "dirty": FoundationObservation.DIRTY,
             "incompatible": FoundationObservation.INCOMPATIBLE,
@@ -289,6 +388,29 @@ class LifecycleCoordinator:
             state = self._domain.inspect(locator, specification)
         except StorageBusy:
             return DomainObservation.BUSY
+        except StorageTransientJournal:
+            foundation = self._foundation(locator)
+            if type(foundation) is LifecycleExecutionResult:
+                return foundation
+            if foundation is not FoundationObservation.READY:
+                return {
+                    FoundationObservation.BUSY: DomainObservation.BUSY,
+                    FoundationObservation.UNAVAILABLE: DomainObservation.UNAVAILABLE,
+                    FoundationObservation.UNCERTAIN: DomainObservation.UNCERTAIN,
+                }.get(
+                    foundation,
+                    _result(LifecycleResultCategory.OPERATION_UNCERTAIN),
+                )
+            try:
+                state = self._domain.inspect(locator, specification)
+            except StorageBusy:
+                return DomainObservation.BUSY
+            except StorageUnavailable:
+                return DomainObservation.UNCERTAIN
+            except StorageMigrationError:
+                return DomainObservation.UNCERTAIN
+            except Exception:
+                return _result(LifecycleResultCategory.INTERNAL_FAILURE)
         except StorageUnavailable:
             return DomainObservation.UNAVAILABLE
         except StorageMigrationError:
@@ -309,10 +431,13 @@ class LifecycleCoordinator:
         locator: ServiceStoreLocator,
         target: RelationalSpecification,
         transition: RelationalTransition | None,
-    ) -> LifecycleExecutionResult | None:
+    ) -> LifecycleExecutionResult | MigrationState | None:
         try:
             if action is RecoveryAction.PREPARE_FOUNDATION:
-                self._catalog.migrate(locator)
+                state = self._catalog.migrate(locator)
+                if type(state) is not MigrationState or state.component != "service_store":
+                    return _result(LifecycleResultCategory.INTERNAL_FAILURE)
+                return state
             elif action is RecoveryAction.APPLY_INITIAL_SCHEMA:
                 self._domain.materialise(locator, target)
             elif action is RecoveryAction.APPLY_TRANSITION and transition is not None:
@@ -357,12 +482,12 @@ class LifecycleCoordinator:
         try:
             uow = self._uows()
         except Exception as error:
-            return _before_commit_error(error)
+            return _terminal_write_error(error)
         try:
             terminal = operation(uow)
         except Exception as error:
             _rollback_close(uow)
-            return _before_commit_error(error)
+            return _terminal_write_error(error)
         if type(terminal) not in {CompletedLifecycleClaim, RecoveryRequiredLifecycleClaim}:
             _rollback_close(uow)
             return _result(LifecycleResultCategory.INTERNAL_FAILURE)
@@ -438,6 +563,17 @@ def _before_commit_error(error: Exception) -> LifecycleExecutionResult:
         return _result(LifecycleResultCategory.STORAGE_BUSY)
     if isinstance(error, StorageUnavailable):
         return _result(LifecycleResultCategory.STORAGE_UNAVAILABLE)
+    return _result(LifecycleResultCategory.INTERNAL_FAILURE)
+
+
+def _terminal_write_error(error: Exception) -> LifecycleExecutionResult:
+    if isinstance(error, StorageBusy):
+        return _result(LifecycleResultCategory.STORAGE_BUSY)
+    if isinstance(error, StorageUnavailable):
+        # Physical reconciliation precedes the terminal registry write.
+        # Failure to observe or commit that terminal state is therefore
+        # uncertain and safely replayable by the admitted same key.
+        return _result(LifecycleResultCategory.OPERATION_UNCERTAIN)
     return _result(LifecycleResultCategory.INTERNAL_FAILURE)
 
 

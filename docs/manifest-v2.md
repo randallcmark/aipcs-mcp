@@ -22,15 +22,25 @@ remain explicit and globally unique.
 
 Every entity must declare the same server-managed fields exactly: id, owner_id,
 created_at, updated_at, created_via, and record_version. Only id may be a
-primary key. The server owns their values; a future record API will not accept
-caller-provided values for them.
+primary key. The server owns their values; the record API rejects
+caller-provided values for them and omits `owner_id` from public record
+projections.
 
 Supported attribute types are string, integer, number, boolean, datetime, uuid,
 and string_list. Enumerated values and retrieval modes are type-checked.
-Enumerated numeric values must be finite; string and string-list element values
-may not contain NUL characters. `allowed_values` is application metadata, not a
-physical database constraint. A future record boundary will require every
-`string_list` element to belong to its declared allowed set.
+Integer values use the signed-64 range. Number values use finite SQLite REAL
+values; an integral JSON value supplied for a number must be within the
+IEEE-754 exact-integer range (`-2^53` through `2^53`) so persistence never
+silently rounds it. String and string-list element values may not contain NUL
+characters. `allowed_values` is application metadata, not a physical database
+constraint. The record boundary validates every supplied value, including each
+`string_list` member, before persistence. For a `string_list`, `allowed_values`
+is a set of scalar strings and every stored list member must belong to that
+set.
+
+Record JSON is bounded to 64 KiB. One string is bounded to 16 KiB. A
+`string_list` contains at most 256 distinct strings, each at most 256
+characters.
 
 ## Relationships, indexes, and retrieval intent
 
@@ -38,10 +48,10 @@ A relationship names an agent-declared, non-primary-key UUID source field and
 targets another entity's `id`; the server-managed `id` cannot be a source.
 Each source endpoint may name only one relationship, so one UUID value never
 has ambiguous targets. The only currently accepted delete rule is `restrict`.
-Delete and update restriction is immediate in both reference adapters; public v1 does not claim a
-deferred `RESTRICT` combination that the databases implement differently.
+Delete and update restriction is immediate in the current relational contract;
+public v1 does not claim a deferred `RESTRICT` combination across adapters.
 Required relationship edges must be acyclic (including a required self-loop),
-because a future single-record API could not create the first record in such a
+because the single-record API could not create the first record in such a
 cycle. Nullable edges may break a self or multi-entity cycle, and relationships
 from distinct source fields remain valid. These rules deliberately reject
 declarations that future adapters and record operations could not enforce or
@@ -50,6 +60,17 @@ populate consistently.
 Indexes reference known scalar attributes. string_list fields cannot be
 indexed. Query patterns are descriptive retrieval intent; discovery facets use
 an explicit entity-and-field object rather than a shorthand string.
+
+Retrieval modes have operational meaning:
+
+- ordinary scalar fields use exact equality;
+- a `string_list` with `retrieval_mode: "membership"` accepts one string
+  member as a filter; and
+- a string with `retrieval_mode: "annotation"` is stored and returned but is
+  not filterable.
+
+Search accepts at most 16 declared domain filters. There is no inferred,
+substring, fuzzy, semantic, or cross-service filter mode.
 
 ## Initial design and evolution
 
@@ -61,13 +82,17 @@ entry contains one to 32 non-empty human-readable operation annotations, each
 at most 240 characters. Those annotations describe a change but never authorise
 or derive a physical delta.
 
-In the ready SQLite lifecycle profile, a validated initial manifest is stored
-against a service seed. That is registry persistence only: it does not
-materialise a service store, create tables, or make records available. A future
-lifecycle slice will define how later schema versions are applied publicly. A
-private SQLite adapter may directly apply a separately supplied validated
-additive transition to an already materialised store, but it neither updates
-registry-held manifest state nor exposes public service evolution.
+In the ready SQLite profile, design stores a validated initial manifest against
+a service seed but creates no service database or table. Materialise applies
+that initial schema. Evolve accepts one complete adjacent target manifest and
+atomically applies the supported additive transition before advancing the
+registry-held authoritative manifest.
+
+Supported evolution includes new entities, nullable appended fields, new
+indexes, and approved application-only metadata additions. It rejects rename,
+removal, rebuild, required-field retrofit, relationship retrofit from an
+existing source table, index mutation, and allowed-value narrowing. History
+annotations describe the transition but never authorise SQL.
 
 ## Retired input
 

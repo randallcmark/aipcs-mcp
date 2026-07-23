@@ -85,7 +85,7 @@ def test_wal_policy_descriptor_is_exact_strict_singleton_evidence(
     ("module", "descriptors", "predecessor", "target", "policy"),
     (
         (registry, registry.MIGRATIONS, 2, 3, registry.R3_POLICY),
-        (service_store, service_store.MIGRATIONS, 1, 2, service_store.R2_POLICY),
+        (service_store, service_store.MIGRATIONS[:2], 1, 2, service_store.R2_POLICY),
     ),
 )
 def test_wal_classifier_adopts_only_the_four_exact_states(

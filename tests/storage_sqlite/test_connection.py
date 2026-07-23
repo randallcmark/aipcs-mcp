@@ -32,6 +32,9 @@ class _Location:
     def verify_live_database_identity(self) -> None:
         pass
 
+    def record_connection_header_mode(self, mode: str) -> None:
+        pass
+
     def adopt_live_sidecars(self, *, allow_journal: bool) -> None:
         self.sidecar_calls.append(("adopt", allow_journal))
 

@@ -25,6 +25,7 @@ from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCat
 from aipcs_mcp.storage.sqlite import domain_schema as domain_module
 from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
 from aipcs_mcp.storage.sqlite.domain_schema_layout import build_domain_schema_layout
+from aipcs_mcp.storage.sqlite.service_store_migrations import R3 as SERVICE_STORE_R3
 
 
 def _locator(value: int = 1) -> ServiceStoreLocator:
@@ -555,13 +556,7 @@ def test_identity_replacement_at_each_precommit_checkpoint_never_mutates_substit
                 "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name,1,7) <> 'sqlite_'"
             )
         }
-    assert tables == {
-        "__aipcs_service_store_meta",
-        "__aipcs_service_store_migration",
-        "__aipcs_service_store_policy",
-        "note",
-        "project",
-    }
+        assert tables == set(SERVICE_STORE_R3.table_xinfo) | {"note", "project"}
 
 
 def test_target_ready_noop_identity_replacement_is_unavailable_not_ready(
@@ -603,14 +598,7 @@ def test_target_ready_noop_identity_replacement_is_unavailable_not_ready(
                 "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name,1,7) <> 'sqlite_'"
             )
         }
-    assert tables == {
-        "__aipcs_service_store_meta",
-        "__aipcs_service_store_migration",
-        "__aipcs_service_store_policy",
-        "note",
-        "project",
-        "task",
-    }
+        assert tables == set(SERVICE_STORE_R3.table_xinfo) | {"note", "project", "task"}
 
 
 def test_neither_exact_identity_replacement_is_unavailable_not_incompatible(

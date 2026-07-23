@@ -14,6 +14,7 @@ from aipcs_mcp.storage.errors import (
     StorageBusy,
     StorageContractError,
     StorageMigrationError,
+    StorageTransientJournal,
     StorageUnavailable,
 )
 
@@ -27,7 +28,7 @@ from .connection import (
 )
 from .location import AnchoredLocation, SQLiteLocationPolicy, create_database
 from .result_codes import is_sqlite_busy
-from .service_store_migrations import META, MIGRATION, R1, R2, R2_POLICY, TARGET_REVISION
+from .service_store_migrations import META, MIGRATION, R1, R2, R2_POLICY, R3, TARGET_REVISION
 from .wal_policy import WAL_JOURNAL_MODE_OPERATION, WAL_POLICY_ID, WALPolicyState
 
 
@@ -40,6 +41,8 @@ def _bounded[**P, R](method: Callable[P, R]) -> Callable[P, R]:
             raise
         except StorageBusy:
             failure: Exception = StorageBusy()
+        except StorageTransientJournal:
+            failure = StorageTransientJournal()
         except StorageUnavailable:
             failure = StorageUnavailable()
         except StorageMigrationError:
@@ -113,18 +116,46 @@ class SQLiteServiceStoreCatalog:
         try:
             anchored = self._acquire_for_migration(namespace)
             connection = self._migration_connection(anchored)
-            state = self._prepare_or_classify(connection, anchored, namespace)
+            r3_state, _ = service_store_inspection.classify_r3_foundation(connection, namespace)
+            if r3_state is service_store_inspection.R3FoundationState.PREPARED_R3:
+                self._finalise_r3(connection, anchored, namespace)
+            elif r3_state is not service_store_inspection.R3FoundationState.READY_R3:
+                state = self._prepare_or_classify(connection, anchored, namespace)
 
-            if state is WALPolicyState.PREPARED_DELETE:
-                _switch_to_wal(connection, anchored)
-                state = WALPolicyState.PREPARED_WAL
+                if state is WALPolicyState.PREPARED_DELETE:
+                    _switch_to_wal(connection, anchored)
+                    state = WALPolicyState.PREPARED_WAL
 
-            if state is WALPolicyState.PREPARED_WAL:
-                self._finalise_wal(connection, anchored, namespace)
-            elif state is not WALPolicyState.READY_WAL:
-                # The inspection result is the bounded compatibility result for
-                # states which must never be repaired by a migration attempt.
-                return service_store_inspection.inspect_connection(connection, namespace, integrity=True)
+                if state is WALPolicyState.PREPARED_WAL:
+                    self._finalise_wal(connection, anchored, namespace)
+                elif state is not WALPolicyState.READY_WAL:
+                    # A contender can observe stale R1/R2 policy evidence after
+                    # another writer has already prepared or completed R3.
+                    # Continue only from an exact recognised R3 foundation.
+                    r3_state, _ = service_store_inspection.classify_r3_foundation(
+                        connection, namespace
+                    )
+                    if r3_state is service_store_inspection.R3FoundationState.INCOMPATIBLE:
+                        # The inspection result is the bounded compatibility result
+                        # for states which must never be repaired by a migration attempt.
+                        return service_store_inspection.inspect_connection(
+                            connection, namespace, integrity=True
+                        )
+
+                r3_state, _ = service_store_inspection.classify_r3_foundation(
+                    connection, namespace
+                )
+                if r3_state is service_store_inspection.R3FoundationState.CLEAN_R2:
+                    self._prepare_r3(connection, anchored, namespace)
+                    r3_state, _ = service_store_inspection.classify_r3_foundation(
+                        connection, namespace
+                    )
+                if r3_state is service_store_inspection.R3FoundationState.PREPARED_R3:
+                    self._finalise_r3(connection, anchored, namespace)
+                elif r3_state is not service_store_inspection.R3FoundationState.READY_R3:
+                    return service_store_inspection.inspect_connection(
+                        connection, namespace, integrity=True
+                    )
 
             _checkpoint_passive(connection)
             anchored.verify_live_database_identity()
@@ -226,6 +257,16 @@ class SQLiteServiceStoreCatalog:
         # A WAL writer's first begin may create SQLite-owned WAL/SHM siblings.
         anchored.adopt_live_sidecars(allow_journal=False)
         anchored.verify_live_sidecars(allow_journal=False)
+        r3_state, _ = service_store_inspection.classify_r3_foundation(connection, namespace)
+        if r3_state in {
+            service_store_inspection.R3FoundationState.CLEAN_R2,
+            service_store_inspection.R3FoundationState.PREPARED_R3,
+            service_store_inspection.R3FoundationState.READY_R3,
+        }:
+            # Another writer may have completed R2, or progressed beyond it,
+            # while this contender waited for the writer slot.
+            connection.rollback()
+            return
         state, _ = service_store_inspection.classify_connection(connection, namespace)
         if state is WALPolicyState.READY_WAL:
             connection.rollback()
@@ -243,6 +284,78 @@ class SQLiteServiceStoreCatalog:
         connection.execute(
             f'UPDATE "{META}" SET "applied_revision"=?, "dirty"=0 WHERE "singleton"=1',
             (R2.revision,),
+        )
+        # R2 is physically complete at this point, but is truthfully reported
+        # as an exact predecessor until the following R3 data foundation runs.
+        if (
+            service_store_inspection.inspect_connection(connection, namespace, integrity=True).status
+            != "outdated"
+        ):
+            raise StorageMigrationError()
+        anchored.verify_live_database_identity()
+        anchored.verify_live_sidecars(allow_journal=False)
+        connection.commit()
+        anchored.verify_live_database_identity()
+        anchored.verify_live_sidecars(allow_journal=False)
+
+    def _prepare_r3(
+        self,
+        connection: sqlite3.Connection,
+        anchored: AnchoredLocation,
+        namespace: str,
+    ) -> None:
+        if connection.in_transaction:
+            raise StorageMigrationError()
+        connection.execute("BEGIN IMMEDIATE")
+        state, _ = service_store_inspection.classify_r3_foundation(connection, namespace)
+        if state in {
+            service_store_inspection.R3FoundationState.PREPARED_R3,
+            service_store_inspection.R3FoundationState.READY_R3,
+        }:
+            # A concurrent exact migration has already prepared or completed R3.
+            connection.rollback()
+            return
+        if state is not service_store_inspection.R3FoundationState.CLEAN_R2:
+            connection.rollback()
+            raise StorageMigrationError()
+        connection.execute(f'UPDATE "{META}" SET "dirty"=1 WHERE "singleton"=1')
+        for statement in R3.ddl:
+            connection.execute(statement)
+        if (
+            service_store_inspection.classify_r3_foundation(connection, namespace)[0]
+            is not service_store_inspection.R3FoundationState.PREPARED_R3
+        ):
+            raise StorageMigrationError()
+        anchored.verify_live_database_identity()
+        anchored.verify_live_sidecars(allow_journal=False)
+        connection.commit()
+        anchored.verify_live_database_identity()
+        anchored.verify_live_sidecars(allow_journal=False)
+
+    def _finalise_r3(
+        self,
+        connection: sqlite3.Connection,
+        anchored: AnchoredLocation,
+        namespace: str,
+    ) -> None:
+        if connection.in_transaction:
+            raise StorageMigrationError()
+        connection.execute("BEGIN IMMEDIATE")
+        state, _ = service_store_inspection.classify_r3_foundation(connection, namespace)
+        if state is service_store_inspection.R3FoundationState.READY_R3:
+            # The exact target committed while this contender waited.
+            connection.rollback()
+            return
+        if state is not service_store_inspection.R3FoundationState.PREPARED_R3:
+            connection.rollback()
+            raise StorageMigrationError()
+        connection.execute(
+            f'INSERT INTO "{MIGRATION}" VALUES (?,?,?,?,?)',
+            ("service_store", R3.revision, R3.migration_id, R3.checksum, encode_time(datetime.now(UTC))),
+        )
+        connection.execute(
+            f'UPDATE "{META}" SET "applied_revision"=?, "dirty"=0 WHERE "singleton"=1',
+            (R3.revision,),
         )
         if service_store_inspection.inspect_connection(connection, namespace, integrity=True).status != "ready":
             raise StorageMigrationError()
@@ -283,6 +396,7 @@ def _switch_to_wal(connection: sqlite3.Connection, anchored: AnchoredLocation) -
     if row is None or row[0] != "wal":
         raise StorageMigrationError()
     anchored.verify_live_database_identity()
+    anchored.record_connection_header_mode("wal")
 
 
 def _checkpoint_passive(connection: sqlite3.Connection) -> None:

@@ -19,12 +19,12 @@ from .errors import StorageContractError
 
 StorageBackend = Literal["sqlite", "postgresql"]
 StorageComponent = Literal["registry", "service_store"]
-MigrationStatus = Literal["uninitialised", "ready", "incompatible", "dirty"]
+MigrationStatus = Literal["uninitialised", "outdated", "ready", "incompatible", "dirty"]
 DomainSchemaStatus = Literal["unmaterialised", "ready", "incompatible"]
 
 _BACKENDS = frozenset({"sqlite", "postgresql"})
 _COMPONENTS = frozenset({"registry", "service_store"})
-_STATUSES = frozenset({"uninitialised", "ready", "incompatible", "dirty"})
+_STATUSES = frozenset({"uninitialised", "outdated", "ready", "incompatible", "dirty"})
 _DOMAIN_SCHEMA_STATUSES = frozenset({"unmaterialised", "ready", "incompatible"})
 _LOCATOR_NAMESPACE = re.compile(r"^svc_[0-9a-f]{32}$")
 
@@ -89,6 +89,8 @@ class MigrationState:
         if type(self.status) is not str or self.status not in _STATUSES:
             raise StorageContractError()
         if self.status == "uninitialised" and self.applied_revision != 0:
+            raise StorageContractError()
+        if self.status == "outdated" and not 0 < self.applied_revision < self.target_revision:
             raise StorageContractError()
         if self.status == "ready" and self.applied_revision != self.target_revision:
             raise StorageContractError()

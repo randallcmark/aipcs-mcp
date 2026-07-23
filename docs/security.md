@@ -1,174 +1,162 @@
 # Security and trust boundary
 
-AIPCS treats agent-provided tool arguments, schemas, and configuration as
-untrusted. Public validation happens before lifecycle persistence. The runtime
-also confines storage implementation details behind bounded startup and tool
-errors.
+AIPCS treats MCP arguments, manifests, record values, cursors, configuration,
+and durable storage as untrusted at each boundary. Inputs are validated before
+persistence; failures are bounded and redacted.
 
-## Input, configuration, and transport
+This document describes the current source contract. There is not yet a
+published supported-release, maintenance, vulnerability-reporting, or
+security-fix policy.
 
-- Public models reject unknown fields and enforce bounded, typed values.
-- Service identifiers must be lowercase canonical UUIDs.
-- Retired fields, principal or provenance controls, storage locations, backend
-  or connection fields, and endpoint settings are rejected from normal input.
-- Manifest v1 is accepted only by the explicit one-way converter, never by
-  normal public design input.
-- Configuration is strict TOML selected only with an explicit `--config` path.
-  It has no implicit file discovery, dotenv loading, include mechanism, or
-  literal credential field.
-- Configuration reports are allowlisted and redact principal values, file and
-  storage paths, DSN-reference names, secrets, endpoints, raw TOML, and raw
-  environment values.
-- Public v1 is stdio only. Listener-oriented transport settings are rejected
-  before configuration resolution and before any MCP server construction.
-- `aipcs_service_seed`, `aipcs_service_design`,
-  `aipcs_service_materialise`, and `aipcs_service_evolve` require bounded
-  idempotency keys. Same-key, same-request retries replay the prior result; a
-  different seed/design request using the same key returns `conflict`, while a
-  different materialise/evolve request returns `changed_fingerprint`.
+## Input boundary
 
-The configured SQLite principal is opaque and process-local. It is neither an
-operating-system identity nor MCP client identity, authentication, or tenancy.
-It is never accepted in a tool request or exposed in a result, config report,
-error, log, or representation. The transport owns the fixed `created_via: mcp`
-provenance value; callers cannot override it.
+- Public request models reject unknown fields and enforce strict types and
+  documented bounds.
+- Service, record, and branch identifiers are canonical non-zero UUIDs.
+- Caller records contain domain fields only. Server-managed identity,
+  principal, timestamps, provenance, and revisions are rejected.
+- Search accepts at most 16 declared filters. Identifiers and predicates are
+  compiled from the validated manifest; caller SQL is never accepted.
+- Scalar filters are exact, membership filters accept one string, and
+  annotations are not filters.
+- Cursors are opaque, integrity-checked, and bound to the originating query.
+- Manifest v1 enters only through the explicit one-way converter.
+- Storage locations, backend controls, credentials, endpoints, principal
+  values, and operation evidence are not tool arguments.
 
-SQLite is supported only for a local POSIX filesystem on Linux and macOS, one
-host, Python 3.12+, SQLite 3.51.3+, and cooperating processes under the same
-effective user. Its location policy enforces an operator-owned `0700` root, an
-owner-only service-store container, and `0600` database/WAL/SHM files.
-Persistent WAL permits concurrent readers and one SQLite writer at a time.
-Every observable operational sidecar is a contained regular single-link,
-same-owner, non-symlink file with descriptor-relative metadata checks. Full
-no-follow `openat`/`fstat` validation occurs before SQLite opens and after it
-closes. While a SQLite handle is live, checks use descriptor-relative
-no-follow metadata lookup without opening and closing another descriptor:
-POSIX `close()` can cancel SQLite advisory locks on the same inode. A
-cooperating SQLite peer may also unlink or recreate WAL/SHM pathnames while
-another connection retains SQLite's internal file descriptor, so the adapter
-revalidates each current pathname rather than claiming cross-process path
-identity continuity. See SQLite's
-[POSIX advisory-lock warning](https://www.sqlite.org/howtocorrupt.html#_posix_advisory_locks_canceled_by_a_separate_thread_doing_close_).
-The adapter never edits, copies, deletes, or repairs WAL/SHM content.
+Record JSON is bounded to 64 KiB, strings to 16 KiB, string lists to 256
+distinct items, pages to 100, branch assignment targets to 100, bootstrap to
+100 services, summary facets to 20 values, summary branches to 100, samples to
+three records per entity, and maintenance to 100 candidates.
 
-`serve` performs only the explicit registry startup migration; it fails before
-MCP construction when storage is busy, unsafe, dirty, incompatible, newer, or
-not ready. Only explicit migration owns DELETE-to-WAL conversion, legacy
-rollback recovery, and the ready PASSIVE checkpoint. One bounded
-`sqlite_busy_timeout_ms` setting configures SQLite lock acquisition from 1
-through 30,000 ms (default 5,000); numeric BUSY-family outcomes become
-`StorageBusy` without an adapter retry. They remain distinct from unavailable,
-incompatible, `SQLITE_LOCKED`, and uncertain commit outcomes. WAL does not
-extend support to network filesystems, multi-host use, Windows SQLite, or a
-hostile same-user process.
+## Principal and provenance
 
-V1-08C establishes the final local SQLite policy under which V1-08D's
-cross-store coordinator was tested. V1-08E composes that coordinator only
-behind the two generic public lifecycle operations.
+The configured SQLite principal is an opaque process-local ownership boundary,
+not operating-system identity, MCP client authentication, or hosted tenancy.
+The process uses one principal for its lifetime. Tools neither accept nor
+return it.
 
-The coordinator treats a dirty service-store foundation as one bounded
-recovery check, not immediate corruption: the existing migration action may
-resume an exact AIPCS-prepared WAL phase, then fresh observation decides.
-Persistent generic dirt becomes recovery-required and is never repaired.
+The transport fixes `created_via` to `mcp`. Public records may return this safe
+provenance label but omit `owner_id`. Cross-principal lookup is
+indistinguishable from absence or stale state as appropriate; counts, facets,
+branches, samples, maintenance, replay keys, and cursors are all
+principal-scoped.
 
-V1-08B is deliberately narrower than the V1-08D coordinator. Its historical
-R2 registry migration accepts only exact, clean, public-reachable R1 state and
-otherwise fails closed with the existing bounded migration outcome; it adds no
-public upgrade, repair, or recovery command. That R2 layout holds one global
-durable lifecycle/idempotency ledger whose prepared entries can block a
-conflicting lifecycle intent for the same service. Its legacy completed replays
-retain their existing result bytes, while lifecycle evidence and its bounded
-terminal category are never projected through MCP. Explicit inspection and
-migration finalization strictly decode all registry rows in addition to checking
-physical signatures, so canonical-but-forged service, lifecycle, completion,
-or audit data is incompatible and is never silently repaired. V1-08C advances
-that registry to R3 and does not change runtime composition, MCP registration,
-or service-store access.
+## Replay and concurrency boundaries
 
-Filesystem validation is a local same-effective-user boundary, not isolation
-from a malicious process running as that user. Descriptor-anchored operations
-reject unsafe ancestors, containers, links, file types, modes, sidecars, and
-observable replacement, but a hostile same-user process is already inside the
-operator's filesystem authority. Keep the data root private and do not expose
-it to untrusted same-user workloads.
+Seed/design and materialise/evolve mutations use the registry's global
+principal/idempotency namespace. Lifecycle intent may be prepared, completed,
+or recovery-required and is the only cross-store transition/recovery authority.
+Public projections do not expose its key, fingerprint, target snapshot,
+timestamps, fault text, or internal phase.
 
-## Safe responses
+Record and topology mutations use a separate service-local R3 ledger. It
+stores only completed outcomes atomically with local data/history changes.
+It cannot block schema lifecycle, become current manifest authority, or imply a
+cross-store transaction. Same-key changed content fails; exact retries replay
+without another mutation.
 
-Tool failures use structured envelopes with a stable code, concise message, and
-bounded remediation issues. Validation failures are mapped to public-facing
-issues; tracebacks, database details, SQL, credentials, registry names, local
-paths, principal values, payload echoes, and audit data are not part of the
-contract. Startup failure produces one bounded `internal_error` on stderr and
-does not begin MCP.
+Optimistic revisions protect service, record, and branch writes. Effective
+topology assignment also compares and advances affected record revisions.
+Storage busy and uncertain outcomes are not converted into success from
+exception text; callers retry the exact request and key only when the public
+error marks it retryable. Concurrent same-key lifecycle reconciliation may
+surface retryable uncertainty before the terminal registry write is observed.
+Repeated coarse `dirty` storage evidence cannot by itself make
+recovery-required durable.
 
-The MCP boundary owns conversion before framework validation can leak an
-exception string. Valid tool requests with unknown, malformed, badly typed, or
-oversized object arguments receive a safe envelope. A non-object MCP
-`arguments` value is rejected by the SDK with its fixed JSON-RPC `-32602`
-invalid-params response rather than an AIPCS envelope. A malformed JSON line is
-rejected before dispatch: no application-envelope or response-shape guarantee
-is made, but the process must remain safe for a subsequent valid request.
+## Discovery and authority signals
 
-Capability information intentionally reports only public features: package and
-contract versions, manifest support, enabled transport,
-`registry_lifecycle`, and `materialisation_lifecycle`. It must not expose credentials, DSNs,
-filesystem locations, principal or owner information, audit data, or network
-endpoints. Registry lifecycle is true only when a ready SQLite process
-registers all four registry tools; materialisation lifecycle is true only when
-both physical lifecycle tools and their coordinator are fully bound. An
-unavailable profile is not a server capability.
+Bootstrap is shape-only and value-free. It reads registry projection and never
+opens service stores.
 
-The opaque `svc_` namespace is a non-secret logical identifier and is the
-only storage identity that may appear in a materialised service projection.
-The private `ServiceStoreLocator` object, physical data-root and database
-paths remain private and must not appear in responses, capabilities, errors,
-logs, audit records, or representations.
+Summary may return bounded principal-scoped record samples and observed
+declared domain facets. It does not return principal identity, replay evidence,
+storage paths, or private SQL. Authority-field availability reports only
+recognised fields declared by the manifest; it is not a truth judgement.
 
-R2's reserved materialisation metadata is limited to a safe logical backend
-and that opaque namespace. Public service results include server-owned
-`service_revision`; materialisation fields remain null until materialise
-completes. The
-metadata-only audit store retains at most the newest 1,000 entries per
-principal by audit identifier; this retention bound is private, is not an audit
-query feature, and never prunes idempotency or lifecycle evidence.
+Maintenance is advisory and read-only. Its expired, stale, low-confidence,
+superseded, missing-authority, unbranched, duplicate-authority, and
+annotation-size signals are mechanical. Candidate details omit record prose
+and authority-reference values. The server does not rank truth, infer semantic
+duplicates, merge, archive, delete, purge, or rewrite records.
 
-Lifecycle recovery projection exposes only `service_revision` and
-`recovery_state: clear | pending | recovery_required`. It must not expose
-an idempotency key, fingerprint, operation identifier, target snapshot, phase timestamp, fault
-text, repair procedure, SQL, private locator object, physical path, principal, or audit content.
-A recovery-required state is deterministic and non-auto-repaired through V1-08; no repair command
-is implied.
+## SQLite filesystem boundary
 
-The lifecycle error envelope freezes retryability without exposing backend detail: malformed input,
-unsupported transition, stale expected revision, changed-fingerprint reuse, recovery-required,
-storage-unavailable, and generic internal failure are non-retryable; storage-busy, different-key
-operation-in-progress, and operation-uncertain are retryable. An exact same-key prepared claim
-resumes reconciliation rather than returning operation-in-progress.
+SQLite is supported only on Linux/macOS, a local POSIX filesystem, one host,
+SQLite 3.51.3 or newer, and cooperating processes under the same effective
+user.
 
-## Test data and operational boundary
+The location policy requires an operator-owned `0700` data root, an owner-only
+service-store container, and `0600` database/WAL/SHM files. Descriptor-relative
+no-follow checks reject unsafe ancestors, symlinks, unexpected file types,
+links, ownership, modes, and observable substitution.
 
-All repository test data is synthetic and marked with its provenance. Do not
-add operational stores, database copies, credentials, or personal context to
-this repository.
+Persistent WAL permits concurrent readers and one SQLite writer. A single
+bounded timeout controls lock acquisition; the adapter performs no internal
+BUSY retry. WAL/SHM pathnames may legitimately be recreated by cooperating
+SQLite peers, so validation checks the current contained pathname without
+claiming hostile cross-process identity continuity.
 
-The registry stores service metadata, authoritative manifests, lifecycle
-evidence, and safe logical materialisation identity. A public design creates
-no service database or agent-defined table. Materialise/evolve invoke the
-private service-store catalog, domain-schema adapter, and lifecycle
-coordinator only after durable admission; they still make no records durable. The
-coordinator admits supported work before physical I/O, closes every registry
-UoW before service-store access, exposes only bounded result categories, and
-persists no path, credential, SQL, driver error, or physical locator. It is
-composed only by the ready SQLite runtime and has no standalone CLI,
-configuration, or public object surface. Direct catalog/domain use can still leave an
-orphan database or physical schema and is not a public workflow. No public
-records, branches, retrieval, backup/export, repair, operator
-administration, remote transport, PostgreSQL, or multi-user tenancy is
-implemented. Future slices must preserve the same boundary: validate input
-before persistence, keep configuration separate from data, and redact
-sensitive implementation details from errors and capability output. See the [private relational
-boundary](private-relational-boundary.md).
+This is containment under one effective user, not isolation from a malicious
+process already running as that user. Keep the data root private. Network
+filesystems, multi-host access, Windows SQLite, and hostile same-user workloads
+are unsupported.
 
-There is not yet a supported release, maintenance, or security-fix policy.
-Treat this pre-release contract as development software and report potential
-security issues through the project's future published security channel.
+Do not copy, delete, edit, or repair live WAL/SHM files and do not treat the
+main `.sqlite` file alone as an online backup. No supported online backup or
+export command exists yet.
+
+## Migration boundary
+
+`serve` explicitly migrates the registry before MCP construction. Failure
+prevents the server from starting.
+
+Service-store reads never execute DDL. An exact clean R2 store is
+migration-required. Only an admitted lifecycle, record, or topology mutation
+may request the exact R2-to-R3 migration. A prepared materialise intent may
+resume an exact clean R2 intermediate committed by a cooperating migration;
+ordinary reads still do not upgrade it. Exact known prepared states may
+resume; altered, partial, generic dirty, substituted, unknown, or future
+storage fails closed and is not repaired.
+
+Domain layout inspection compares the supplied manifest-derived specification
+with exact tables, columns, indexes, foreign keys, and reserved-object
+boundaries. Private direct adapter use can create orphan state and is not a
+supported workflow.
+
+## Safe responses and redaction
+
+Tool failures use stable codes, concise messages, bounded validation issues,
+and explicit retryability. They do not include:
+
+- tracebacks or exception strings;
+- SQL, database/table names, migration internals, or driver codes;
+- filesystem paths, DSNs, endpoints, or credentials;
+- principal values or `owner_id`;
+- idempotency keys, fingerprints, lifecycle intent, or audit rows; or
+- echoed record prose or authority references.
+
+Startup failure emits one bounded error on stderr and does not begin MCP.
+Stdout belongs exclusively to stdio MCP. A malformed JSON line may be rejected
+by the underlying protocol before AIPCS dispatch, but it must not reveal
+private state.
+
+Server info reports only package/contract versions, manifest support,
+transport, and enabled public feature flags. The safe `svc_` namespace may
+appear after materialisation; the physical locator and data root may not.
+
+Configuration reports are allowlisted and redact principal values, config
+paths, storage roots, DSN-reference names, raw environment/TOML, endpoints, and
+secrets. Configuration has no dotenv loading, implicit file discovery, include
+mechanism, literal credential field, or remote listener setting.
+
+## Repository boundary
+
+Repository tests and examples are synthetic contract fixtures. Do not commit
+operational databases, snapshots, transcripts, credentials, personal context,
+or agent-specific operating instructions to the public repository.
+
+PostgreSQL, remote MCP, authentication, hosted tenancy, export/import/purge,
+repair, and administration workflows are deferred and must define their own
+trust boundaries before release.

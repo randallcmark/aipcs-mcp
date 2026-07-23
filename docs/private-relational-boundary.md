@@ -51,8 +51,8 @@ external deletion of all domain objects is consequently indistinguishable from
 never materialising them; partial deletion remains incompatible. Do not try to
 repair or infer history from this seam.
 
-The private V1-08D coordinator implements the V1-08A recovery consequence
-without public composition. The registry holds the sole current manifest and
+The lifecycle coordinator implements the V1-08 recovery consequence behind
+the public application boundary. The registry holds the sole current manifest and
 may hold one immutable admitted target snapshot as lifecycle evidence; the
 service database remains free of a manifest, schema-version row, fingerprint,
 operation record, provenance seal, or domain ledger. Within the contained
@@ -69,15 +69,17 @@ domain-schema I/O. Every physical action return is discarded and exact state
 is re-observed through the pure recovery planner; the coordinator performs
 each physical action at most once per call.
 
-The one bounded foundation action also resolves a SQLite concurrency
+The bounded foundation reconciliation also resolves a SQLite concurrency
 distinction. Crash-resumable WAL migration exposes its exact committed
 `prepared` phases as `dirty`, so another same-key worker may see dirt while
-valid migration is live. The coordinator runs `catalog.migrate()` once for
-that observation and re-observes. A prepared phase converges to ready; generic
-historical dirt is not repaired and remains dirty, at which point
-recovery-required becomes durable. This confirmation applies to materialise
-and evolve and takes precedence over the generic repeated-action uncertainty
-guard.
+valid migration is live. The coordinator runs `catalog.migrate()` for that
+observation and re-observes within a fixed action budget. If the state remains
+coarsely `dirty`, it returns retryable operation-uncertain and leaves the
+registry intent prepared; repeated dirt alone is not terminal recovery proof.
+An exact clean R2 `outdated` foundation is likewise a supported intermediate
+that a prepared materialise or evolve operation resumes toward R3. Generic
+historical dirt is not repaired, and exact incompatible evidence remains
+recovery-required.
 
 The coordinator preserves the frozen result contract: malformed input,
 unsupported transition, stale expected revision, changed-fingerprint reuse,
@@ -123,17 +125,18 @@ it through the generic public lifecycle, and no repair procedure exists.
 
 The public runtime migrates the registry, then constructs the catalog,
 domain-schema store, and coordinator from the same resolved SQLite policy
-without opening a service store. A ready SQLite server exposes server-info plus
-seed, list, inspect, design, materialise, and evolve. Design remains seeded;
-only an admitted materialise/evolve call may open service storage. Public
-results expose the terminal service or aggregate recovery state, never these
-private objects or physical details. Records and domain-state inspection remain
-unavailable. The CLI and configuration do not expose or construct the
-coordinator independently.
+without opening a service store. A ready SQLite server exposes the 21-tool
+lifecycle, record, discovery, topology, and maintenance surface. Design remains
+seeded; only an admitted lifecycle, record, or topology mutation may create or
+migrate service storage. Read-side calls never perform DDL. Public results
+expose the terminal service or aggregate recovery state, never these private
+objects or physical details. The CLI and configuration do not expose or
+construct the coordinator independently.
 
-V1-08 owns lifecycle concurrency and the later record/discovery work. Its
-sequence is lifecycle contract (A), durable intent (B),
+V1-08 owns lifecycle concurrency and the record/discovery runtime. Its sequence
+is lifecycle contract (A), durable intent (B),
 SQLite WAL/busy policy (C), internal coordinator (D), public lifecycle composition (E), generic
-records (F), and structured discovery/topology (G); PostgreSQL begins only after V1-08G.
+records (F), and structured discovery/topology (G). These slices are now integrated under MCP
+contract 1.2.0; PostgreSQL begins only after this milestone.
 Treat the concrete catalog/domain/coordinator seam as an internal implementation
 and release boundary, not a user-facing adapter or repair API.
