@@ -34,6 +34,7 @@ from aipcs_mcp.lifecycle import (
     LifecycleIntent,
     LifecyclePhase,
     MaterialiseCommand,
+    RecoveryState,
     lifecycle_fingerprint,
     prepare_intent,
 )
@@ -154,6 +155,28 @@ class SQLiteRegistryUnitOfWork:
             (principal_id, limit),
         ).fetchall()
         return [decode_service(row) for row in rows]
+
+    @_bounded_uow
+    def recovery_state(self, principal_id: str, service_id: UUID) -> RecoveryState:
+        """Read the one active lifecycle aggregate without exposing operation evidence."""
+
+        self._read()
+        rows = self._connection.execute(
+            'SELECT * FROM "aipcs_registry_mutation" WHERE "principal_id"=? '
+            'AND "service_id"=? AND "operation_kind" IN (\'materialise\',\'evolve\') '
+            'AND "phase" IN (\'prepared\',\'recovery_required\')',
+            (principal_id, str(service_id)),
+        ).fetchall()
+        if not rows:
+            return RecoveryState.CLEAR
+        if len(rows) != 1:
+            raise ValueError
+        intent = decode_lifecycle_intent(rows[0])
+        if intent.phase is LifecyclePhase.PREPARED:
+            return RecoveryState.PENDING
+        if intent.phase is LifecyclePhase.RECOVERY_REQUIRED:
+            return RecoveryState.RECOVERY_REQUIRED
+        raise ValueError
 
     @_bounded_uow
     def add(self, service: Service) -> None:

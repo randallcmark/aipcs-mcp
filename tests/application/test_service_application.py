@@ -16,7 +16,7 @@ from aipcs_mcp.application.errors import (
 )
 from aipcs_mcp.application.models import ApplicationContext, DesignCommand, SeedCommand
 from aipcs_mcp.application.services import ServiceApplication
-from aipcs_mcp.lifecycle import MAX_SERVICE_REVISION
+from aipcs_mcp.lifecycle import MAX_SERVICE_REVISION, RecoveryState
 from aipcs_mcp.manifest_v2 import ManifestV2
 from application.fakes import (
     BACKEND_SENTINEL,
@@ -94,7 +94,7 @@ def test_seed_replay_duplicate_and_principal_scoping_are_distinct() -> None:
         1,
         1,
     )
-    assert state.uows[-1].calls == ["resolve_non_lifecycle", "close"]
+    assert state.uows[-1].calls == ["resolve_non_lifecycle", "recovery_state", "close"]
 
     duplicate = seed(application, key="seed-2")
     assert duplicate.model_dump(mode="json", by_alias=True) == original_dump
@@ -162,10 +162,36 @@ def test_design_copies_input_projection_storage_and_replay() -> None:
     )
     assert replay.model_dump(mode="json", by_alias=True) == expected
     assert (state.commits, len(state.events), clock.calls, ids.calls) == before
-    assert state.uows[-1].calls == ["resolve_non_lifecycle", "close"]
+    assert state.uows[-1].calls == ["resolve_non_lifecycle", "recovery_state", "close"]
 
     replay.schema_.entities[0].description = "changed replay"
     assert application.inspect(CONTEXT, service.service_id).schema_.entities[0].description is None
+
+
+def test_service_projection_uses_current_registry_recovery_aggregate_for_all_read_paths() -> None:
+    application, state, _, _ = build_app(clock=FixedClock(START, START + timedelta(seconds=1)))
+    seeded = seed(application)
+    state.recovery_states[(PRINCIPAL, seeded.service_id)] = RecoveryState.PENDING
+
+    assert seed(application).recovery_state == RecoveryState.PENDING
+    assert seed(application, key="seed-duplicate").recovery_state == RecoveryState.PENDING
+    assert application.inspect(CONTEXT, seeded.service_id).recovery_state == RecoveryState.PENDING
+    assert application.list(CONTEXT)[0].recovery_state == RecoveryState.PENDING
+
+    designed = application.design(
+        CONTEXT,
+        DesignCommand(seeded.service_id, manifest(), "design-recovery-state"),
+    )
+    assert designed.recovery_state == RecoveryState.PENDING
+
+    state.recovery_states[(PRINCIPAL, seeded.service_id)] = RecoveryState.RECOVERY_REQUIRED
+    replay = application.design(
+        CONTEXT,
+        DesignCommand(seeded.service_id, manifest(), "design-recovery-state"),
+    )
+    assert replay.recovery_state == RecoveryState.RECOVERY_REQUIRED
+    assert application.inspect(CONTEXT, seeded.service_id).recovery_state == RecoveryState.RECOVERY_REQUIRED
+    assert application.list(CONTEXT)[0].recovery_state == RecoveryState.RECOVERY_REQUIRED
 
 
 def test_design_guards_lifecycle_scope_and_fingerprint() -> None:
@@ -315,7 +341,7 @@ def test_close_failure_after_commit_is_bounded_and_retry_replays_durable_result(
     replay = seed(application)
     assert len(state.items) == len(state.events) == state.commits == 1
     assert replay.service_id == next(iter(state.items))
-    assert state.uows[-1].calls == ["resolve_non_lifecycle", "close"]
+    assert state.uows[-1].calls == ["resolve_non_lifecycle", "recovery_state", "close"]
 
 
 def test_every_acquired_uow_is_closed_once_including_read_and_not_found_paths() -> None:
@@ -371,7 +397,7 @@ def test_list_is_stable_bounded_and_defensively_projected() -> None:
         dumped = item.model_dump(mode="json", by_alias=True)
         assert "principal_id" not in dumped and "created_via" not in dumped
         assert PRINCIPAL not in str(dumped)
-    assert state.uows[-1].calls == ["list", "close"]
+    assert state.uows[-1].calls == ["list", "recovery_state", "recovery_state", "close"]
 
     for invalid in (0, -1, 101, True, 1.0, "1"):
         with pytest.raises(InvalidCommand):

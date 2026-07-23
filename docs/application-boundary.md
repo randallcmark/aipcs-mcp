@@ -43,14 +43,13 @@ than assuming a rollback erased it.
 
 ## Independent versions
 
-The current application keeps version dimensions separate. The frozen V1-08A contract extends that
-separation without adding a current runtime path:
+The current application keeps version dimensions separate:
 
 - `manifest_version` describes the schema-document interpretation; normal public design input is
   manifest v2.
-- `schema_version` describes agent-defined additive evolution and is a future lifecycle concurrency
+- `schema_version` describes agent-defined additive evolution and is a lifecycle concurrency
   input, not a manifest or MCP compatibility version.
-- The internal server-owned `service_revision` is the lifecycle compare-and-swap revision; a successful
+- The server-owned `service_revision` is the lifecycle compare-and-swap revision; a successful
   design/materialise/evolve/operational transition increments it once, while exact replay does not.
 - A future `record_version` is a per-record mutation revision reserved for V1-08F.
 - Adapter migration revisions describe physical storage layout and adapter-owned migration state.
@@ -59,7 +58,7 @@ Cross-store operation state (`prepared`, `completed`, or `recovery_required`) is
 from all of these values. A schema change is not an adapter migration, and neither is a substitute
 for a durable operation/recovery record.
 
-The uncomposed service-store catalog demonstrates that separation: its private
+The service-store catalog demonstrates that separation: its private
 R2 WAL-ready foundation can make adapter metadata ready without reading a
 manifest or changing registry state. Such a database is not a materialised
 service. Direct initialisation may leave it orphaned because it bypasses the
@@ -71,10 +70,11 @@ manifest at the point an adapter needs comparison. No schema ledger,
 manifest copy, schema-version row, or fingerprint is introduced into a service
 store by this boundary.
 
-## Private lifecycle coordination and future public boundary
+## Private lifecycle coordination and public boundary
 
-V1-08A froze materialise/evolve use cases, and V1-08D implements them behind a
-private coordinator without a transport or runtime call path. Materialise
+V1-08A froze materialise/evolve use cases, V1-08D implemented them behind a
+private coordinator, and V1-08E composes that coordinator through two generic
+MCP tools in the ready SQLite runtime. Materialise
 requires `service_id`, `expected_service_revision`, `expected_schema_version`,
 and an idempotency key. Evolve requires the same inputs plus a complete, deeply
 validated adjacent manifest-v2 target; it does not accept SQL, a migration
@@ -91,9 +91,10 @@ exact target from a crash-completed one. It must report recovery-required rather
 repair deleted, partial, extra, altered, or incompatible state. New work proves
 relational support before prepared insertion, commits and closes prepared
 registry intent before service-store I/O, and drives finite actions from fresh
-observation through the pure recovery planner. These private rules create no
-public operation, runtime storage I/O path, or recovery command; V1-08E owns
-public composition.
+observation through the pure recovery planner. MCP only parses typed commands,
+invokes the coordinator, and maps its bounded result. The operation evidence,
+physical adapters, and recovery mechanics remain private, and there is no
+recovery command.
 
 ### V1-08B durable registry prerequisite
 
@@ -105,17 +106,17 @@ injected registry has no repair path in this slice. Fresh registry creation appl
 then R2 migration history. The public migration-state vocabulary remains bounded; an exact R1
 observed below the target is not a new public "upgradeable" state.
 
-R2 gives every service an internal server-owned `service_revision`, beginning at 1 for migrated
-and newly seeded services. Lifecycle-relevant registry changes will use it as a compare-and-swap
+R2 gives every service a server-owned `service_revision`, beginning at 1 for migrated
+and newly seeded services. Lifecycle-relevant registry changes use it as a compare-and-swap
 counter; exact replay and failed or stale work do not advance it. R2 also reserves the existing
 public nullable materialisation fields for a safe logical storage projection: a closed backend
 name and opaque `svc_` namespace, never a path, endpoint, DSN, credential, or service-store
-ledger. Current seed, list, inspect, and design responses remain unchanged: their
-`materialised_at` and `storage` fields are null, and they do not expose `service_revision`.
+ledger. Current service projections expose the revision and aggregate recovery
+state; `materialised_at` and `storage` remain null until materialise completes.
 
 R2 generalises the one global `(principal_id, idempotency_key)` mutation ledger rather than adding
 a lifecycle ledger or key namespace. Historical seed/design rows remain strict completed `legacy`
-replays with their stored result bytes unchanged. Future materialise/evolve evidence has only the
+replays with their stored result bytes unchanged. Materialise/evolve evidence has only the
 phase `prepared`, `completed`, or `recovery_required`; a prepared intent acts as the per-service
 transition blocker, recovery-required remains blocked for explicit future reconciliation, and only
 completion releases the blocker. This is durable registry evidence only:
@@ -127,7 +128,7 @@ Registry audit remains metadata-only. R2 retains the newest 1,000 audit rows per
 with the audit append transaction. It never prunes idempotency or lifecycle evidence, has no audit
 query API, and adds no configuration, environment, CLI, or MCP control.
 
-Their frozen future result meaning is also exact: malformed input, unsupported transition, stale
+Their frozen result meaning is also exact: malformed input, unsupported transition, stale
 expected revision, changed-fingerprint reuse, recovery-required, storage-unavailable, and generic
 internal failure are non-retryable; storage-busy, different-key operation-in-progress, and
 operation-uncertain are retryable. An exact same-key prepared claim resumes reconciliation rather
@@ -137,8 +138,9 @@ than returning operation-in-progress.
 
 A SQLite adapter applies its required registry migration once before it reports
 the process ready to serve. Migration failure prevents MCP construction. The
-runtime does not construct or migrate the service-store catalog. Read
-operations do not execute DDL, and opening a unit of work does not
+ready runtime then constructs the service-store catalog, domain-schema store,
+and coordinator without allocating, inspecting, or migrating a service store.
+Read operations do not execute DDL, and opening a unit of work does not
 opportunistically alter storage layout.
 
 V1-08B did not alter the runtime composition rule, configuration, MCP tool
@@ -146,9 +148,9 @@ registration, SQLite WAL settings, busy policy, or service-store behavior.
 V1-08C subsequently fixes the registry at R3 and the private service-store
 foundation at R2 with persistent WAL, `synchronous=FULL`, a 1..30,000 ms
 busy timeout (default 5,000), and no adapter retry after `StorageBusy`. It
-does not alter runtime composition, MCP registration, or public service-store
-behavior. V1-08D packages the private coordinator but preserves that same
-runtime and public-composition rule.
+did not alter runtime composition, MCP registration, or public service-store
+behavior. V1-08D packaged the private coordinator; V1-08E composes it without
+changing physical migration revisions.
 
 The application layer requests behavior through its boundary; it never creates
 tables, parses storage locations, opens database connections, or selects a
@@ -160,13 +162,13 @@ and migration-state boundary.
 ## Current capability
 
 Stateless exposes only `aipcs_server_info` over stdio. A ready SQLite profile
-adds seed, list, inspect, and design. Design validates and stores an initial
+adds seed, list, inspect, design, materialise, and evolve. Design validates and stores an initial
 manifest but does not apply it to physical tables: a resulting service remains
-`seeded`, has no storage projection, and cannot hold records. There is no
-standalone lifecycle/admin CLI, public service-store allocation or
-materialisation, record API, export/import, PostgreSQL, remote transport, or
-adapter discovery mechanism. The packaged private catalog and domain-schema
-store, plus their top-level coordinator, remain outside this application and
-public capability surface.
+`seeded`, has no storage projection, and cannot hold records. Materialise and
+evolve call the top-level coordinator without bringing storage mechanics into
+the registry-only application package. There is no standalone lifecycle/admin
+CLI, record API, export/import, public repair, PostgreSQL, remote transport, or
+adapter discovery mechanism. The concrete catalog/domain adapters and
+coordinator internals remain outside the application and public object surface.
 
 See [compatibility](compatibility.md) and [security](security.md).

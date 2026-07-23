@@ -64,6 +64,11 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
 ) -> None:
     root = tmp_path / "ready-root"
     calls: list[str] = []
+    location = object()
+    catalog: object | None = None
+    domain: object | None = None
+    coordinator: object | None = None
+    coordinator_clock: object | None = None
 
     class Location:
         @classmethod
@@ -71,7 +76,7 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
             assert value == root
             assert source == "cli"
             calls.append("location")
-            return object()
+            return location
 
     class Adapter:
         def __init__(self, location: object, *, busy_timeout_ms: int) -> None:
@@ -87,18 +92,76 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
             calls.append("open_uow")
             raise AssertionError("server-info must not open a unit of work")
 
+    class Catalog:
+        def __init__(self, value: object, *, busy_timeout_ms: int) -> None:
+            nonlocal catalog
+            assert value is location
+            assert busy_timeout_ms == 123
+            catalog = self
+            calls.append("catalog")
+
+    class Domain:
+        def __init__(self, value: object, *, busy_timeout_ms: int) -> None:
+            nonlocal domain
+            assert value is location
+            assert busy_timeout_ms == 123
+            domain = self
+            calls.append("domain")
+
+    class Coordinator:
+        def __init__(
+            self,
+            uows: object,
+            clock: object,
+            catalog_value: object,
+            domain_value: object,
+        ) -> None:
+            nonlocal coordinator, coordinator_clock
+            assert callable(uows)
+            assert isinstance(clock, runtime.SystemUtcClock)
+            assert catalog_value is catalog
+            assert domain_value is domain
+            coordinator = self
+            coordinator_clock = clock
+            calls.append("coordinator")
+
+    server = object()
+
+    def create(**kwargs: object) -> object:
+        application = kwargs["application"]
+        assert isinstance(application, runtime.ServiceApplication)
+        assert application._clock is coordinator_clock
+        assert kwargs["principal_id"] == "configured-principal"
+        assert kwargs["registry_lifecycle"] is True
+        assert kwargs["lifecycle_executor"] is coordinator
+        calls.append("server")
+        return server
+
     monkeypatch.setattr(runtime, "SQLiteLocationPolicy", Location)
     monkeypatch.setattr(runtime, "SQLiteRegistryAdapter", Adapter)
-    server = runtime.compose_server(_config(root, busy_timeout_ms=123))
-    assert calls == ["location", "adapter", "migrate"]
+    monkeypatch.setattr(runtime, "SQLiteServiceStoreCatalog", Catalog)
+    monkeypatch.setattr(runtime, "SQLiteDomainSchemaStore", Domain)
+    monkeypatch.setattr(runtime, "LifecycleCoordinator", Coordinator)
+    monkeypatch.setattr(runtime, "create_server", create)
+    assert runtime.compose_server(_config(root, busy_timeout_ms=123)) is server
+    assert calls == ["location", "adapter", "migrate", "catalog", "domain", "coordinator", "server"]
+
+
+def test_ready_sqlite_server_info_does_not_allocate_or_migrate_a_service_store(tmp_path: Path) -> None:
+    root = tmp_path / "ready-root"
+    _secure_parent(root)
+    server = runtime.compose_server(_config(root))
     assert anyio.run(_tool_names, server) == [
         "aipcs_server_info",
         "aipcs_service_seed",
         "aipcs_service_list",
         "aipcs_service_inspect",
         "aipcs_service_design",
+        "aipcs_service_materialise",
+        "aipcs_service_evolve",
     ]
-    assert calls == ["location", "adapter", "migrate"]
+    assert (root / "registry.sqlite").is_file()
+    assert not (root / "service-stores").exists()
 
 
 @pytest.mark.parametrize("state", ["uninitialised", "dirty", "incompatible"])
@@ -129,6 +192,27 @@ def test_non_ready_sqlite_fails_before_mcp_construction(
     monkeypatch.setattr(runtime, "SQLiteLocationPolicy", Location)
     monkeypatch.setattr(runtime, "SQLiteRegistryAdapter", Adapter)
     monkeypatch.setattr(runtime, "create_server", unexpected_server)
+    monkeypatch.setattr(
+        runtime,
+        "SQLiteServiceStoreCatalog",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-ready storage must not construct a service catalog")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "SQLiteDomainSchemaStore",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-ready storage must not construct a domain store")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "LifecycleCoordinator",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-ready storage must not construct a coordinator")
+        ),
+    )
     with pytest.raises(RuntimeError, match="Registry is not ready"):
         runtime.compose_server(_config(root))
     assert called is False

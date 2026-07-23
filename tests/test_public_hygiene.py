@@ -73,6 +73,20 @@ def test_exact_credential_filenames_are_ignored_and_rejected_from_tracked_blobs(
     assert reasons("docs/credentials.yaml.example") == []
 
 
+def test_private_filename_and_path_checks_are_case_insensitive_and_report_original_path() -> None:
+    assert "private agent/archive/plan path" in reasons("Agents.md")
+    assert "likely credential filename" in reasons("examples/CREDENTIALS.YAML")
+    assert "private agent/archive/plan path" in reasons("Docs/EXEC-PLANS/plan.md")
+    assert "private agent/archive/plan path" in reasons("RESEARCH/note.md")
+    assert "local data path" in reasons("examples/.DATA-cache/note.txt")
+    assert reasons("docs/.ENV.EXAMPLE") == []
+
+    reported = hygiene.report(
+        "worktree", [(PurePosixPath("Docs/EXEC-PLANS/plan.md"), b"safe", False)]
+    )
+    assert reported == ["worktree:Docs/EXEC-PLANS/plan.md: private agent/archive/plan path"]
+
+
 def test_content_and_fixture_probes_are_rejected() -> None:
     local_path = b"/" + b"Users/example/workspace"
     credential = ("gh" + "p_" + "x" * 24).encode()

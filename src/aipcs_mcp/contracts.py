@@ -23,7 +23,7 @@ from . import __version__
 from .errors import AipcsContractError, ErrorCode, error_from_validation
 from .manifest_v2 import RETIRED_INPUT_FIELDS, ManifestV2
 
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "1.1.0"
 PACKAGE_VERSION = __version__
 TRANSPORT_ENV_KEYS = ("AIPCS_TRANSPORT", "AIPCS_MCP_TRANSPORT")
 LISTENER_ENV_KEYS = (
@@ -105,6 +105,43 @@ class ServiceDesignRequest(PublicDesignRequest):
     idempotency_key: str = Field(min_length=1, max_length=128)
 
 
+class ServiceMaterialiseRequest(PublicModel):
+    """Strict public input for one idempotent initial materialisation."""
+
+    service_id: UUID
+    expected_service_revision: StrictInt = Field(ge=1, le=2**63 - 1)
+    expected_schema_version: StrictInt = Field(ge=1, le=1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("service_id", mode="before")
+    @classmethod
+    def require_canonical_uuid(cls, value: object) -> object:
+        _require_canonical_service_id(value)
+        return value
+
+
+class ServiceEvolveRequest(PublicModel):
+    """Strict public input for one complete, adjacent manifest evolution."""
+
+    service_id: UUID
+    expected_service_revision: StrictInt = Field(ge=1, le=2**63 - 1)
+    expected_schema_version: StrictInt = Field(ge=1, le=64)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    schema_: ManifestV2 = Field(alias="schema", serialization_alias="schema")
+
+    @field_validator("service_id", mode="before")
+    @classmethod
+    def require_canonical_uuid(cls, value: object) -> object:
+        _require_canonical_service_id(value)
+        return value
+
+    @model_validator(mode="after")
+    def require_adjacent_target(self) -> ServiceEvolveRequest:
+        if self.schema_.schema_version != self.expected_schema_version + 1:
+            raise ValueError("Evolve target must advance schema version by exactly one.")
+        return self
+
+
 class StorageSummary(PublicModel):
     """Safe storage metadata; a namespace is intentionally opaque to callers."""
 
@@ -141,6 +178,8 @@ class ServiceMetadata(PublicModel):
     operational_status: Literal["active", "suspended", "archived"] = "active"
     schema_: ManifestV2 | None = Field(default=None, alias="schema", serialization_alias="schema")
     schema_version: int | None = Field(default=None, ge=1)
+    service_revision: StrictInt = Field(ge=1, le=2**63 - 1)
+    recovery_state: Literal["clear", "pending", "recovery_required"]
     created_at: AwareDatetime
     updated_at: AwareDatetime
     last_activity_at: AwareDatetime
@@ -160,6 +199,7 @@ class ServerFeatures(PublicModel):
     legacy_v1_importer: bool = True
     stdio_preflight: bool = True
     registry_lifecycle: bool = False
+    materialisation_lifecycle: bool = False
 
 
 class ServerInfo(PublicModel):
@@ -172,10 +212,17 @@ class ServerInfo(PublicModel):
     operational_statuses: list[Literal["active"]] = Field(default_factory=lambda: ["active"])
 
 
-def public_server_info(*, registry_lifecycle: bool = False) -> ServerInfo:
+def public_server_info(
+    *, registry_lifecycle: bool = False, materialisation_lifecycle: bool = False
+) -> ServerInfo:
     """Return a safe, snapshot-testable capability document."""
 
-    return ServerInfo(features=ServerFeatures(registry_lifecycle=registry_lifecycle))
+    return ServerInfo(
+        features=ServerFeatures(
+            registry_lifecycle=registry_lifecycle,
+            materialisation_lifecycle=materialisation_lifecycle,
+        )
+    )
 
 
 def parse_public_design(payload: object) -> PublicDesignRequest:
@@ -245,11 +292,34 @@ def parse_service_inspect(payload: object) -> ServiceInspectRequest:
     return _parse_strict(ServiceInspectRequest, payload)
 
 
+def parse_service_materialise(payload: object) -> ServiceMaterialiseRequest:
+    """Parse a complete materialise request before any lifecycle admission."""
+
+    _validate_lifecycle_prefix(payload, require_schema=False)
+    return _parse_lifecycle(ServiceMaterialiseRequest, payload)
+
+
+def parse_service_evolve(payload: object) -> ServiceEvolveRequest:
+    """Parse a detached, complete manifest target before lifecycle admission."""
+
+    _validate_lifecycle_prefix(payload, require_schema=True)
+    return _parse_lifecycle(ServiceEvolveRequest, payload)
+
+
 def _parse_strict[T: PublicModel](model: type[T], payload: object) -> T:
     if not isinstance(payload, Mapping):
         raise AipcsContractError(ErrorCode.INVALID_REQUEST, "Request input must be a JSON object.")
     try:
         return model.model_validate(payload)
+    except ValidationError as error:
+        raise error_from_validation(error) from None
+
+
+def _parse_lifecycle[T: PublicModel](model: type[T], payload: object) -> T:
+    """Validate and deep-detach lifecycle input at the public boundary."""
+
+    try:
+        return model.model_validate(payload).model_copy(deep=True)
     except ValidationError as error:
         raise error_from_validation(error) from None
 
@@ -273,6 +343,32 @@ def _validate_design_prefix(payload: object) -> None:
                 ErrorCode.MANIFEST_VERSION_UNSUPPORTED,
                 "Public design intake supports manifest_version 2 only.",
             )
+
+
+def _validate_lifecycle_prefix(payload: object, *, require_schema: bool) -> None:
+    """Apply manifest compatibility precedence without design-only restrictions."""
+
+    if not isinstance(payload, Mapping):
+        raise AipcsContractError(ErrorCode.INVALID_REQUEST, "Request input must be a JSON object.")
+    if "service_id" in payload:
+        _require_canonical_service_id(payload["service_id"])
+    _reject_retired_fields(payload)
+    if not require_schema:
+        return
+    schema = payload.get("schema")
+    if not isinstance(schema, Mapping):
+        return
+    manifest_version = schema.get("manifest_version")
+    if manifest_version == 1:
+        raise AipcsContractError(
+            ErrorCode.LEGACY_IMPORT_REQUIRED,
+            "Manifest version 1 is private legacy input; use the explicit legacy importer.",
+        )
+    if manifest_version != 2:
+        raise AipcsContractError(
+            ErrorCode.MANIFEST_VERSION_UNSUPPORTED,
+            "Public lifecycle intake supports manifest_version 2 only.",
+        )
 
 
 def _require_canonical_service_id(value: object) -> None:

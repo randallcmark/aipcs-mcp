@@ -14,6 +14,7 @@ from aipcs_mcp.application.models import (
     Service,
     ServiceSaveResult,
 )
+from aipcs_mcp.lifecycle import RecoveryState
 
 BACKEND_SENTINEL = "postgresql://secret@host/private"
 
@@ -48,6 +49,7 @@ class FakeRegistry:
         self.items: dict[UUID, Service] = {}
         self.ledger: dict[tuple[str, str], tuple[str, str, Service]] = {}
         self.events: list[AuditEvent] = []
+        self.recovery_states: dict[tuple[str, UUID], RecoveryState] = {}
         self.uows: list[FakeUow] = []
         self.commits = 0
         self.fail_at: str | None = None
@@ -69,6 +71,7 @@ class FakeUow:
         self.items = deepcopy(state.items)
         self.ledger = deepcopy(state.ledger)
         self.events = deepcopy(state.events)
+        self.recovery_states = deepcopy(state.recovery_states)
         self.calls: list[str] = []
         self.closed = False
         self.close_count = 0
@@ -148,6 +151,10 @@ class FakeUow:
             return CompletedNonLifecycleClaim(previous[1], deepcopy(previous[2]))
         return ConflictClaim()
 
+    def recovery_state(self, principal_id: str, service_id: UUID) -> RecoveryState:
+        self._called("recovery_state")
+        return self.recovery_states.get((principal_id, service_id), RecoveryState.CLEAR)
+
     def complete_non_lifecycle(
         self,
         kind: NonLifecycleKind,
@@ -170,6 +177,7 @@ class FakeUow:
         self.state.items = deepcopy(self.items)
         self.state.ledger = deepcopy(self.ledger)
         self.state.events = deepcopy(self.events)
+        self.state.recovery_states = deepcopy(self.recovery_states)
         self.state.commits += 1
         self.terminal_action = "committed"
 

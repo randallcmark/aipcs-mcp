@@ -269,6 +269,8 @@ def test_application_and_audit_projections_remain_allowlisted() -> None:
         "operational_status",
         "schema_",
         "schema_version",
+        "service_revision",
+        "recovery_state",
         "created_at",
         "updated_at",
         "last_activity_at",

@@ -31,7 +31,7 @@ _LOCATOR_NAMESPACE = re.compile(r"^svc_[0-9a-f]{32}$")
 
 @dataclass(frozen=True)
 class ServiceStoreLocator:
-    """Opaque logical allocation for one future materialised service store."""
+    """Opaque logical allocation for one materialised service store."""
 
     backend: StorageBackend
     namespace: str

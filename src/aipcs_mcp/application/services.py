@@ -12,7 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from aipcs_mcp.contracts import ServiceMetadata
-from aipcs_mcp.lifecycle import MAX_SERVICE_REVISION
+from aipcs_mcp.lifecycle import MAX_SERVICE_REVISION, RecoveryState
 from aipcs_mcp.manifest_v2 import ManifestV2
 
 from .errors import (
@@ -70,13 +70,15 @@ class ServiceApplication:
             )
             replay = self._resolve_non_lifecycle_claim(claim, "seed", context.principal_id)
             if replay is not None:
-                result = self._project(replay)
+                result = self._project(
+                    replay,
+                    self._recovery_state(uow, context.principal_id, replay.service_id),
+                )
             else:
                 existing = uow.services.find_domain(context.principal_id, command.domain_name)
                 if existing is not None and existing.principal_id != context.principal_id:
                     existing = None
                 if existing is not None:
-                    result = self._project(existing)
                     now = self._now()
                     uow.audits.append(
                         AuditEvent(
@@ -95,6 +97,10 @@ class ServiceApplication:
                         fingerprint,
                         existing,
                     )
+                    result = self._project(
+                        existing,
+                        self._recovery_state(uow, context.principal_id, existing.service_id),
+                    )
                     uow.commit()
                 else:
                     now = self._now()
@@ -108,7 +114,6 @@ class ServiceApplication:
                         updated_at=now,
                         last_activity_at=now,
                     )
-                    result = self._project(service)
                     uow.services.add(service)
                     uow.audits.append(
                         AuditEvent(
@@ -127,6 +132,10 @@ class ServiceApplication:
                         fingerprint,
                         service,
                     )
+                    result = self._project(
+                        service,
+                        self._recovery_state(uow, context.principal_id, service.service_id),
+                    )
                     uow.commit()
         except Exception as error:
             failure = self._failure_after_rollback(uow, error)
@@ -143,21 +152,22 @@ class ServiceApplication:
         uow = self._new_uow()
         try:
             items = uow.services.list(context.principal_id, limit)
+            scoped = (item for item in items if item.principal_id == context.principal_id)
+            ordered = sorted(scoped, key=lambda item: (item.created_at, item.service_id))[:limit]
+            result = [
+                self._project(
+                    item,
+                    self._recovery_state(uow, context.principal_id, item.service_id),
+                )
+                for item in ordered
+            ]
         except Exception as error:
             failure = self._failure_after_close(uow, error)
         else:
             failure = self._close_failure(uow)
         if failure is not None:
             raise failure from None
-        try:
-            scoped = (item for item in items if item.principal_id == context.principal_id)
-            ordered = sorted(scoped, key=lambda item: (item.created_at, item.service_id))[:limit]
-            result = [self._project(item) for item in ordered]
-        except Exception as error:
-            failure = self._safe_application_error(error)
-        else:
-            return result
-        raise failure from None
+        return result
 
     def inspect(self, context: ApplicationContext, service_id: UUID) -> ServiceMetadata:
         self._validate_context(context)
@@ -166,15 +176,22 @@ class ServiceApplication:
         uow = self._new_uow()
         try:
             service = uow.services.get(context.principal_id, service_id)
+            if service is not None and service.principal_id == context.principal_id:
+                result = self._project(
+                    service,
+                    self._recovery_state(uow, context.principal_id, service.service_id),
+                )
+            else:
+                result = None
         except Exception as error:
             failure = self._failure_after_close(uow, error)
         else:
             failure = self._close_failure(uow)
         if failure is not None:
             raise failure from None
-        if service is None or service.principal_id != context.principal_id:
+        if result is None:
             raise NotFound()
-        return self._project(service)
+        return result
 
     def design(self, context: ApplicationContext, command: DesignCommand) -> ServiceMetadata:
         self._validate_context(context)
@@ -188,7 +205,10 @@ class ServiceApplication:
             )
             replay = self._resolve_non_lifecycle_claim(claim, "design", context.principal_id)
             if replay is not None:
-                result = self._project(replay)
+                result = self._project(
+                    replay,
+                    self._recovery_state(uow, context.principal_id, replay.service_id),
+                )
             else:
                 service = uow.services.get(context.principal_id, command.service_id)
                 if service is None or service.principal_id != context.principal_id:
@@ -213,7 +233,6 @@ class ServiceApplication:
                     last_activity_at=now,
                     service_revision=service.service_revision + 1,
                 )
-                result = self._project(changed)
                 save_result = uow.services.save(changed, service.service_revision)
                 if save_result == "stale_revision":
                     self._reread_after_stale_design(uow, context.principal_id, command.service_id)
@@ -235,6 +254,10 @@ class ServiceApplication:
                     command.idempotency_key,
                     fingerprint,
                     changed,
+                )
+                result = self._project(
+                    changed,
+                    self._recovery_state(uow, context.principal_id, changed.service_id),
                 )
                 uow.commit()
         except Exception as error:
@@ -355,14 +378,23 @@ class ServiceApplication:
         raise InvalidState()
 
     @staticmethod
-    def _project(service: Service) -> ServiceMetadata:
+    def _project(service: Service, recovery_state: RecoveryState) -> ServiceMetadata:
         try:
-            result = project(service)
+            result = project(service, recovery_state)
         except Exception:
             failure = InternalFailure()
         else:
             return result
         raise failure from None
+
+    @staticmethod
+    def _recovery_state(
+        uow: RegistryUnitOfWork, principal_id: str, service_id: UUID
+    ) -> RecoveryState:
+        try:
+            return uow.mutations.recovery_state(principal_id, service_id)
+        except Exception:
+            raise InternalFailure() from None
 
     @staticmethod
     def _close_failure(uow: RegistryUnitOfWork) -> InternalFailure | None:

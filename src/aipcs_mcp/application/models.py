@@ -16,6 +16,7 @@ from aipcs_mcp.lifecycle import (
     LifecycleKind,
     LifecyclePhase,
     LifecycleResultCategory,
+    RecoveryState,
     lifecycle_result_retryable,
 )
 from aipcs_mcp.manifest_v2 import ManifestV2
@@ -359,7 +360,11 @@ def _validate_terminal_service(intent: LifecycleIntent, service: Service) -> Non
         raise ValueError("Evolve terminal service is invalid.")
 
 
-def project(service: Service) -> ServiceMetadata:
+def project(service: Service, recovery_state: RecoveryState) -> ServiceMetadata:
+    """Build the one detached public projection from service and registry aggregate state."""
+
+    if type(recovery_state) is not RecoveryState:
+        raise ValueError("Service recovery state is invalid.")
     return ServiceMetadata(
         service_id=service.service_id,
         domain_name=service.domain_name,
@@ -369,7 +374,15 @@ def project(service: Service) -> ServiceMetadata:
         operational_status=service.operational_status,
         schema=service.manifest.model_copy(deep=True) if service.manifest is not None else None,
         schema_version=service.schema_version,
+        service_revision=service.service_revision,
+        recovery_state=recovery_state,
         created_at=service.created_at,
         updated_at=service.updated_at,
         last_activity_at=service.last_activity_at,
+        materialised_at=service.materialised_at,
+        storage=(
+            {"backend": service.storage.backend, "namespace": service.storage.namespace}
+            if service.storage is not None
+            else None
+        ),
     )

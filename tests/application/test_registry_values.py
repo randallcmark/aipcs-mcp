@@ -30,6 +30,7 @@ from aipcs_mcp.lifecycle import (
     LifecyclePhase,
     LifecycleResultCategory,
     MaterialiseCommand,
+    RecoveryState,
     prepare_intent,
 )
 from aipcs_mcp.manifest_v2 import ManifestV2
@@ -99,16 +100,19 @@ def _evolve_intent():
     return prepare_intent(command, command.target_manifest)
 
 
-def test_service_r2_metadata_is_safe_paired_and_hidden_by_the_current_projection() -> None:
+def test_service_r2_metadata_is_safe_paired_and_projected_with_current_aggregate() -> None:
     target = _manifest()
     service = _service(revision=2, materialised=True, manifest=target)
 
     assert service.service_revision == 2
     assert service.storage == MaterialisationStorage("sqlite", f"svc_{_SERVICE_ID.hex}")
-    public = project(service)
-    assert public.materialised_at is None
-    assert public.storage is None
-    assert "service_revision" not in public.model_dump(mode="json", by_alias=True)
+    public = project(service, RecoveryState.CLEAR)
+    assert public.materialised_at == _AT
+    assert public.storage is not None
+    assert public.storage.backend == "sqlite"
+    assert public.storage.namespace == f"svc_{_SERVICE_ID.hex}"
+    assert public.service_revision == 2
+    assert public.recovery_state == RecoveryState.CLEAR
 
     assert replace(
         service, storage=MaterialisationStorage("postgresql", f"svc_{_SERVICE_ID.hex}")

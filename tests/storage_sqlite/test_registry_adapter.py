@@ -71,6 +71,9 @@ class TraceUow:
     def complete_non_lifecycle(self, *args):
         return self._call("complete_non_lifecycle", *args)
 
+    def recovery_state(self, *args):
+        return self._call("recovery_state", *args)
+
     def append(self, *args):
         return self._call("append", *args)
 

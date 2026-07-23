@@ -31,6 +31,7 @@ from aipcs_mcp.lifecycle import (
     MAX_SERVICE_REVISION,
     EvolveCommand,
     MaterialiseCommand,
+    RecoveryState,
     lifecycle_fingerprint,
     prepare_intent,
 )
@@ -152,6 +153,50 @@ def _service_state(adapter: SQLiteRegistryAdapter, service_id: UUID = _SERVICE_I
     service = _write(adapter, lambda uow: uow.services.get(_PRINCIPAL, service_id))
     assert service is not None
     return service
+
+
+def _recovery_state(
+    adapter: SQLiteRegistryAdapter,
+    principal_id: str = _PRINCIPAL,
+    service_id: UUID = _SERVICE_ID,
+) -> RecoveryState:
+    return _write(adapter, lambda uow: uow.mutations.recovery_state(principal_id, service_id))
+
+
+def test_recovery_state_is_closed_current_aggregate_with_completed_rows_clear(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    _add(adapter, _service())
+    assert _recovery_state(adapter) is RecoveryState.CLEAR
+
+    prepared = _admit(adapter, _materialise())
+    assert isinstance(prepared, PreparedLifecycleClaim)
+    assert _recovery_state(adapter) is RecoveryState.PENDING
+
+    recovered = _write(
+        adapter,
+        lambda uow: uow.mutations.finalize_recovery_required(prepared.intent, _START),
+    )
+    assert isinstance(recovered, RecoveryRequiredLifecycleClaim)
+    assert _recovery_state(adapter) is RecoveryState.RECOVERY_REQUIRED
+
+    _add(adapter, _service(service_id=_SECOND_SERVICE_ID))
+    completed_prepared = _admit(
+        adapter,
+        _materialise(service_id=_SECOND_SERVICE_ID, key="materialise-completed"),
+    )
+    assert isinstance(completed_prepared, PreparedLifecycleClaim)
+    completed = _write(
+        adapter,
+        lambda uow: uow.mutations.finalize_completed(
+            MaterialiseCompletion(
+                completed_prepared.intent,
+                _START + timedelta(seconds=1),
+                MaterialisationStorage("sqlite", f"svc_{_SECOND_SERVICE_ID.hex}"),
+            )
+        ),
+    )
+    assert isinstance(completed, CompletedLifecycleClaim)
+    assert _recovery_state(adapter, service_id=_SECOND_SERVICE_ID) is RecoveryState.CLEAR
 
 
 def _registry_snapshot(database: Path) -> tuple[list[tuple[object, ...]], ...]:

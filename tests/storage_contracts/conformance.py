@@ -143,7 +143,7 @@ def assert_registry_application_conformance(factory: RegistryHarnessFactory) -> 
         mode="json", by_alias=True
     )
     assert harness.restart().inspect(context, created.service_id).service_id == created.service_id
-    assert harness.traces()[-1].calls == ["get", "close"]
+    assert harness.traces()[-1].calls == ["get", "recovery_state", "close"]
 
     duplicate = harness.restart(UUID(int=2)).seed(
         context,

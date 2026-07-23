@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from mcp import types
 from mcp.server.lowlevel import Server
@@ -13,19 +13,29 @@ from pydantic import TypeAdapter
 
 from . import __version__
 from .application.errors import Conflict, InternalFailure, InvalidCommand, InvalidState, NotFound
-from .application.models import ApplicationContext, DesignCommand, SeedCommand
+from .application.models import (
+    ApplicationContext,
+    DesignCommand,
+    LifecycleExecutionResult,
+    SeedCommand,
+    project,
+)
 from .application.services import ServiceApplication
 from .contracts import (
     ServerInfo,
     ServiceDesignRequest,
+    ServiceEvolveRequest,
     ServiceInspectRequest,
     ServiceListRequest,
     ServiceListResult,
+    ServiceMaterialiseRequest,
     ServiceMetadata,
     ServiceSeedRequest,
     parse_service_design,
+    parse_service_evolve,
     parse_service_inspect,
     parse_service_list,
+    parse_service_materialise,
     parse_service_seed,
     public_server_info,
 )
@@ -37,6 +47,19 @@ from .errors import (
     SuccessEnvelope,
     success,
 )
+from .lifecycle import (
+    EvolveCommand,
+    LifecycleCommand,
+    LifecycleResultCategory,
+    MaterialiseCommand,
+    RecoveryState,
+)
+
+
+class LifecycleExecutor(Protocol):
+    """Narrow transport seam for the private, already-composed lifecycle coordinator."""
+
+    def execute(self, command: LifecycleCommand) -> LifecycleExecutionResult: ...
 
 
 class _TypedSuccessEnvelope[ResultT](PublicModel):
@@ -79,6 +102,7 @@ def create_server(
     application: ServiceApplication | None = None,
     principal_id: str | None = None,
     registry_lifecycle: bool = False,
+    lifecycle_executor: LifecycleExecutor | None = None,
 ) -> Server:
     """Build the finite server catalogue; configuration is composed elsewhere."""
 
@@ -86,8 +110,13 @@ def create_server(
         raise ValueError("Incomplete lifecycle binding.")
     if registry_lifecycle and not _valid_principal(principal_id):
         raise ValueError("Invalid lifecycle binding.")
+    if lifecycle_executor is not None and (
+        not registry_lifecycle or not callable(getattr(lifecycle_executor, "execute", None))
+    ):
+        raise ValueError("Incomplete materialisation lifecycle binding.")
+    materialisation_lifecycle = lifecycle_executor is not None
     server = Server("aipcs-mcp", version=__version__)
-    tools = _tools(registry_lifecycle)
+    tools = _tools(registry_lifecycle, materialisation_lifecycle)
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
@@ -97,7 +126,14 @@ def create_server(
     async def call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         # This catches every failure before the SDK's wrapper can serialize exception text.
         try:
-            envelope = _dispatch(name, arguments, application, principal_id, registry_lifecycle)
+            envelope = _dispatch(
+                name,
+                arguments,
+                application,
+                principal_id,
+                registry_lifecycle,
+                lifecycle_executor,
+            )
             return _result(envelope)
         except Exception:
             return _safe_internal_result()
@@ -112,7 +148,7 @@ async def run_stdio(server: Server) -> None:
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-def _tools(registry_lifecycle: bool) -> list[types.Tool]:
+def _tools(registry_lifecycle: bool, materialisation_lifecycle: bool = False) -> list[types.Tool]:
     values = [
         _tool(
             "aipcs_server_info",
@@ -150,6 +186,23 @@ def _tools(registry_lifecycle: bool) -> list[types.Tool]:
                 ),
             ]
         )
+    if materialisation_lifecycle:
+        values.extend(
+            [
+                _tool(
+                    "aipcs_service_materialise",
+                    "Materialise a designed service using an exact lifecycle precondition.",
+                    ServiceMaterialiseRequest,
+                    ServiceMetadata,
+                ),
+                _tool(
+                    "aipcs_service_evolve",
+                    "Evolve a materialised service with one complete adjacent manifest.",
+                    ServiceEvolveRequest,
+                    ServiceMetadata,
+                ),
+            ]
+        )
     return values
 
 
@@ -176,6 +229,7 @@ def _dispatch(
     application: ServiceApplication | None,
     principal_id: str | None,
     registry_lifecycle: bool,
+    lifecycle_executor: LifecycleExecutor | None = None,
 ) -> SuccessEnvelope | FailureEnvelope:
     if not isinstance(name, str):
         return _failure(ErrorCode.UNSUPPORTED_OPERATION, "The requested MCP tool is unavailable.")
@@ -187,7 +241,10 @@ def _dispatch(
                 ErrorCode.VALIDATION_FAILED, "Request failed public contract validation."
             )
         return success(
-            public_server_info(registry_lifecycle=registry_lifecycle).model_dump(mode="json")
+            public_server_info(
+                registry_lifecycle=registry_lifecycle,
+                materialisation_lifecycle=lifecycle_executor is not None,
+            ).model_dump(mode="json")
         )
     if not registry_lifecycle or application is None or principal_id is None:
         return _failure(ErrorCode.UNSUPPORTED_OPERATION, "The requested MCP tool is unavailable.")
@@ -220,6 +277,43 @@ def _dispatch(
                     idempotency_key=request.idempotency_key,
                 ),
             )
+        elif name == "aipcs_service_materialise":
+            if lifecycle_executor is None:
+                return _failure(
+                    ErrorCode.UNSUPPORTED_OPERATION, "The requested MCP tool is unavailable."
+                )
+            request = parse_service_materialise(arguments)
+            try:
+                command = MaterialiseCommand(
+                    principal_id=context.principal_id,
+                    created_via=context.created_via,
+                    service_id=request.service_id,
+                    expected_service_revision=request.expected_service_revision,
+                    expected_schema_version=request.expected_schema_version,
+                    idempotency_key=request.idempotency_key,
+                )
+            except Exception:
+                return _failure(ErrorCode.VALIDATION_FAILED, "Request failed public contract validation.")
+            return _lifecycle_envelope(lifecycle_executor.execute(command))
+        elif name == "aipcs_service_evolve":
+            if lifecycle_executor is None:
+                return _failure(
+                    ErrorCode.UNSUPPORTED_OPERATION, "The requested MCP tool is unavailable."
+                )
+            request = parse_service_evolve(arguments)
+            try:
+                command = EvolveCommand(
+                    principal_id=context.principal_id,
+                    created_via=context.created_via,
+                    service_id=request.service_id,
+                    expected_service_revision=request.expected_service_revision,
+                    expected_schema_version=request.expected_schema_version,
+                    idempotency_key=request.idempotency_key,
+                    target_manifest=request.schema_,
+                )
+            except Exception:
+                return _failure(ErrorCode.VALIDATION_FAILED, "Request failed public contract validation.")
+            return _lifecycle_envelope(lifecycle_executor.execute(command))
         else:
             return _failure(
                 ErrorCode.UNSUPPORTED_OPERATION, "The requested MCP tool is unavailable."
@@ -252,6 +346,79 @@ def _dispatch(
 
 def _failure(code: ErrorCode, message: str) -> FailureEnvelope:
     return FailureEnvelope(error={"code": code, "message": message})
+
+
+_LIFECYCLE_FAILURES: dict[LifecycleResultCategory, tuple[ErrorCode, str, bool]] = {
+    LifecycleResultCategory.MALFORMED_INPUT: (
+        ErrorCode.VALIDATION_FAILED,
+        "Request failed public contract validation.",
+        False,
+    ),
+    LifecycleResultCategory.UNSUPPORTED_TRANSITION: (
+        ErrorCode.UNSUPPORTED_TRANSITION,
+        "The service lifecycle transition is not supported.",
+        False,
+    ),
+    LifecycleResultCategory.STALE_REVISION: (
+        ErrorCode.STALE_REVISION,
+        "The service lifecycle precondition is stale.",
+        False,
+    ),
+    LifecycleResultCategory.CHANGED_FINGERPRINT: (
+        ErrorCode.CHANGED_FINGERPRINT,
+        "The idempotency key cannot be reused for a different request.",
+        False,
+    ),
+    LifecycleResultCategory.OPERATION_IN_PROGRESS: (
+        ErrorCode.OPERATION_IN_PROGRESS,
+        "A lifecycle operation is already in progress.",
+        True,
+    ),
+    LifecycleResultCategory.RECOVERY_REQUIRED: (
+        ErrorCode.RECOVERY_REQUIRED,
+        "The service requires recovery before lifecycle work can continue.",
+        False,
+    ),
+    LifecycleResultCategory.STORAGE_BUSY: (
+        ErrorCode.STORAGE_BUSY,
+        "Storage is temporarily busy.",
+        True,
+    ),
+    LifecycleResultCategory.OPERATION_UNCERTAIN: (
+        ErrorCode.OPERATION_UNCERTAIN,
+        "The lifecycle operation outcome is uncertain.",
+        True,
+    ),
+    LifecycleResultCategory.STORAGE_UNAVAILABLE: (
+        ErrorCode.STORAGE_UNAVAILABLE,
+        "Storage is unavailable.",
+        False,
+    ),
+    LifecycleResultCategory.INTERNAL_FAILURE: (
+        ErrorCode.INTERNAL_ERROR,
+        "The request could not be completed safely.",
+        False,
+    ),
+}
+
+
+def _lifecycle_envelope(result: object) -> SuccessEnvelope | FailureEnvelope:
+    """Project only completed services; all other coordinator outcomes are bounded failures."""
+
+    if type(result) is not LifecycleExecutionResult:
+        return _failure(ErrorCode.INTERNAL_ERROR, "The request could not be completed safely.")
+    if result.category == "completed":
+        try:
+            return success(project(result.service, RecoveryState.CLEAR).model_dump(mode="json"))
+        except Exception:
+            return _failure(ErrorCode.INTERNAL_ERROR, "The request could not be completed safely.")
+    mapped = _LIFECYCLE_FAILURES.get(result.category)
+    if mapped is None:
+        return _failure(ErrorCode.INTERNAL_ERROR, "The request could not be completed safely.")
+    code, message, retryable = mapped
+    return FailureEnvelope(
+        error={"code": code, "message": message, "retryable": retryable},
+    )
 
 
 def _result(envelope: SuccessEnvelope | FailureEnvelope) -> types.CallToolResult:

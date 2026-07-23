@@ -21,9 +21,11 @@ errors.
   environment values.
 - Public v1 is stdio only. Listener-oriented transport settings are rejected
   before configuration resolution and before any MCP server construction.
-- `aipcs_service_seed` and `aipcs_service_design` require bounded idempotency
-  keys. Same-key, same-request retries replay the prior result; a different
-  request using the same key fails with `conflict`.
+- `aipcs_service_seed`, `aipcs_service_design`,
+  `aipcs_service_materialise`, and `aipcs_service_evolve` require bounded
+  idempotency keys. Same-key, same-request retries replay the prior result; a
+  different seed/design request using the same key returns `conflict`, while a
+  different materialise/evolve request returns `changed_fingerprint`.
 
 The configured SQLite principal is opaque and process-local. It is neither an
 operating-system identity nor MCP client identity, authentication, or tenancy.
@@ -60,10 +62,9 @@ incompatible, `SQLITE_LOCKED`, and uncertain commit outcomes. WAL does not
 extend support to network filesystems, multi-host use, Windows SQLite, or a
 hostile same-user process.
 
-V1-08C establishes the final local SQLite policy under which V1-08D's private
-cross-store coordinator is tested. V1-08D reruns coordinator
-reconciliation/fault and installed-artifact proof under that policy before
-V1-08E may expose lifecycle operations.
+V1-08C establishes the final local SQLite policy under which V1-08D's
+cross-store coordinator was tested. V1-08E composes that coordinator only
+behind the two generic public lifecycle operations.
 
 The coordinator treats a dirty service-store foundation as one bounded
 recovery check, not immediate corruption: the existing migration action may
@@ -109,31 +110,36 @@ rejected before dispatch: no application-envelope or response-shape guarantee
 is made, but the process must remain safe for a subsequent valid request.
 
 Capability information intentionally reports only public features: package and
-contract versions, manifest support, enabled transport, and the
-`registry_lifecycle` capability. It must not expose credentials, DSNs,
+contract versions, manifest support, enabled transport,
+`registry_lifecycle`, and `materialisation_lifecycle`. It must not expose credentials, DSNs,
 filesystem locations, principal or owner information, audit data, or network
-endpoints. The capability is true only when a ready SQLite process registers
-all four lifecycle tools; an unavailable profile is not a server capability.
+endpoints. Registry lifecycle is true only when a ready SQLite process
+registers all four registry tools; materialisation lifecycle is true only when
+both physical lifecycle tools and their coordinator are fully bound. An
+unavailable profile is not a server capability.
 
-The opaque `svc_` locator namespace is a non-secret logical identifier.
-Physical data-root and database paths remain private: they are not locator
-fields and must not appear in responses, capabilities, errors, logs, audit
-records, or representations.
+The opaque `svc_` namespace is a non-secret logical identifier and is the
+only storage identity that may appear in a materialised service projection.
+The private `ServiceStoreLocator` object, physical data-root and database
+paths remain private and must not appear in responses, capabilities, errors,
+logs, audit records, or representations.
 
 R2's reserved materialisation metadata is limited to a safe logical backend
-and that opaque namespace. Public current lifecycle results continue to return
-null materialisation fields and omit the internal service revision. The
+and that opaque namespace. Public service results include server-owned
+`service_revision`; materialisation fields remain null until materialise
+completes. The
 metadata-only audit store retains at most the newest 1,000 entries per
 principal by audit identifier; this retention bound is private, is not an audit
 query feature, and never prunes idempotency or lifecycle evidence.
 
-When V1-08E later adds lifecycle recovery projection, it may expose only
-`service_revision` and `recovery_state: clear | pending | recovery_required`. It must not expose
+Lifecycle recovery projection exposes only `service_revision` and
+`recovery_state: clear | pending | recovery_required`. It must not expose
 an idempotency key, fingerprint, operation identifier, target snapshot, phase timestamp, fault
-text, repair procedure, SQL, locator, path, principal, or audit content. A recovery-required state
-is deterministic and non-auto-repaired through V1-08; no repair command is implied.
+text, repair procedure, SQL, private locator object, physical path, principal, or audit content.
+A recovery-required state is deterministic and non-auto-repaired through V1-08; no repair command
+is implied.
 
-The future error envelope freezes retryability without exposing backend detail: malformed input,
+The lifecycle error envelope freezes retryability without exposing backend detail: malformed input,
 unsupported transition, stale expected revision, changed-fingerprint reuse, recovery-required,
 storage-unavailable, and generic internal failure are non-retryable; storage-busy, different-key
 operation-in-progress, and operation-uncertain are retryable. An exact same-key prepared claim
@@ -145,17 +151,18 @@ All repository test data is synthetic and marked with its provenance. Do not
 add operational stores, database copies, credentials, or personal context to
 this repository.
 
-The registry stores service metadata and initial manifests only. A public
-design does not invoke the packaged private service-store catalog,
-domain-schema adapter, or lifecycle coordinator; it creates no service
-database or agent-defined table and makes no records durable. The private
+The registry stores service metadata, authoritative manifests, lifecycle
+evidence, and safe logical materialisation identity. A public design creates
+no service database or agent-defined table. Materialise/evolve invoke the
+private service-store catalog, domain-schema adapter, and lifecycle
+coordinator only after durable admission; they still make no records durable. The
 coordinator admits supported work before physical I/O, closes every registry
 UoW before service-store access, exposes only bounded result categories, and
 persists no path, credential, SQL, driver error, or physical locator. It is
-packaged for internal restart and release proof but has no runtime, MCP, CLI,
-or configuration composition. Direct catalog/domain use can still leave an
+composed only by the ready SQLite runtime and has no standalone CLI,
+configuration, or public object surface. Direct catalog/domain use can still leave an
 orphan database or physical schema and is not a public workflow. No public
-materialisation, records, branches, retrieval, backup/export, repair, operator
+records, branches, retrieval, backup/export, repair, operator
 administration, remote transport, PostgreSQL, or multi-user tenancy is
 implemented. Future slices must preserve the same boundary: validate input
 before persistence, keep configuration separate from data, and redact

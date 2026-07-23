@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from uuid import UUID
+
 import anyio
 import pytest
-from fixtures import valid_design_request
+from fixtures import valid_design_request, valid_manifest
 from mcp import types
 
 from aipcs_mcp.application.errors import (
@@ -12,7 +15,12 @@ from aipcs_mcp.application.errors import (
     InvalidState,
     NotFound,
 )
-from aipcs_mcp.application.models import ApplicationContext
+from aipcs_mcp.application.models import (
+    ApplicationContext,
+    LifecycleExecutionResult,
+    MaterialisationStorage,
+    Service,
+)
 from aipcs_mcp.contracts import (
     parse_service_design,
     parse_service_inspect,
@@ -21,6 +29,8 @@ from aipcs_mcp.contracts import (
     public_server_info,
 )
 from aipcs_mcp.errors import AipcsContractError, ErrorCode
+from aipcs_mcp.lifecycle import LifecycleResultCategory
+from aipcs_mcp.manifest_v2 import ManifestV2
 from aipcs_mcp.mcp_server import _dispatch, create_server
 
 
@@ -201,3 +211,113 @@ def test_dispatch_maps_application_classes_explicitly(error: type[Exception], co
     )
     assert envelope.error is not None
     assert envelope.error.code == code
+
+
+@pytest.mark.parametrize(
+    ("category", "code", "retryable"),
+    [
+        (LifecycleResultCategory.MALFORMED_INPUT, "validation_failed", False),
+        (LifecycleResultCategory.UNSUPPORTED_TRANSITION, "unsupported_transition", False),
+        (LifecycleResultCategory.STALE_REVISION, "stale_revision", False),
+        (LifecycleResultCategory.CHANGED_FINGERPRINT, "changed_fingerprint", False),
+        (LifecycleResultCategory.OPERATION_IN_PROGRESS, "operation_in_progress", True),
+        (LifecycleResultCategory.RECOVERY_REQUIRED, "recovery_required", False),
+        (LifecycleResultCategory.STORAGE_BUSY, "storage_busy", True),
+        (LifecycleResultCategory.OPERATION_UNCERTAIN, "operation_uncertain", True),
+        (LifecycleResultCategory.STORAGE_UNAVAILABLE, "storage_unavailable", False),
+        (LifecycleResultCategory.INTERNAL_FAILURE, "internal_error", False),
+    ],
+)
+def test_lifecycle_dispatch_uses_only_frozen_safe_failure_mapping(
+    category: LifecycleResultCategory, code: str, retryable: bool
+) -> None:
+    seen: list[object] = []
+
+    class Executor:
+        def execute(self, command: object) -> LifecycleExecutionResult:
+            seen.append(command)
+            return LifecycleExecutionResult(category)
+
+    envelope = _dispatch(
+        "aipcs_service_materialise",
+        {
+            "service_id": "5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23",
+            "expected_service_revision": 2,
+            "expected_schema_version": 1,
+            "idempotency_key": "materialise-1",
+        },
+        object(),  # type: ignore[arg-type]
+        "fixed-principal",
+        True,
+        Executor(),
+    )
+    assert len(seen) == 1
+    assert envelope.result is None
+    assert envelope.error is not None
+    assert envelope.error.code == code
+    assert envelope.error.retryable is retryable
+    assert "fixed-principal" not in envelope.error.message
+    assert "materialise-1" not in envelope.error.message
+
+
+def test_lifecycle_malformed_input_never_calls_executor() -> None:
+    class Executor:
+        def execute(self, command: object) -> LifecycleExecutionResult:
+            raise AssertionError("malformed input reached the lifecycle coordinator")
+
+    envelope = _dispatch(
+        "aipcs_service_materialise",
+        {"principal_id": "caller-controlled"},
+        object(),  # type: ignore[arg-type]
+        "fixed-principal",
+        True,
+        Executor(),
+    )
+    assert envelope.error is not None
+    assert envelope.error.code is ErrorCode.VALIDATION_FAILED
+
+
+def test_lifecycle_completion_projects_only_the_safe_clear_service() -> None:
+    service_id = UUID("5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23")
+    now = datetime(2026, 7, 23, tzinfo=UTC)
+    service = Service(
+        service_id=service_id,
+        principal_id="fixed-principal",
+        domain_name="project",
+        domain_class="project",
+        intent_description="durable context",
+        created_at=now,
+        updated_at=now,
+        last_activity_at=now,
+        manifest=ManifestV2.model_validate(valid_manifest()),
+        schema_version=1,
+        design_state="materialised",
+        service_revision=3,
+        materialised_at=now,
+        storage=MaterialisationStorage(backend="sqlite", namespace=f"svc_{service_id.hex}"),
+    )
+
+    class Executor:
+        def execute(self, command: object) -> LifecycleExecutionResult:
+            return LifecycleExecutionResult("completed", service)
+
+    envelope = _dispatch(
+        "aipcs_service_materialise",
+        {
+            "service_id": str(service_id),
+            "expected_service_revision": 2,
+            "expected_schema_version": 1,
+            "idempotency_key": "materialise-1",
+        },
+        object(),  # type: ignore[arg-type]
+        "fixed-principal",
+        True,
+        Executor(),
+    )
+    assert envelope.ok is True
+    assert envelope.result["service_revision"] == 3
+    assert envelope.result["recovery_state"] == "clear"
+    assert envelope.result["storage"] == {"backend": "sqlite", "namespace": f"svc_{service_id.hex}"}
+    assert {"principal_id", "created_via", "idempotency_key", "audit", "path", "dsn"}.isdisjoint(
+        envelope.result
+    )

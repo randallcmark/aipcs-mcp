@@ -360,8 +360,23 @@ def test_embedded_client_is_syntactically_valid(verifier) -> None:
     program = verifier._smoke_client_program()
     compile(program, "installed_smoke_client.py", "exec")
     assert "metadata_fields" in program
+    assert '"service_revision", "recovery_state"' in program
+    assert 'features"]["materialisation_lifecycle"] is True' in program
+    assert '"aipcs_mcp_contract"] == "1.1.0"' in program
+    assert '"aipcs_service_materialise"' in program
+    assert '"aipcs_service_evolve"' in program
     assert 'features"]["registry_lifecycle"] is True' in program
     assert "design_replay == designed" in program
+    assert "materialise_replay == materialised" in program
+    assert "evolve_replay == evolved" in program
+    assert '"changed_fingerprint"' in program
+    assert '"stale_revision"' in program
+    assert 'mode == "recovery"' in program
+    assert 'CREATE TABLE "unexpected"' in program
+    assert '"recovery_required"' in program
+    assert "replay == recovery" in program
+    assert 'recovery_state="recovery_required"' in program
+    assert "assert_redacted(payload)" in program
 
 
 def test_embedded_catalog_client_is_syntactically_valid(verifier) -> None:
@@ -470,8 +485,10 @@ def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
     assert 'CREATE TABLE "unexpected"' in program
     assert '"recovery_required"' in program
     assert "PRAGMA journal_mode" in program
-    assert 'tuple(tool.name for tool in mcp_server_module._tools(True))' in program
+    assert 'tuple(tool.name for tool in mcp_server_module._tools(True, True))' in program
     assert "aipcs_service_design" in program
+    assert "aipcs_service_materialise" in program
+    assert "aipcs_service_evolve" in program
 
     root = tmp_path / "lifecycle-coordinator-root"
     monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
@@ -612,7 +629,7 @@ def test_domain_schema_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert calls[0][1][-2] != calls[2][1][-2]
 
 
-def test_sdist_startup_smoke_runs_stateless_and_ready_sqlite_clients(
+def test_sdist_startup_smoke_runs_stateless_client(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
     calls: list[tuple[str, tuple[object, ...]]] = []
@@ -632,10 +649,49 @@ def test_sdist_startup_smoke_runs_stateless_and_ready_sqlite_clients(
         redaction_roots=(),
     )
 
-    assert [mode for mode, _ in calls] == ["stateless", "principal_a"]
+    assert [mode for mode, _ in calls] == ["stateless"]
     assert calls[0][1][3] == tmp_path / "stateless-root"
-    assert calls[1][1][3] == tmp_path / "sdist-sqlite-root"
-    assert calls[1][1][4] == "release-principal-sdist"
+
+
+def test_public_lifecycle_smoke_runs_restart_and_isolation_for_each_artifact(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def fake_client(*args, **kwargs):
+        calls.append((str(args[5]), args))
+
+    monkeypatch.setattr(verifier, "_run_smoke_client", fake_client)
+    for name in ("wheel", "sdist"):
+        executable = tmp_path / f"{name}-venv" / "bin" / "aipcs"
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        verifier.run_installed_public_lifecycle_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [mode for mode, _ in calls] == [
+        "principal_a",
+        "principal_a",
+        "principal_b",
+        "recovery",
+        "principal_a",
+        "principal_a",
+        "principal_b",
+        "recovery",
+    ]
+    assert calls[0][1][3] == tmp_path / "wheel-public-lifecycle-root"
+    assert calls[4][1][3] == tmp_path / "sdist-public-lifecycle-root"
+    assert calls[0][1][4] == calls[1][1][4] == "release-principal-wheel-a"
+    assert calls[2][1][4] == "release-principal-wheel-b"
+    assert calls[3][1][4] == "release-principal-wheel-a"
+    assert calls[4][1][4] == calls[5][1][4] == "release-principal-sdist-a"
+    assert calls[6][1][4] == "release-principal-sdist-b"
+    assert calls[7][1][4] == "release-principal-sdist-a"
 
 
 def test_relational_smoke_uses_each_installed_interpreter_and_external_cwd(

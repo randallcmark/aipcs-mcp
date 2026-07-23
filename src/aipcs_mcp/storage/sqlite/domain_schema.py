@@ -1,4 +1,4 @@
-"""Private exact SQLite domain-schema persistence; uncomposed by runtime."""
+"""Private exact SQLite domain-schema persistence, composed only through lifecycle coordination."""
 
 from __future__ import annotations
 

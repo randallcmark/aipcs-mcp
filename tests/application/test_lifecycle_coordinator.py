@@ -427,7 +427,7 @@ def test_invalid_terminal_protocol_return_rolls_back_without_commit() -> None:
     assert state.uows[-1].calls == ["finalize_completed", "rollback", "close"]
 
 
-def test_application_and_runtime_boundaries_do_not_import_storage_coordinator() -> None:
+def test_application_and_transport_boundaries_do_not_import_storage_coordinator() -> None:
     root = Path(__file__).parents[2] / "src" / "aipcs_mcp"
     application = root / "application"
     for path in application.glob("*.py"):
@@ -438,8 +438,12 @@ def test_application_and_runtime_boundaries_do_not_import_storage_coordinator() 
             if isinstance(node, ast.ImportFrom) and node.module is not None
         }
         assert not any(module.startswith("aipcs_mcp.storage") for module in modules)
-    for path in (root / "runtime.py", root / "mcp_server.py", root / "cli.py"):
+    for path in (root / "mcp_server.py", root / "cli.py"):
         assert "lifecycle_coordinator" not in path.read_text(encoding="utf-8")
+    assert (
+        "from .lifecycle_coordinator import LifecycleCoordinator"
+        in (root / "runtime.py").read_text(encoding="utf-8")
+    )
 
 
 @pytest.mark.parametrize(

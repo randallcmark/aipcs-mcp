@@ -1,4 +1,4 @@
-"""Private SQLite service-store catalogue; uncomposed by the public runtime."""
+"""Private SQLite service-store catalogue, composed only through lifecycle coordination."""
 
 from __future__ import annotations
 

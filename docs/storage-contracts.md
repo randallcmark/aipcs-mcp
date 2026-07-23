@@ -4,10 +4,11 @@ The storage layer defines pure, backend-neutral contracts. The current SQLite
 registry adapter implements the registry portion and is composed only by the
 local stdio runtime. A private SQLite service-store catalog implements the
 separate service-store portion. A private top-level lifecycle coordinator
-composes the registry, catalog, and domain-schema protocols for internal
-restart proof, but remains absent from runtime, MCP, CLI, configuration, and
-the registry-only application package. None is a general adapter plugin API or
-a PostgreSQL implementation.
+composes the registry, catalog, and domain-schema protocols. The ready SQLite
+runtime binds it behind the two generic lifecycle MCP tools; it remains absent
+from the registry-only application package, standalone CLI, configuration
+surface, and public object API. None is a general adapter plugin API or a
+PostgreSQL implementation.
 
 The reference adapter is certified only for local POSIX filesystems on Linux
 and macOS, one host, Python 3.12+, SQLite 3.51.3+, and cooperating processes
@@ -41,8 +42,9 @@ allocation. It is exactly `svc_` followed by the lowercase
 32-character hexadecimal form of a non-zero service UUID. It is not a path,
 URI, DSN, host, database name, credential, SQL identifier, or agent-authored
 domain name.
-`StorageSummary` uses the same exact namespace grammar when this logical
-identifier is later projected publicly; it is never a second free-form label.
+`StorageSummary` exposes only that exact namespace component when it is later
+projected publicly; it is never a second free-form label or the private
+`ServiceStoreLocator` object.
 
 `StorageAdapterInfo` says which of the closed `registry` and `service_store`
 components a SQLite or future PostgreSQL adapter owns. It does not say that a
@@ -59,9 +61,10 @@ migration does not repair either state. Revisions are not package, MCP,
 manifest, schema, record, or export versions.
 
 `inspect_migration()` is observation only. `migrate()` is the sole explicit
-initialisation or layout-changing operation. The public runtime uses only the
-registry migration at SQLite startup; no tool call allocates or migrates a
-service store. Inspection uses one read snapshot and changes no application,
+initialisation or layout-changing operation. SQLite startup migrates only the
+registry and then composes the lifecycle seams without service-store I/O; an
+admitted materialise/evolve tool call may allocate or migrate its service
+store. Inspection uses one read snapshot and changes no application,
 schema, ledger, or journal-mode state. A valid SQLite WAL open may still
 create, rebuild, retain, replace, or remove SQLite-managed WAL/SHM operational
 files; every observable file remains inside the same secured location policy.
@@ -177,12 +180,12 @@ materialisation slice.
 
 The catalog rejects a foreign-backend locator before I/O, reports migration
 state only for `service_store`, and does not repair dirty or incompatible
-state. It is packaged with the private V1-08D coordinator but is not
-constructed by the current runtime or application. Direct catalog
-initialisation can still create an orphan database because it bypasses the
-registry intent and coordinator. Public materialisation remains unavailable
-until V1-08E composes the proven operation. No record operation, PostgreSQL
-adapter, repair, backup, import/export, or cross-store transaction exists yet.
+state. The ready SQLite runtime constructs it behind the V1-08D coordinator;
+the registry-only application does not. Direct catalog initialisation can
+still create an orphan database because it bypasses registry intent and the
+coordinator. Public materialise/evolve use the composed coordinator only. No
+record operation, PostgreSQL adapter, repair, backup, import/export, or
+cross-store transaction exists yet.
 
 The reusable test-only conformance cases in `tests/storage_contracts/` assert
 registry application and service-catalog behavior without treating SQL,
@@ -252,10 +255,11 @@ authority for repeat safety, including metadata-only transitions; no schema
 version, transition, or ledger is persisted. Python object identity is not a
 provenance seal.
 
-This private store is not composed by the runtime, MCP tools, CLI,
-configuration, registry lifecycle, or record surface. It provides no domain
-rows, record operations, migration history, schema repair, service allocation,
-or cross-store transaction.
+The ready SQLite runtime composes this private store only through the
+coordinator behind materialise/evolve; it is not independently available from
+MCP, CLI, configuration, or the registry-only application. It provides no
+domain rows, record operations, migration history, schema repair, service
+allocation API, or cross-store transaction.
 
 ## Private relational schema contract
 
@@ -282,7 +286,7 @@ metadata changes (including typed allowed-value expansion). It rejects
 renames/removals, rebuilds, required additions, relationship retrofit on an
 existing source table, index mutation, and allowed-value narrowing. The
 registry-held manifest is the architectural authority, but this private store
-does not read or cross-check registry state; later lifecycle composition owns
-that coordination. This port is uncomposed in the current runtime. It does not
-materialise a public service or alter the public MCP, CLI, configuration, or
-lifecycle surface.
+does not read or cross-check registry state; the lifecycle coordinator owns
+that coordination. The ready SQLite runtime composes this port behind the
+generic materialise/evolve tools. The port itself is not a public adapter and
+does not alter MCP, CLI, or configuration contracts.

@@ -116,22 +116,24 @@ surface, register MCP tools, or add a repair procedure. V1-08C then fixed the
 private foundation at R2 under the same WAL policy as registry R3: local POSIX,
 same-effective-user use; one writer with concurrent readers; a 1..30,000 ms
 busy timeout (default 5,000); and `StorageBusy` without adapter retries.
-V1-08D now packages the private coordinator over those boundaries. Public
-composition remains deferred to V1-08E, and no repair procedure exists.
+V1-08D packages the private coordinator over those boundaries. V1-08E composes
+it through the generic public lifecycle, and no repair procedure exists.
 
 ## Public boundary
 
-The public runtime still starts only the registry adapter. A ready SQLite server
-exposes server-info plus seed, list, inspect, and initial design; design remains
-seeded and does not create a service database, domain table, or record. Public
-materialise/evolve operations, records, service-store composition, and domain
-state reporting remain unavailable. The runtime, MCP server, CLI, and
-configuration do not construct or import the private coordinator.
+The public runtime migrates the registry, then constructs the catalog,
+domain-schema store, and coordinator from the same resolved SQLite policy
+without opening a service store. A ready SQLite server exposes server-info plus
+seed, list, inspect, design, materialise, and evolve. Design remains seeded;
+only an admitted materialise/evolve call may open service storage. Public
+results expose the terminal service or aggregate recovery state, never these
+private objects or physical details. Records and domain-state inspection remain
+unavailable. The CLI and configuration do not expose or construct the
+coordinator independently.
 
-V1-08 owns the missing lifecycle work: cross-store materialisation/evolution
-idempotency and revision coordination, registry/store reconciliation, recovery,
-and eventual public composition. Its sequence is lifecycle contract (A), durable intent (B),
+V1-08 owns lifecycle concurrency and the later record/discovery work. Its
+sequence is lifecycle contract (A), durable intent (B),
 SQLite WAL/busy policy (C), internal coordinator (D), public lifecycle composition (E), generic
 records (F), and structured discovery/topology (G); PostgreSQL begins only after V1-08G.
-Until V1-08E, use the supported public lifecycle only and treat this private seam
-as an internal test and release boundary.
+Treat the concrete catalog/domain/coordinator seam as an internal implementation
+and release boundary, not a user-facing adapter or repair API.

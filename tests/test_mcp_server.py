@@ -17,6 +17,8 @@ _NAMES = [
     "aipcs_service_list",
     "aipcs_service_inspect",
     "aipcs_service_design",
+    "aipcs_service_materialise",
+    "aipcs_service_evolve",
 ]
 _DESCRIPTIONS = {
     "aipcs_server_info": "Return the public AIPCS MCP capability contract.",
@@ -24,6 +26,8 @@ _DESCRIPTIONS = {
     "aipcs_service_list": "List durable services for the configured principal.",
     "aipcs_service_inspect": "Inspect one durable service projection.",
     "aipcs_service_design": "Validate and store an initial service design.",
+    "aipcs_service_materialise": "Materialise a designed service using an exact lifecycle precondition.",
+    "aipcs_service_evolve": "Evolve a materialised service with one complete adjacent manifest.",
 }
 _REQUIRED = {
     "aipcs_server_info": [],
@@ -36,6 +40,19 @@ _REQUIRED = {
     "aipcs_service_list": [],
     "aipcs_service_inspect": ["service_id"],
     "aipcs_service_design": ["service_id", "schema", "idempotency_key"],
+    "aipcs_service_materialise": [
+        "service_id",
+        "expected_service_revision",
+        "expected_schema_version",
+        "idempotency_key",
+    ],
+    "aipcs_service_evolve": [
+        "service_id",
+        "expected_service_revision",
+        "expected_schema_version",
+        "idempotency_key",
+        "schema",
+    ],
 }
 _RESULT_MODELS = {
     "aipcs_server_info": "ServerInfo",
@@ -43,6 +60,8 @@ _RESULT_MODELS = {
     "aipcs_service_list": "ServiceListResult",
     "aipcs_service_inspect": "ServiceMetadata",
     "aipcs_service_design": "ServiceMetadata",
+    "aipcs_service_materialise": "ServiceMetadata",
+    "aipcs_service_evolve": "ServiceMetadata",
 }
 
 
@@ -64,10 +83,15 @@ def test_low_level_catalogue_is_exact_and_flat() -> None:
     stateless = mcp_server.create_server()
     assert [tool.name for tool in anyio.run(_catalogue, stateless)] == ["aipcs_server_info"]
 
+    class Executor:
+        def execute(self, command: object) -> object:
+            raise AssertionError("catalogue construction must not execute lifecycle work")
+
     ready = mcp_server.create_server(
         application=object(),  # type: ignore[arg-type]
         principal_id="configured-principal",
         registry_lifecycle=True,
+        lifecycle_executor=Executor(),  # type: ignore[arg-type]
     )
     tools = anyio.run(_catalogue, ready)
     assert [tool.name for tool in tools] == _NAMES
@@ -108,6 +132,8 @@ def test_incomplete_lifecycle_binding_fails_during_construction() -> None:
         mcp_server.create_server(principal_id="configured-principal", registry_lifecycle=True)
     with pytest.raises(ValueError, match="Incomplete lifecycle binding"):
         mcp_server.create_server(application=object(), principal_id="configured-principal")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Incomplete materialisation lifecycle binding"):
+        mcp_server.create_server(lifecycle_executor=object())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("fault", ["dispatch", "result"])

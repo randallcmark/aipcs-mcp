@@ -704,10 +704,11 @@ def prove_site_packages_import(
 
 
 def _smoke_client_program() -> str:
-    """Standalone installed-client proof; it contains no checkout test imports."""
+    """Standalone installed public-lifecycle proof with no checkout test imports."""
 
     return r"""
 import json
+import sqlite3
 import sys
 from pathlib import Path
 import anyio
@@ -715,30 +716,63 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 exe, root, principal, mode = sys.argv[1:]
-manifest = {"manifest_version": 2, "schema_version": 1, "entities": [{"name": "note", "attributes": [{"name": "id", "type": "uuid", "required": True, "primary_key": True}, {"name": "owner_id", "type": "string", "required": True}, {"name": "created_at", "type": "datetime", "required": True}, {"name": "updated_at", "type": "datetime", "required": True}, {"name": "created_via", "type": "string", "required": True}, {"name": "record_version", "type": "integer", "required": True}]}], "relationships": [], "indices": [], "query_patterns": [], "discovery_facets": [], "migration_history": []}
-metadata_fields = {"service_id", "domain_name", "domain_class", "intent_description", "design_state", "operational_status", "schema", "schema_version", "created_at", "updated_at", "last_activity_at", "materialised_at", "storage"}
+manifest = {"manifest_version": 2, "schema_version": 1, "entities": [{"name": "note", "attributes": [{"name": "id", "type": "uuid", "required": True, "primary_key": True}, {"name": "owner_id", "type": "string", "required": True}, {"name": "created_at", "type": "datetime", "required": True}, {"name": "updated_at", "type": "datetime", "required": True}, {"name": "created_via", "type": "string", "required": True}, {"name": "record_version", "type": "integer", "required": True}, {"name": "title", "type": "string", "required": True}]}], "relationships": [], "indices": [], "query_patterns": [], "discovery_facets": [], "migration_history": []}
+evolved_manifest = json.loads(json.dumps(manifest))
+evolved_manifest["schema_version"] = 2
+evolved_manifest["migration_history"] = [{"from_schema_version": 1, "to_schema_version": 2, "operations": ["add note summary"]}]
+evolved_manifest["entities"][0]["attributes"].append({"name": "summary", "type": "string"})
+metadata_fields = {"service_id", "domain_name", "domain_class", "intent_description", "design_state", "operational_status", "schema", "schema_version", "service_revision", "recovery_state", "created_at", "updated_at", "last_activity_at", "materialised_at", "storage"}
+secrets = (principal, "release-seed", "release-design", "release-materialise", "release-evolve", "release-stale", "release-recovery-seed", "release-recovery-design", "release-recovery-materialise", str(Path(root).resolve()), "registry.sqlite", "service-stores")
 
 async def call(session, name, arguments):
     with anyio.fail_after(10):
         result = await session.call_tool(name, arguments)
     assert result.structuredContent is not None
-    return result.structuredContent
+    payload = result.structuredContent
+    assert json.loads(result.content[0].text) == payload
+    assert_redacted(payload)
+    return payload
 
-def assert_metadata(value, *, designed):
+def assert_redacted(value):
+    if isinstance(value, dict):
+        for nested in value.values():
+            assert_redacted(nested)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            assert_redacted(nested)
+        return
+    if isinstance(value, str):
+        for secret in secrets:
+            assert secret not in value
+
+def assert_metadata(value, *, state, schema_version, revision, storage=False, recovery_state="clear"):
     assert set(value) == metadata_fields
-    assert value["design_state"] == "seeded"
+    assert value["design_state"] == state
     assert value["operational_status"] == "active"
-    assert value["materialised_at"] is None
-    assert value["storage"] is None
-    if designed:
+    assert value["service_revision"] == revision
+    assert value["recovery_state"] == recovery_state
+    if schema_version is not None:
         assert isinstance(value["schema"], dict)
         assert value["schema"]["manifest_version"] == 2
-        assert value["schema"]["schema_version"] == 1
+        assert value["schema"]["schema_version"] == schema_version
         assert value["schema"]["entities"][0]["name"] == "note"
-        assert value["schema_version"] == 1
+        assert value["schema_version"] == schema_version
     else:
         assert value["schema"] is None
         assert value["schema_version"] is None
+    if storage:
+        assert isinstance(value["materialised_at"], str)
+        assert value["storage"] == {"backend": "sqlite", "namespace": f"svc_{value['service_id'].replace('-', '')}"}
+    else:
+        assert value["materialised_at"] is None
+        assert value["storage"] is None
+
+def assert_failure(value, code, retryable=False):
+    assert value["ok"] is False
+    assert value["result"] is None
+    assert value["error"]["code"] == code
+    assert value["error"]["retryable"] is retryable
 
 async def main():
     args = ["serve"] if mode == "stateless" else ["serve", "--profile", "sqlite", "--sqlite-data-root", root, "--principal-id", principal]
@@ -755,48 +789,90 @@ async def main():
             info = await call(session, "aipcs_server_info", {})
             assert info["ok"] is True
             assert info["result"]["features"]["registry_lifecycle"] is False
+            assert info["result"]["features"]["materialisation_lifecycle"] is False
             return
-        assert names == ["aipcs_server_info", "aipcs_service_seed", "aipcs_service_list", "aipcs_service_inspect", "aipcs_service_design"]
+        assert names == ["aipcs_server_info", "aipcs_service_seed", "aipcs_service_list", "aipcs_service_inspect", "aipcs_service_design", "aipcs_service_materialise", "aipcs_service_evolve"]
         info = await call(session, "aipcs_server_info", {})
         assert info["ok"] is True
+        assert info["result"]["aipcs_mcp_contract"] == "1.1.0"
         assert info["result"]["features"]["registry_lifecycle"] is True
+        assert info["result"]["features"]["materialisation_lifecycle"] is True
         seed = {"domain_name": "release_smoke", "domain_class": "release", "intent_description": "installed distribution smoke", "idempotency_key": "release-seed"}
         listed = await call(session, "aipcs_service_list", {})
         if mode == "principal_b":
             assert listed["ok"] is True and listed["result"]["services"] == []
             service_id = (Path(root).parent / "release-service-id.txt").read_text(encoding="utf-8")
             missing = await call(session, "aipcs_service_inspect", {"service_id": service_id})
-            assert missing["ok"] is False and missing["error"]["code"] == "not_found"
+            assert_failure(missing, "not_found")
+            concealed = await call(session, "aipcs_service_materialise", {"service_id": service_id, "expected_service_revision": 4, "expected_schema_version": 1, "idempotency_key": "release-principal-b"})
+            assert_failure(concealed, "stale_revision")
             created = await call(session, "aipcs_service_seed", seed)
             assert created["ok"] is True
-            assert_metadata(created["result"], designed=False)
+            assert_metadata(created["result"], state="seeded", schema_version=None, revision=1)
             return
-        services = listed["result"]["services"]
-        if services:
-            assert len(services) == 1
-            assert_metadata(services[0], designed=True)
-            service_id = services[0]["service_id"]
-        else:
-            created = await call(session, "aipcs_service_seed", seed)
+        if mode == "recovery":
+            recovery_seed = {"domain_name": "release_recovery", "domain_class": "release", "intent_description": "installed public recovery smoke", "idempotency_key": "release-recovery-seed"}
+            created = await call(session, "aipcs_service_seed", recovery_seed)
             assert created["ok"] is True
-            assert_metadata(created["result"], designed=False)
+            assert_metadata(created["result"], state="seeded", schema_version=None, revision=1)
             service_id = created["result"]["service_id"]
-            (Path(root).parent / "release-service-id.txt").write_text(service_id, encoding="utf-8")
+            recovery_design = {"service_id": service_id, "schema": manifest, "idempotency_key": "release-recovery-design"}
+            designed = await call(session, "aipcs_service_design", recovery_design)
+            assert designed["ok"] is True
+            assert_metadata(designed["result"], state="seeded", schema_version=1, revision=2)
+            store_root = Path(root) / "service-stores"
+            store_root.mkdir(mode=0o700, exist_ok=True)
+            store_root.chmod(0o700)
+            database = store_root / f"svc_{service_id.replace('-', '')}.sqlite"
+            with sqlite3.connect(database) as connection:
+                connection.execute('CREATE TABLE "unexpected" ("id" INTEGER PRIMARY KEY)')
+            database.chmod(0o600)
+            materialise = {"service_id": service_id, "expected_service_revision": 2, "expected_schema_version": 1, "idempotency_key": "release-recovery-materialise"}
+            recovery = await call(session, "aipcs_service_materialise", materialise)
+            assert_failure(recovery, "recovery_required")
+            assert recovery["error"]["issues"] == []
+            replay = await call(session, "aipcs_service_materialise", materialise)
+            assert replay == recovery
+            inspected = await call(session, "aipcs_service_inspect", {"service_id": service_id})
+            assert inspected["ok"] is True
+            assert_metadata(inspected["result"], state="seeded", schema_version=1, revision=2, recovery_state="recovery_required")
+            return
+        assert listed["ok"] is True and len(listed["result"]["services"]) in {0, 1}
+        created = await call(session, "aipcs_service_seed", seed)
+        assert created["ok"] is True
+        assert_metadata(created["result"], state="seeded", schema_version=None, revision=1)
+        service_id = created["result"]["service_id"]
+        (Path(root).parent / "release-service-id.txt").write_text(service_id, encoding="utf-8")
         design = {"service_id": service_id, "schema": manifest, "idempotency_key": "release-design"}
         designed = await call(session, "aipcs_service_design", design)
         assert designed["ok"] is True
-        assert_metadata(designed["result"], designed=True)
+        assert_metadata(designed["result"], state="seeded", schema_version=1, revision=2)
         design_replay = await call(session, "aipcs_service_design", design)
         assert design_replay == designed
-        replay = await call(session, "aipcs_service_seed", seed)
-        assert replay["ok"] is True and replay["result"]["service_id"] == service_id
-        assert_metadata(replay["result"], designed=False)
+        materialise = {"service_id": service_id, "expected_service_revision": 2, "expected_schema_version": 1, "idempotency_key": "release-materialise"}
+        materialised = await call(session, "aipcs_service_materialise", materialise)
+        assert materialised["ok"] is True
+        assert_metadata(materialised["result"], state="materialised", schema_version=1, revision=3, storage=True)
+        materialise_replay = await call(session, "aipcs_service_materialise", materialise)
+        assert materialise_replay == materialised
+        changed = dict(materialise, expected_service_revision=3)
+        assert_failure(await call(session, "aipcs_service_materialise", changed), "changed_fingerprint")
+        stale = {"service_id": service_id, "expected_service_revision": 2, "expected_schema_version": 1, "idempotency_key": "release-stale", "schema": evolved_manifest}
+        assert_failure(await call(session, "aipcs_service_evolve", stale), "stale_revision")
+        evolve = {"service_id": service_id, "expected_service_revision": 3, "expected_schema_version": 1, "idempotency_key": "release-evolve", "schema": evolved_manifest}
+        evolved = await call(session, "aipcs_service_evolve", evolve)
+        assert evolved["ok"] is True
+        assert_metadata(evolved["result"], state="materialised", schema_version=2, revision=4, storage=True)
+        assert evolved["result"]["storage"] == materialised["result"]["storage"]
+        assert evolved["result"]["materialised_at"] == materialised["result"]["materialised_at"]
+        evolve_replay = await call(session, "aipcs_service_evolve", evolve)
+        assert evolve_replay == evolved
         inspected = await call(session, "aipcs_service_inspect", {"service_id": service_id})
         assert inspected["ok"] is True
-        assert_metadata(inspected["result"], designed=True)
+        assert inspected["result"] == evolved["result"]
         final_list = await call(session, "aipcs_service_list", {})
         assert final_list["ok"] is True and len(final_list["result"]["services"]) == 1
-        assert_metadata(final_list["result"]["services"][0], designed=True)
+        assert final_list["result"]["services"][0] == evolved["result"]
 
 anyio.run(main)
 """
@@ -2663,12 +2739,14 @@ for module in (lifecycle_coordinator_module, domain_schema_module):
     origin = Path(module.__file__).resolve()
     assert any(origin.is_relative_to(value) for value in sites), origin
 
-assert tuple(tool.name for tool in mcp_server_module._tools(True)) == (
+assert tuple(tool.name for tool in mcp_server_module._tools(True, True)) == (
     "aipcs_server_info",
     "aipcs_service_seed",
     "aipcs_service_list",
     "aipcs_service_inspect",
     "aipcs_service_design",
+    "aipcs_service_materialise",
+    "aipcs_service_evolve",
 )
 
 managed = [
@@ -2917,26 +2995,27 @@ def run_installed_lifecycle_coordinator_smoke(
         )
 
 
-def run_wheel_restart_principal_smoke(
+def run_installed_public_lifecycle_smoke(
     python: Path,
     workspace: Path,
+    name: str,
     *,
     environment: Mapping[str, str],
     redaction_roots: Iterable[Path],
 ) -> None:
-    """Exercise installed wheel restart/idempotency/isolation with only public MCP data."""
+    """Exercise one installed artifact through public lifecycle, replay, restart, and isolation."""
 
     executable = python.parent / "aipcs"
     if not executable.is_file():
-        raise ReleaseVerificationError("installed wheel did not provide the aipcs console command.")
-    sqlite_root = workspace / "sqlite-root"
+        raise ReleaseVerificationError(f"installed {name} did not provide the aipcs console command.")
+    sqlite_root = workspace / f"{name}-public-lifecycle-root"
     sqlite_root.mkdir(mode=0o700)
     _run_smoke_client(
         python,
         workspace,
         executable,
         sqlite_root,
-        "release-principal-a",
+        f"release-principal-{name}-a",
         "principal_a",
         environment=environment,
         redaction_roots=redaction_roots,
@@ -2946,7 +3025,7 @@ def run_wheel_restart_principal_smoke(
         workspace,
         executable,
         sqlite_root,
-        "release-principal-a",
+        f"release-principal-{name}-a",
         "principal_a",
         environment=environment,
         redaction_roots=redaction_roots,
@@ -2956,8 +3035,18 @@ def run_wheel_restart_principal_smoke(
         workspace,
         executable,
         sqlite_root,
-        "release-principal-b",
+        f"release-principal-{name}-b",
         "principal_b",
+        environment=environment,
+        redaction_roots=redaction_roots,
+    )
+    _run_smoke_client(
+        python,
+        workspace,
+        executable,
+        sqlite_root,
+        f"release-principal-{name}-a",
+        "recovery",
         environment=environment,
         redaction_roots=redaction_roots,
     )
@@ -2970,7 +3059,7 @@ def run_sdist_startup_smoke(
     environment: Mapping[str, str],
     redaction_roots: Iterable[Path],
 ) -> None:
-    """Exercise installed sdist stateless and ready-SQLite startup with the external client."""
+    """Exercise installed sdist stateless startup with the external client."""
 
     executable = python.parent / "aipcs"
     if not executable.is_file():
@@ -2986,18 +3075,6 @@ def run_sdist_startup_smoke(
         root,
         "release-principal-s",
         "stateless",
-        environment=environment,
-        redaction_roots=redaction_roots,
-    )
-    sqlite_root = workspace / "sdist-sqlite-root"
-    sqlite_root.mkdir(mode=0o700)
-    _run_smoke_client(
-        python,
-        workspace,
-        executable,
-        sqlite_root,
-        "release-principal-sdist",
-        "principal_a",
         environment=environment,
         redaction_roots=redaction_roots,
     )
@@ -3237,9 +3314,10 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
-        run_wheel_restart_principal_smoke(
+        run_installed_public_lifecycle_smoke(
             wheel_python,
             workspace,
+            "wheel",
             environment=environment,
             redaction_roots=redaction_roots,
         )
@@ -3304,6 +3382,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             redaction_roots=redaction_roots,
         )
         run_installed_lifecycle_coordinator_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_public_lifecycle_smoke(
             sdist_python,
             workspace,
             "sdist",

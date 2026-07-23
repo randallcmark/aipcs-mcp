@@ -30,6 +30,8 @@ _TOOL_NAMES = [
     "aipcs_service_list",
     "aipcs_service_inspect",
     "aipcs_service_design",
+    "aipcs_service_materialise",
+    "aipcs_service_evolve",
 ]
 _PRIVATE_RELATIONAL_MODULES = frozenset(
     {
@@ -206,7 +208,7 @@ def _private_relational_imports(path: Path) -> set[str]:
     }
 
 
-def test_public_composition_roots_do_not_import_or_export_private_relational_sqlite_modules() -> None:
+def test_only_runtime_composes_the_private_relational_sqlite_domain_store() -> None:
     import aipcs_mcp.storage as storage_package
     import aipcs_mcp.storage.sqlite as sqlite_package
 
@@ -216,7 +218,6 @@ def test_public_composition_roots_do_not_import_or_export_private_relational_sql
     assert "DomainSchemaStore" in storage_package.__all__
 
     public_modules = [
-        PACKAGE_ROOT / "runtime.py",
         PACKAGE_ROOT / "mcp_server.py",
         PACKAGE_ROOT / "cli.py",
         PACKAGE_ROOT / "storage" / "sqlite" / "__init__.py",
@@ -228,3 +229,6 @@ def test_public_composition_roots_do_not_import_or_export_private_relational_sql
     ]
     for module in public_modules:
         assert _private_relational_imports(module) == set(), module
+    assert _private_relational_imports(PACKAGE_ROOT / "runtime.py") == {
+        "aipcs_mcp.storage.sqlite.domain_schema"
+    }

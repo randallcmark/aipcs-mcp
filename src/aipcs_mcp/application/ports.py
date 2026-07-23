@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from aipcs_mcp.lifecycle import LifecycleCommand, LifecycleIntent
+from aipcs_mcp.lifecycle import LifecycleCommand, LifecycleIntent, RecoveryState
 
 from .models import (
     AuditEvent,
@@ -45,6 +45,9 @@ class ServiceRepository(Protocol):
 
 class MutationRegistry(Protocol):
     """One global typed idempotency and lifecycle registry, owned by the transaction."""
+
+    def recovery_state(self, principal_id: str, service_id: UUID) -> RecoveryState:
+        """Return one closed aggregate without exposing lifecycle-row evidence."""
 
     def resolve_non_lifecycle(
         self,

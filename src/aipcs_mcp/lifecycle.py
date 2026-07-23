@@ -36,6 +36,14 @@ class LifecyclePhase(StrEnum):
     RECOVERY_REQUIRED = "recovery_required"
 
 
+class RecoveryState(StrEnum):
+    """Closed, service-scoped public aggregate derived only from registry evidence."""
+
+    CLEAR = "clear"
+    PENDING = "pending"
+    RECOVERY_REQUIRED = "recovery_required"
+
+
 class FoundationObservation(StrEnum):
     UNINITIALISED = "uninitialised"
     READY = "ready"

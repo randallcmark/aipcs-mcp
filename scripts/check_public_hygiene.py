@@ -25,8 +25,8 @@ PRIVATE_PARTS = {
     "exec-plans",
 }
 PRIVATE_NAMES = {
-    "AGENTS.md",
-    "CLAUDE.md",
+    "agents.md",
+    "claude.md",
     "destination-sha256.tsv",
     "secrets.json",
     "source-sha256.tsv",
@@ -89,14 +89,16 @@ def path_violations(relative: PurePosixPath) -> list[str]:
     parts = relative.parts
     name = relative.name
     posix = relative.as_posix()
+    normalised_parts = tuple(part.casefold() for part in parts)
+    normalised_name = name.casefold()
     problems: list[str] = []
-    if any(part.startswith(".data") for part in parts):
+    if any(part.startswith(".data") for part in normalised_parts):
         problems.append("local data path")
-    if set(parts) & PRIVATE_PARTS or name in PRIVATE_NAMES:
+    if set(normalised_parts) & PRIVATE_PARTS or normalised_name in PRIVATE_NAMES:
         problems.append("private agent/archive/plan path")
-    if name in CREDENTIAL_NAMES:
+    if normalised_name in CREDENTIAL_NAMES:
         problems.append("likely credential filename")
-    if name.startswith(".env") and name != ".env.example":
+    if normalised_name.startswith(".env") and normalised_name != ".env.example":
         problems.append("likely credential filename")
     if relative.suffix.lower() in PRIVATE_SUFFIXES:
         problems.append("database or likely credential filename")

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import pytest
-from fixtures import valid_design_request
+from fixtures import valid_design_request, valid_manifest
 
 import aipcs_mcp.legacy_v1
 from aipcs_mcp.contracts import (
     StorageSummary,
     parse_public_design,
+    parse_service_evolve,
+    parse_service_materialise,
     public_server_info,
     validate_stdio_only,
 )
@@ -18,7 +20,7 @@ def test_server_info_is_safe_and_capability_versioned() -> None:
     assert data == {
         "server_name": "aipcs-mcp",
         "package_version": "0.0.0.dev0",
-        "aipcs_mcp_contract": "1.0",
+        "aipcs_mcp_contract": "1.1.0",
         "supported_manifest_versions": [2],
         "transports": ["stdio"],
         "features": {
@@ -27,6 +29,7 @@ def test_server_info_is_safe_and_capability_versioned() -> None:
             "legacy_v1_importer": True,
             "stdio_preflight": True,
             "registry_lifecycle": False,
+            "materialisation_lifecycle": False,
         },
         "operational_statuses": ["active"],
     }
@@ -142,3 +145,71 @@ def test_listener_configuration_is_rejected_before_server_construction(
 
 def test_stdio_configuration_is_allowed() -> None:
     assert validate_stdio_only("stdio", {}) == "stdio"
+
+
+def test_lifecycle_parsers_require_strict_preconditions_and_detach_evolve_manifest() -> None:
+    materialise = parse_service_materialise(
+        {
+            "service_id": "5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23",
+            "expected_service_revision": 2,
+            "expected_schema_version": 1,
+            "idempotency_key": "materialise-1",
+        }
+    )
+    assert materialise.expected_service_revision == 2
+
+    schema = valid_manifest()
+    schema["schema_version"] = 2
+    schema["migration_history"] = [
+        {"from_schema_version": 1, "to_schema_version": 2, "operations": ["add summary"]}
+    ]
+    request = {
+        "service_id": "5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23",
+        "expected_service_revision": 3,
+        "expected_schema_version": 1,
+        "idempotency_key": "evolve-1",
+        "schema": schema,
+    }
+    evolve = parse_service_evolve(request)
+    request["schema"]["entities"][0]["name"] = "mutated_after_validation"
+    assert evolve.schema_.entities[0].name == "project"
+
+
+@pytest.mark.parametrize(
+    ("parser", "payload"),
+    [
+        (
+            parse_service_materialise,
+            {
+                "service_id": "5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23",
+                "expected_service_revision": True,
+                "expected_schema_version": 1,
+                "idempotency_key": "materialise-1",
+            },
+        ),
+        (
+            parse_service_materialise,
+            {
+                "service_id": "5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23",
+                "expected_service_revision": 1,
+                "expected_schema_version": 2,
+                "idempotency_key": "materialise-1",
+            },
+        ),
+        (
+            parse_service_evolve,
+            {
+                "service_id": "5b5d0b6a-976c-4e32-b4d2-cc0a64e3ee23",
+                "expected_service_revision": 1,
+                "expected_schema_version": 1,
+                "idempotency_key": "evolve-1",
+                "schema": {"manifest_version": 1},
+            },
+        ),
+    ],
+)
+def test_lifecycle_parsers_reject_invalid_input_before_execution(
+    parser: object, payload: dict[str, object]
+) -> None:
+    with pytest.raises(AipcsContractError):
+        parser(payload)  # type: ignore[operator]

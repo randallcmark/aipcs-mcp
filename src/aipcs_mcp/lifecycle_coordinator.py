@@ -1,4 +1,4 @@
-"""Private, re-observing lifecycle coordinator; deliberately uncomposed."""
+"""Private, re-observing lifecycle coordinator composed only by the SQLite runtime."""
 
 from __future__ import annotations
 
