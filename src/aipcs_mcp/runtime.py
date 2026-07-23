@@ -10,6 +10,7 @@ from mcp.server.lowlevel import Server
 from .application.ports import Clock, IdProvider
 from .application.services import ServiceApplication
 from .configuration.models import ResolvedConfiguration
+from .configuration.resolver import is_supported_sqlite_platform, is_supported_sqlite_runtime
 from .mcp_server import create_server
 from .storage.contracts import MigrationState
 from .storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
@@ -34,12 +35,16 @@ def compose_server(config: ResolvedConfiguration) -> Server:
 
     if config.profile == "stateless":
         return create_server()
+    if config.profile == "sqlite" and (
+        not is_supported_sqlite_platform() or not is_supported_sqlite_runtime()
+    ):
+        raise RuntimeError("Unsupported runtime profile.")
     if config.profile != "sqlite" or config.principal_id is None or config.sqlite_data_root is None:
         raise RuntimeError("Unsupported runtime profile.")
     location = SQLiteLocationPolicy.from_resolved(
         config.sqlite_data_root, config.sources["sqlite_data_root"]
     )
-    adapter = SQLiteRegistryAdapter(location)
+    adapter = SQLiteRegistryAdapter(location, busy_timeout_ms=config.sqlite_busy_timeout_ms)
     state = adapter.migrate()
     if not _ready_registry(state):
         raise RuntimeError("Registry is not ready.")

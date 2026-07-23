@@ -25,5 +25,11 @@ class StorageUnavailable(StorageError):
     message = "The requested storage is unavailable."
 
 
+class StorageBusy(StorageError):
+    """SQLite reported bounded, retryable cross-process contention."""
+
+    message = "The requested storage is busy."
+
+
 class StorageMigrationError(StorageError):
     message = "The storage migration state is incompatible."

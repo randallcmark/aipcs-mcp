@@ -12,6 +12,7 @@ from aipcs_mcp.storage.sqlite.service_store_migrations import (
     INDEX_XINFO,
     META,
     MIGRATION,
+    R2_POLICY,
     TABLE_XINFO,
 )
 
@@ -35,4 +36,4 @@ def test_compiled_reserved_table_and_index_signatures_match_fresh_store(tmp_path
             assert (
                 tuple(map(tuple, connection.execute(f'PRAGMA index_xinfo("{index}")'))) == expected
             )
-    assert {META, MIGRATION} == set(TABLE_XINFO)
+    assert {META, MIGRATION, R2_POLICY.table_name} == set(TABLE_XINFO)

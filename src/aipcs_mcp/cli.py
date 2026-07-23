@@ -32,6 +32,9 @@ def _add_configuration_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sqlite-data-root", help="SQLite data-root override (redacted in output)."
     )
+    parser.add_argument(
+        "--sqlite-busy-timeout-ms", help="SQLite busy-handler timeout in milliseconds."
+    )
     parser.add_argument("--postgres-dsn-env", help="Future PostgreSQL DSN environment reference.")
     parser.add_argument("--log-level", help="Stderr logging level override.")
 
@@ -69,6 +72,7 @@ def _overrides_from_args(args: argparse.Namespace) -> ConfigOverrides:
         transport=args.transport,
         principal_id=args.principal_id,
         sqlite_data_root=args.sqlite_data_root,
+        sqlite_busy_timeout_ms=args.sqlite_busy_timeout_ms,
         postgres_dsn_env=args.postgres_dsn_env,
         log_level=args.log_level,
     )

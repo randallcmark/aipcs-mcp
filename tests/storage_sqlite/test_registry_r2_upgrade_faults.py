@@ -105,7 +105,7 @@ def _adapter(root: Path) -> SQLiteRegistryAdapter:
 
 
 def _assert_exact_r1(adapter: SQLiteRegistryAdapter, database: Path) -> None:
-    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 3, "incompatible")
     with sqlite3.connect(database) as connection:
         assert connection.execute('SELECT applied_revision,dirty FROM "aipcs_registry_meta"').fetchone() == (
             1,
@@ -159,7 +159,7 @@ class _UpgradeFaultConnection:
         return getattr(self._wrapped, name)
 
     def execute(self, statement: str, *args, **kwargs):
-        if statement == "BEGIN EXCLUSIVE":
+        if statement == "BEGIN IMMEDIATE":
             self._upgrade_started = True
         elif (
             self._upgrade_started
@@ -226,7 +226,7 @@ def test_r1_upgrade_faults_roll_back_to_exact_r1_and_explicit_retry_upgrades(
     assert captured.value.__cause__ is None and captured.value.__context__ is None
     monkeypatch.setattr(adapter_module, "connect", real_connect)
     _assert_exact_r1(adapter, database)
-    assert adapter.migrate() == MigrationState("registry", 2, 2, "ready")
+    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
 
 
 def test_post_commit_upgrade_fault_reopens_clean_r2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,8 +243,8 @@ def test_post_commit_upgrade_fault_reopens_clean_r2(tmp_path: Path, monkeypatch:
         adapter.migrate()
     assert captured.value.__cause__ is None and captured.value.__context__ is None
     monkeypatch.setattr(adapter_module, "connect", real_connect)
-    assert adapter.inspect_migration() == MigrationState("registry", 2, 2, "ready")
-    assert adapter.migrate() == MigrationState("registry", 2, 2, "ready")
+    assert adapter.inspect_migration() == MigrationState("registry", 2, 3, "dirty")
+    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
 
 
 @pytest.mark.parametrize("primary_count", (999, 1000, 1001))
@@ -253,7 +253,7 @@ def test_r1_upgrade_retains_newest_1000_audits_per_principal(
 ) -> None:
     root = tmp_path / str(primary_count)
     database = _create_exact_r1(root, {"p": primary_count, "q": 1})
-    assert _adapter(root).migrate() == MigrationState("registry", 2, 2, "ready")
+    assert _adapter(root).migrate() == MigrationState("registry", 3, 3, "ready")
     with sqlite3.connect(database) as connection:
         counts = connection.execute(
             'SELECT principal_id,count(*) FROM "aipcs_registry_audit" '

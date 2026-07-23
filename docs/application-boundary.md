@@ -59,10 +59,10 @@ from all of these values. A schema change is not an adapter migration, and neith
 for a durable operation/recovery record.
 
 The uncomposed service-store catalog demonstrates that separation: its private
-revision 1 can make adapter metadata ready without reading a manifest or
-changing registry state. Such a database is not a materialised service. Direct
-initialisation may leave it orphaned until a future operation record can
-coordinate and reconcile the independently committed stores.
+R2 WAL-ready foundation can make adapter metadata ready without reading a
+manifest or changing registry state. Such a database is not a materialised
+service. Direct initialisation may leave it orphaned until a future operation
+record can coordinate and reconcile the independently committed stores.
 
 The relational specification is also not a second schema authority. It is an
 immutable, backend-neutral projection supplied by the registry-authoritative
@@ -85,8 +85,9 @@ retain one immutable admitted target snapshot, but that evidence never becomes a
 manifest. A coordinator will adopt an exact contained physical target only within the documented
 same-operating-system-owner boundary, because no domain provenance seal exists to distinguish a prior
 exact target from a crash-completed one. It must report recovery-required rather than infer or
-repair deleted, partial, extra, altered, or incompatible state. These are future V1-08B-D rules;
-they do not create a public operation, storage I/O path, or recovery command.
+repair deleted, partial, extra, altered, or incompatible state. The remaining
+coordinator rules are future V1-08D work; they do not create a public operation,
+storage I/O path, or recovery command.
 
 ### V1-08B durable registry prerequisite
 
@@ -134,8 +135,13 @@ runtime does not construct or migrate the service-store catalog. Read
 operations do not execute DDL, and opening a unit of work does not
 opportunistically alter storage layout.
 
-V1-08B does not alter the runtime composition rule, configuration, MCP tool
+V1-08B did not alter the runtime composition rule, configuration, MCP tool
 registration, SQLite WAL settings, busy policy, or service-store behavior.
+V1-08C subsequently fixes the registry at R3 and the private service-store
+foundation at R2 with persistent WAL, `synchronous=FULL`, a 1..30,000 ms
+busy timeout (default 5,000), and no adapter retry after `StorageBusy`. It
+does not alter runtime composition, MCP registration, or public service-store
+behavior.
 
 The application layer requests behavior through its boundary; it never creates
 tables, parses storage locations, opens database connections, or selects a

@@ -1,10 +1,12 @@
-"""Finite compiled SQLite registry migration revision 1."""
+"""Immutable compiled SQLite registry migration descriptors through R3."""
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
 from types import MappingProxyType
+
+from .wal_policy import WALPolicyDescriptor, policy_checksum, policy_table_ddl
 
 TARGET_REVISION = 1
 MIGRATION_ID = "registry-0001-initial"
@@ -258,7 +260,7 @@ INDEX_XINFO = {
 }
 
 
-# Preserve revision 1 as immutable historical evidence before publishing the R2 target aliases.
+# Preserve revision 1 as immutable historical evidence before constructing later descriptors.
 R1_MIGRATION_ID = MIGRATION_ID
 R1_DDL = DDL
 R1_CHECKSUM = CHECKSUM
@@ -511,6 +513,27 @@ R2_INDEX_XINFO = {
     ),
 }
 
+
+R3_MIGRATION_ID = "registry-0003-wal-policy"
+R3_POLICY_TABLE = "aipcs_registry_storage_policy"
+R3_POLICY_DDL = policy_table_ddl(R3_POLICY_TABLE)
+R3_CHECKSUM = policy_checksum(R3_POLICY_DDL)
+R3_POLICY = WALPolicyDescriptor(R3_POLICY_TABLE, R3_POLICY_DDL, R3_CHECKSUM)
+R3_DDL = (R3_POLICY_DDL,)
+R3_EXPECTED_SQL = {**R2_EXPECTED_SQL, R3_POLICY_TABLE: R3_POLICY_DDL}
+R3_TABLE_XINFO = {
+    **R2_TABLE_XINFO,
+    R3_POLICY_TABLE: (
+        (0, "singleton", "INTEGER", 1, None, 1, 0),
+        (1, "policy_id", "TEXT", 1, None, 0, 0),
+        (2, "policy_checksum", "TEXT", 1, None, 0, 0),
+        (3, "phase", "TEXT", 1, None, 0, 0),
+    ),
+}
+R3_FOREIGN_KEYS = {**R2_FOREIGN_KEYS, R3_POLICY_TABLE: ()}
+R3_INDEX_LIST = {**R2_INDEX_LIST, R3_POLICY_TABLE: ()}
+R3_INDEX_XINFO = R2_INDEX_XINFO
+
 R1 = MigrationDescriptor(
     1,
     R1_MIGRATION_ID,
@@ -533,15 +556,28 @@ R2 = MigrationDescriptor(
     MappingProxyType(R2_INDEX_LIST),
     MappingProxyType(R2_INDEX_XINFO),
 )
-MIGRATIONS = (R1, R2)
-TARGET_REVISION = R2.revision
+R3 = MigrationDescriptor(
+    3,
+    R3_MIGRATION_ID,
+    R3_DDL,
+    R3_CHECKSUM,
+    MappingProxyType(R3_EXPECTED_SQL),
+    MappingProxyType(R3_TABLE_XINFO),
+    MappingProxyType(R3_FOREIGN_KEYS),
+    MappingProxyType(R3_INDEX_LIST),
+    MappingProxyType(R3_INDEX_XINFO),
+)
+MIGRATIONS = (R1, R2, R3)
+WAL_TARGET_REVISION = R3.revision
 
-# Existing imports intentionally denote the current target; R1 is available explicitly above.
-MIGRATION_ID = R2.migration_id
-DDL = R2.ddl
-CHECKSUM = R2.checksum
-EXPECTED_SQL = R2_EXPECTED_SQL
-TABLE_XINFO = R2_TABLE_XINFO
-FOREIGN_KEYS = R2_FOREIGN_KEYS
-INDEX_LIST = R2_INDEX_LIST
-INDEX_XINFO = R2_INDEX_XINFO
+# C5 integrates the R2-to-R3 physical-policy state machine.  Runtime aliases
+# now describe the only ready registry state.
+TARGET_REVISION = R3.revision
+MIGRATION_ID = R3.migration_id
+DDL = R3.ddl
+CHECKSUM = R3.checksum
+EXPECTED_SQL = R3_EXPECTED_SQL
+TABLE_XINFO = R3_TABLE_XINFO
+FOREIGN_KEYS = R3_FOREIGN_KEYS
+INDEX_LIST = R3_INDEX_LIST
+INDEX_XINFO = R3_INDEX_XINFO

@@ -12,7 +12,13 @@ from .contracts import (
     StorageBackend,
     StorageComponent,
 )
-from .errors import StorageContractError, StorageError, StorageMigrationError, StorageUnavailable
+from .errors import (
+    StorageBusy,
+    StorageContractError,
+    StorageError,
+    StorageMigrationError,
+    StorageUnavailable,
+)
 
 __all__ = [
     "DomainSchemaState",
@@ -24,6 +30,7 @@ __all__ = [
     "ServiceStoreLocator",
     "StorageAdapterInfo",
     "StorageBackend",
+    "StorageBusy",
     "StorageComponent",
     "StorageContractError",
     "StorageError",

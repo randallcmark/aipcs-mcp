@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import sqlite3
 import stat
 import tempfile
 from pathlib import Path
@@ -18,6 +19,8 @@ from aipcs_mcp.storage.sqlite import (
     SQLiteServiceStoreCatalog,
 )
 from aipcs_mcp.storage.sqlite import location as location_module
+from aipcs_mcp.storage.sqlite.connection import SQLiteConnectionPurpose, connect
+from aipcs_mcp.storage.sqlite.location import create_database
 
 
 def _resolved_policy(monkeypatch, platform: str, root_env: dict[str, str]):
@@ -352,3 +355,180 @@ def test_location_objects_never_render_root_paths(tmp_path: Path) -> None:
         assert not hasattr(anchored, "database_path")
     finally:
         anchored.close()
+
+
+def test_safe_wal_sidecars_are_revalidated_across_live_peer_lifecycle(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    database = root / "registry.sqlite"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    database.chmod(0o600)
+    wal = root / "registry.sqlite-wal"
+    shm = root / "registry.sqlite-shm"
+    wal.write_bytes(b"wal")
+    shm.write_bytes(b"shm")
+    wal.chmod(0o600)
+    shm.chmod(0o600)
+
+    anchored = SQLiteLocationPolicy(root).acquire(create_root=False, allow_journal=False)
+    assert anchored is not None
+    try:
+        anchored.adopt_live_sidecars(allow_journal=False)
+        anchored.verify_live_sidecars(allow_journal=False)
+
+        wal.unlink()
+        wal.write_bytes(b"replacement")
+        wal.chmod(0o600)
+        anchored.verify_live_sidecars(allow_journal=False)
+
+        shm.unlink()
+        shm.write_bytes(b"second-replacement")
+        shm.chmod(0o600)
+        anchored.verify_live_sidecars(allow_journal=False)
+
+        wal.unlink()
+        anchored.verify_live_sidecars(allow_journal=False)
+    finally:
+        anchored.close()
+
+
+def test_live_metadata_checks_never_open_or_close_sqlite_locked_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    database = root / "registry.sqlite"
+    with sqlite3.connect(database) as raw:
+        assert raw.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    database.chmod(0o600)
+    anchored = SQLiteLocationPolicy(root).acquire(
+        create_root=False,
+        allow_journal=False,
+    )
+    assert anchored is not None
+    connection = connect(
+        anchored,
+        "rw",
+        query_only=False,
+        purpose=SQLiteConnectionPurpose.READY_OPERATION,
+    )
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        with monkeypatch.context() as live:
+            live.setattr(
+                location_module.os,
+                "open",
+                lambda *args, **kwargs: pytest.fail(
+                    f"live validation opened SQLite file: {args!r} {kwargs!r}"
+                ),
+            )
+            anchored.verify_live_database_identity()
+            anchored.adopt_live_sidecars(allow_journal=False)
+            anchored.verify_live_sidecars(allow_journal=False)
+        connection.rollback()
+    finally:
+        connection.close()
+        anchored.verify_database_identity()
+        anchored.verify_closed_sidecars(allow_journal=False)
+        anchored.close()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_orphan_wal_sidecars_are_rejected(tmp_path: Path, suffix: str) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    sidecar = root / f"registry.sqlite{suffix}"
+    sidecar.write_bytes(b"orphan")
+    sidecar.chmod(0o600)
+
+    with pytest.raises(StorageUnavailable):
+        SQLiteLocationPolicy(root).acquire(create_root=False, allow_journal=False)
+
+
+def test_after_close_accepts_absence_or_a_new_safe_sidecar_identity(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    database = root / "registry.sqlite"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    database.chmod(0o600)
+    wal = root / "registry.sqlite-wal"
+    wal.write_bytes(b"wal")
+    wal.chmod(0o600)
+
+    anchored = SQLiteLocationPolicy(root).acquire(create_root=False, allow_journal=False)
+    assert anchored is not None
+    try:
+        anchored.adopt_live_sidecars(allow_journal=False)
+        wal.unlink()
+        anchored.verify_closed_sidecars(allow_journal=False)
+        wal.write_bytes(b"new")
+        wal.chmod(0o600)
+        anchored.verify_closed_sidecars(allow_journal=False)
+    finally:
+        anchored.close()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo", "broad_mode"])
+def test_unsafe_wal_sidecar_metadata_fails_closed(
+    tmp_path: Path, suffix: str, kind: str
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    database = root / "registry.sqlite"
+    database.write_bytes(b"")
+    database.chmod(0o600)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"sentinel")
+    outside.chmod(0o600)
+    sidecar = root / f"registry.sqlite{suffix}"
+    if kind == "symlink":
+        sidecar.symlink_to(outside)
+    elif kind == "hardlink":
+        os.link(outside, sidecar)
+    elif kind == "fifo":
+        os.mkfifo(sidecar, 0o600)
+    else:
+        sidecar.write_bytes(b"sidecar")
+        sidecar.chmod(0o640)
+
+    with pytest.raises(StorageUnavailable):
+        SQLiteLocationPolicy(root).acquire(create_root=False, allow_journal=False)
+    assert outside.read_bytes() == b"sentinel"
+
+
+def test_rollback_journal_is_rejected_beside_wal_operational_state(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    database = root / "registry.sqlite"
+    database.write_bytes(b"")
+    database.chmod(0o600)
+    journal = root / "registry.sqlite-journal"
+    wal = root / "registry.sqlite-wal"
+    journal.write_bytes(b"journal")
+    wal.write_bytes(b"wal")
+    journal.chmod(0o600)
+    wal.chmod(0o600)
+
+    with pytest.raises(StorageUnavailable):
+        SQLiteLocationPolicy(root).acquire(create_root=False, allow_journal=True)
+
+
+def test_database_creation_reacquires_an_exact_concurrent_winner(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        first = create_database(root_fd)
+        second = create_database(root_fd)
+    finally:
+        os.close(root_fd)
+
+    assert (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+    assert stat.S_IMODE(second.st_mode) == 0o600
+    assert second.st_nlink == 1

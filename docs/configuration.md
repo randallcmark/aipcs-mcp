@@ -23,7 +23,8 @@ constructs storage, performs the single startup migration, and starts MCP.
 stdio MCP protocol.
 
 The supported non-secret overrides are `--profile`, `--transport`,
-`--principal-id`, `--sqlite-data-root`, `--postgres-dsn-env`, and `--log-level`.
+`--principal-id`, `--sqlite-data-root`, `--sqlite-busy-timeout-ms`,
+`--postgres-dsn-env`, and `--log-level`.
 When `serve` succeeds, the resolved log level is applied to stderr logging;
 configuration commands do not mutate process logging.
 
@@ -43,6 +44,7 @@ values fail validation.
 | Transport | `AIPCS_TRANSPORT` |
 | Principal identity | `AIPCS_PRINCIPAL_ID` |
 | SQLite data-root descriptor | `AIPCS_SQLITE_DATA_ROOT` |
+| SQLite busy timeout (milliseconds) | `AIPCS_SQLITE_BUSY_TIMEOUT_MS` |
 | PostgreSQL DSN reference | `AIPCS_POSTGRES_DSN_ENV` |
 | Stderr log level | `AIPCS_LOG_LEVEL` |
 
@@ -80,6 +82,9 @@ is accepted.
     [identity]
     principal_id = "local_operator"
 
+    [sqlite]
+    busy_timeout_ms = 5000
+
     [logging]
     level = "warning"
 
@@ -88,7 +93,11 @@ The optional SQLite `data_root` descriptor must be absolute and no longer than
 platform default: `$XDG_DATA_HOME/aipcs-mcp` (or `~/.local/share/aipcs-mcp`) on
 Linux, `~/Library/Application Support/aipcs-mcp` on macOS, and a future
 `LOCALAPPDATA` location on Windows. Resolution never opens or creates this
-path, and reports it as not explicitly configured. PostgreSQL requires a
+path, and reports it as not explicitly configured. SQLite `busy_timeout_ms`
+is an integer from 1 through 30,000 and defaults to 5,000. TOML must provide a
+real integer; CLI and environment values must be canonical unsigned decimal
+text (with no signs, whitespace, leading zeroes, or separators). Explicit
+SQLite settings are invalid for stateless and PostgreSQL profiles. PostgreSQL requires a
 `dsn_env` reference matching `^[A-Z][A-Z0-9_]{0,127}$`; its value is not read and
 connectivity is not tested. Logging level is one of `debug`, `info`, `warning`,
 or `error`.
@@ -98,7 +107,7 @@ or `error`.
 | Profile | Structural availability | `serve` behavior |
 | --- | --- | --- |
 | stateless | Available | Starts a server-info-only stdio process. |
-| sqlite on Linux or macOS | Available | Performs the sole explicit registry migration, then starts the five-tool lifecycle server only if storage is ready. |
+| sqlite on Linux or macOS with SQLite 3.51.3+ | Available | Performs the sole explicit registry migration, then starts the five-tool lifecycle server only if storage is ready. |
 | sqlite on Windows | Unavailable | Rejected before server construction. |
 | postgresql | Unavailable | Rejected before server construction. |
 
@@ -117,9 +126,12 @@ before MCP starts.
 
 For a SQLite process, either supply an absolute `sqlite_data_root` or use the
 redacted platform default described above. The root is a local POSIX directory;
-use a single active writer and do not treat the profile as network-filesystem,
-multi-writer, or Windows support. PostgreSQL fields remain recognised only for
-future configuration compatibility and do not select an adapter.
+cooperating processes under the same effective user may have many readers, but
+SQLite serialises writers under the configured timeout. A contention result is
+`StorageBusy`; the adapter performs no internal retry. Do not treat the profile
+as network-filesystem, multi-host, hostile-same-user, or Windows support.
+PostgreSQL fields remain recognised only for future configuration compatibility
+and do not select an adapter.
 
 ## Safe reports and failures
 

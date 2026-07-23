@@ -86,10 +86,14 @@ and retains only the newest 1,000 rows per principal by audit identifier. That
 bound never removes lifecycle/idempotency evidence and is not an operator or
 public control.
 
-This packet does not compose the service store, add a coordinator, observe or
+V1-08B itself did not compose the service store, add a coordinator, observe or
 reconcile physical state, change WAL/busy policy, create a runtime/configuration
-surface, register MCP tools, or add a repair procedure. Those remain deferred
-to V1-08C through V1-08E.
+surface, register MCP tools, or add a repair procedure. V1-08C now fixes the
+private foundation at R2 under the same WAL policy as registry R3: local POSIX,
+same-effective-user use; one writer with concurrent readers; a 1..30,000 ms
+busy timeout (default 5,000); and `StorageBusy` without adapter retries. A
+coordinator, public composition, and repair procedure remain deferred to
+V1-08D through V1-08E.
 
 ## Public boundary
 

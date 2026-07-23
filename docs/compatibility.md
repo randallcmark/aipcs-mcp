@@ -11,7 +11,7 @@ not yet a supported release.
 | Schema manifest | manifest_version | Manifest v2 is the only normal public design input. |
 | Configuration document | config_version | Strict V1 configuration document and source precedence. |
 | Legacy conversion | Explicit manifest-v1 converter | One-way library conversion with provenance and warnings. |
-| Storage migration | Adapter revision | Independent SQLite registry revision 1 and private service-store revision 1; adapter-private layouts, foundation readiness, and relational fidelity checks. |
+| Storage migration | Adapter revision | SQLite registry R3 and private service-store R2; adapter-private checksummed WAL policy, foundation readiness, and relational fidelity checks. |
 | Export bundle | export_format_version | Not implemented. |
 
 ## Current contract
@@ -33,10 +33,16 @@ principal identity, and audit data.
 AIPCS configuration is resolved by explicit CLI option, documented environment
 variable, selected TOML file, and safe default in that order. `config show` is
 redacted. `config validate` and `serve` succeed only for a runnable profile.
-Stateless is runnable everywhere supported by the package. SQLite is structurally
-runnable only on Linux and macOS, subject to live storage checks at `serve`.
-Windows SQLite and PostgreSQL are unavailable. Configuration inspection does not
-claim a path is ready and does not touch storage.
+Stateless is runnable everywhere supported by the package. SQLite is
+structurally runnable only on Linux/macOS with SQLite 3.51.3 or newer, subject
+to live storage checks at `serve`. Windows SQLite and PostgreSQL are
+unavailable. Configuration inspection does not claim a path is ready and does
+not touch storage.
+
+The SQLite certification boundary is one host on a local POSIX filesystem with
+cooperating processes under the same effective user. WAL permits concurrent
+readers, while SQLite serialises writers; it is not multi-host, network-
+filesystem, Windows, or hostile-same-user support.
 
 The SQLite lifecycle is principal-scoped. A configured principal is an opaque,
 process-local boundary selected by the operator, not client identity or hosted
@@ -85,14 +91,15 @@ non-retryable. Storage-busy, different-key operation-in-progress, and operation-
 retryable. An exact same-key prepared claim resumes reconciliation rather than returning
 operation-in-progress.
 
-V1-08B is the private durable-intent prerequisite, not a public lifecycle release. Its registry
-R2 migration upgrades only an exact, clean, public-reachable R1 registry in one transaction; all
-other R1-like, dirty, partial, altered, unknown, or future states fail closed. R1 migration
-history and checksums remain historical evidence, while fresh creation receives the same R1-then-R2
-history. The public migration state remains `uninitialised`, `ready`, `dirty`, or `incompatible`;
-there is no public upgradeable or repair state.
+V1-08B was the private durable-intent prerequisite, not a public lifecycle release. Its historical
+registry R2 migration upgrades only an exact, clean, public-reachable R1 registry in one
+transaction; all other R1-like, dirty, partial, altered, unknown, or future states fail closed. R1
+migration history and checksums remain historical evidence, while fresh creation receives the same
+R1-then-R2 history before the current R3 WAL policy. The public migration state remains
+`uninitialised`, `ready`, `dirty`, or `incompatible`; there is no public upgradeable or repair
+state.
 
-R2 introduces an internal `service_revision` epoch, starting at 1, and reserves the existing
+The historical R2 layout introduces an internal `service_revision` epoch, starting at 1, and reserves the existing
 nullable materialisation metadata for only a safe logical backend/opaque namespace pair. Current
 public seed, list, inspect, and design results continue to omit `service_revision` and return
 null `materialised_at` and `storage`. The single global idempotency ledger retains exact completed
@@ -106,6 +113,17 @@ cap is enforced during migration and on each later audit append; lifecycle/idemp
 never governed or pruned by that cap or exposed through an audit API. It is a private constant, not a
 configuration, environment, CLI, or MCP setting.
 
+V1-08C advances the current registry to R3 and each private service-store
+foundation to R2.
+Both use an exact `prepared | ready` policy marker to make DELETE-to-WAL
+conversion crash-resumable. Ready local storage requires WAL,
+`synchronous=FULL`, `wal_autocheckpoint=1000`, secured SQLite-managed
+sidecars, one configured busy timeout, and one PASSIVE checkpoint for explicit
+migration/startup. `sqlite_busy_timeout_ms` is 1 through 30,000 ms (default
+5,000); numeric BUSY-family results map to `StorageBusy` without adapter
+retries. These are SQLite physical mechanics, not manifest, MCP, or PostgreSQL
+compatibility fields. No public tool or capability is added.
+
 V1-08E, not this current release, will expose the bounded projection
 `recovery_state: clear | pending | recovery_required` with `service_revision`. It will expose no
 operation identifier, fingerprint, idempotency key, target snapshot, storage path, fault text, or
@@ -117,14 +135,15 @@ V1-11.
 
 The project does not provide PostgreSQL, public service-store allocation or
 materialisation, records, branches, search, export/import, recovery,
-multi-writer guarantees, administration CLI, remote transport, or deployment
+multi-host SQLite guarantees, administration CLI, remote transport, or deployment
 interface. V1-08 is sequenced as contract (A), durable intent (B), SQLite WAL/busy policy (C),
 internal coordinator (D), public lifecycle (E), record runtime (F), and discovery/topology (G);
 PostgreSQL begins only after V1-08G. Their future compatibility commitments will be documented when
 they exist.
 
-V1-08B adds none of the runtime composition, configuration, MCP registration, WAL/busy policy,
-coordinator capability, service-store I/O, or repair workflow deferred to later slices.
+V1-08C adds only the documented SQLite timeout configuration and private WAL
+policy. It adds no MCP registration, coordinator capability, public
+service-store I/O, or repair workflow.
 
 The contract identifier is currently `1.0`. Although earlier planning described
 it as SemVer, no version increment policy is defined yet. Support windows,

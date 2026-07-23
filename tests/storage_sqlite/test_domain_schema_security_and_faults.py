@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import os
 import sqlite3
+import stat
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
@@ -41,6 +42,17 @@ def _locator(value: int = 1) -> ServiceStoreLocator:
 
 def _database(root: Path, locator: ServiceStoreLocator) -> Path:
     return root / "service-stores" / f"{locator.namespace}.sqlite"
+
+
+def _replace_wal_database_with_empty_substitute(database: Path, original: Path) -> None:
+    """Move a WAL database and its operational siblings as one database."""
+
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(str(database) + suffix)
+        if source.exists():
+            source.rename(Path(str(original) + suffix))
+    descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
 
 
 def _manifest(payload: dict[str, object]) -> ManifestV2:
@@ -251,13 +263,29 @@ def test_absent_and_empty_foundations_are_safe_migration_preconditions(tmp_path:
         _assert_bounded(captured.value, root)
 
 
-@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
-def test_domain_store_refuses_sidecars_without_recovery_or_disclosure(
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_domain_store_rejects_unsafe_wal_sidecar_metadata_without_disclosure(
     tmp_path: Path, suffix: str
 ) -> None:
     store, locator, root, database, specification = _ready(tmp_path)
     sidecar = Path(str(database) + suffix)
-    descriptor = os.open(sidecar, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    assert sidecar.exists()
+    sidecar.chmod(0o644)
+
+    for operation in (store.inspect, store.materialise):
+        with pytest.raises(StorageUnavailable) as captured:
+            operation(locator, specification)
+        _assert_bounded(captured.value, root)
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o644
+    assert repr(store) == "SQLiteDomainSchemaStore(<redacted>)"
+
+
+def test_domain_store_rejects_unexpected_rollback_journal_without_recovery_or_disclosure(
+    tmp_path: Path,
+) -> None:
+    store, locator, root, database, specification = _ready(tmp_path)
+    journal = Path(str(database) + "-journal")
+    descriptor = os.open(journal, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.write(descriptor, b"untrusted-sidecar")
     os.close(descriptor)
 
@@ -265,8 +293,7 @@ def test_domain_store_refuses_sidecars_without_recovery_or_disclosure(
         with pytest.raises(StorageUnavailable) as captured:
             operation(locator, specification)
         _assert_bounded(captured.value, root)
-    assert sidecar.exists()
-    assert repr(store) == "SQLiteDomainSchemaStore(<redacted>)"
+    assert journal.exists()
 
 
 def test_domain_materialisation_isolates_locators_and_never_touches_registry(
@@ -385,9 +412,7 @@ def test_identity_and_reacquire_unavailability_take_precedence_after_domain_ddl(
         calls += 1
         result = real_inspect(connection, layout)  # type: ignore[arg-type]
         if calls == 2:
-            database.rename(original_database)
-            descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(descriptor)
+            _replace_wal_database_with_empty_substitute(database, original_database)
         return result
 
     with monkeypatch.context() as context:
@@ -396,16 +421,19 @@ def test_identity_and_reacquire_unavailability_take_precedence_after_domain_ddl(
             store.materialise(locator, specification)
         _assert_bounded(captured.value, root)
     assert database.stat().st_size == 0
-    with pytest.raises(StorageMigrationError):
-        SQLiteDomainSchemaStore(SQLiteLocationPolicy(root)).inspect(locator, specification)
     with sqlite3.connect(original_database) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         names = {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name, 1, 7) <> 'sqlite_'"
             )
         }
-    assert names == {"__aipcs_service_store_meta", "__aipcs_service_store_migration"}
+    assert names == {
+        "__aipcs_service_store_meta",
+        "__aipcs_service_store_migration",
+        "__aipcs_service_store_policy",
+    }
 
     store, locator, root, _, specification = _ready(tmp_path)
     policy = store._location
@@ -430,7 +458,7 @@ def test_identity_and_reacquire_unavailability_take_precedence_after_domain_ddl(
     ) == DomainSchemaState("ready")
 
 
-def test_materialise_reinspects_under_exclusive_transaction_before_applying_ddl(
+def test_materialise_reinspects_under_immediate_transaction_before_applying_ddl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, locator, _, _, specification = _ready(tmp_path)
@@ -463,7 +491,7 @@ def test_materialise_reinspects_under_exclusive_transaction_before_applying_ddl(
     )
     monkeypatch.setattr(domain_module, "_inspect_domain", record_locked_inspection)
     assert store.materialise(locator, specification) == DomainSchemaState("ready")
-    assert statements[0] == "BEGIN EXCLUSIVE"
+    assert statements[0] == "BEGIN IMMEDIATE"
     assert transactions[:2] == [True, True]
 
 

@@ -32,35 +32,51 @@ error, log, or representation. The transport owns the fixed `created_via: mcp`
 provenance value; callers cannot override it.
 
 SQLite is supported only for a local POSIX filesystem on Linux and macOS, one
-host, and one active writer. Its location policy enforces an operator-owned
-`0700` root, an owner-only service-store container, and `0600` database files.
-It rejects WAL/SHM state and fails closed on Windows. `serve` performs only the
-explicit registry startup migration; it fails before MCP is constructed when
-that storage is unsafe, dirty, incompatible, newer, or not ready. Do not use
-this boundary as a network-filesystem, multi-writer, remote, or PostgreSQL
-deployment mechanism.
+host, Python 3.12+, SQLite 3.51.3+, and cooperating processes under the same
+effective user. Its location policy enforces an operator-owned `0700` root, an
+owner-only service-store container, and `0600` database/WAL/SHM files.
+Persistent WAL permits concurrent readers and one SQLite writer at a time.
+Every observable operational sidecar is a contained regular single-link,
+same-owner, non-symlink file with descriptor-relative metadata checks. Full
+no-follow `openat`/`fstat` validation occurs before SQLite opens and after it
+closes. While a SQLite handle is live, checks use descriptor-relative
+no-follow metadata lookup without opening and closing another descriptor:
+POSIX `close()` can cancel SQLite advisory locks on the same inode. A
+cooperating SQLite peer may also unlink or recreate WAL/SHM pathnames while
+another connection retains SQLite's internal file descriptor, so the adapter
+revalidates each current pathname rather than claiming cross-process path
+identity continuity. See SQLite's
+[POSIX advisory-lock warning](https://www.sqlite.org/howtocorrupt.html#_posix_advisory_locks_canceled_by_a_separate_thread_doing_close_).
+The adapter never edits, copies, deletes, or repairs WAL/SHM content.
 
-V1-08A freezes a future storage-policy boundary without changing this current behavior. V1-08C must
-replace the rollback-journal envelope with a secured WAL/busy policy before V1-08D composes the
-cross-store coordinator: WAL and SHM sidecars must be contained regular single-link,
-same-owner, non-symlink files with adapter-controlled permissions and identity checks; only
-startup/migration owns recovery and checkpoint verification; and one bounded typed busy policy maps
-to a safe retryable result. WAL does not extend support to network filesystems or Windows SQLite.
+`serve` performs only the explicit registry startup migration; it fails before
+MCP construction when storage is busy, unsafe, dirty, incompatible, newer, or
+not ready. Only explicit migration owns DELETE-to-WAL conversion, legacy
+rollback recovery, and the ready PASSIVE checkpoint. One bounded
+`sqlite_busy_timeout_ms` setting configures SQLite lock acquisition from 1
+through 30,000 ms (default 5,000); numeric BUSY-family outcomes become
+`StorageBusy` without an adapter retry. They remain distinct from unavailable,
+incompatible, `SQLITE_LOCKED`, and uncertain commit outcomes. WAL does not
+extend support to network filesystems, multi-host use, Windows SQLite, or a
+hostile same-user process.
+
+V1-08C establishes this final local SQLite policy before V1-08D composes the
+cross-store coordinator.
 V1-08D must rerun its full coordinator reconciliation/fault matrix under that final policy before
 V1-08E can expose lifecycle operations.
 
-V1-08B is deliberately narrower than that future coordinator. Its private R2
-registry migration accepts only exact, clean, public-reachable R1 state and
+V1-08B is deliberately narrower than that future coordinator. Its historical
+R2 registry migration accepts only exact, clean, public-reachable R1 state and
 otherwise fails closed with the existing bounded migration outcome; it adds no
-public upgrade, repair, or recovery command. R2 holds one global durable
-lifecycle/idempotency ledger whose prepared entries can block a conflicting
-lifecycle intent for the same service. Its legacy completed replays retain
-their existing result bytes, while lifecycle evidence and its bounded terminal
-category are never projected through MCP. Explicit inspection and migration
-finalization strictly decode all registry rows in addition to checking physical
-signatures, so canonical-but-forged service, lifecycle, completion, or audit
-data is incompatible and is never silently repaired. This slice does not change runtime
-composition, configuration, MCP registration, WAL/SHM handling, busy policy,
+public upgrade, repair, or recovery command. That R2 layout holds one global
+durable lifecycle/idempotency ledger whose prepared entries can block a
+conflicting lifecycle intent for the same service. Its legacy completed replays
+retain their existing result bytes, while lifecycle evidence and its bounded
+terminal category are never projected through MCP. Explicit inspection and
+migration finalization strictly decode all registry rows in addition to checking
+physical signatures, so canonical-but-forged service, lifecycle, completion,
+or audit data is incompatible and is never silently repaired. V1-08C advances
+that registry to R3 and does not change runtime composition, MCP registration,
 or service-store access.
 
 Filesystem validation is a local same-effective-user boundary, not isolation

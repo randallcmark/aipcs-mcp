@@ -20,7 +20,7 @@ from aipcs_mcp.relational import classify_transition, compile_manifest
 from aipcs_mcp.storage import DomainSchemaState, DomainSchemaStore, ServiceStoreLocator
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
 from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
-from aipcs_mcp.storage.sqlite.service_store_migrations import META, MIGRATION
+from aipcs_mcp.storage.sqlite.service_store_migrations import META, MIGRATION, R2_POLICY
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = ROOT / "src" / "aipcs_mcp"
@@ -108,6 +108,7 @@ def _assert_only_foundation_and_target_objects(database: Path) -> None:
     assert set(rows) == {
         ("table", META),
         ("table", MIGRATION),
+        ("table", R2_POLICY.table_name),
         ("table", "project"),
         ("table", "task"),
         ("index", "sqlite_autoindex___aipcs_service_store_migration_1"),

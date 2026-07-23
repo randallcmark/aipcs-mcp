@@ -17,9 +17,12 @@ The public runtime provides:
   initial-design lifecycle operations.
 
 SQLite support is deliberately narrow: local POSIX filesystems on Linux and
-macOS, one host, and one active writer. PostgreSQL, Windows SQLite, remote MCP,
-public service-store allocation or materialisation, record operations,
-administration, and hosted deployment are not available.
+macOS, one host, Python 3.12+, and SQLite 3.51.3+. WAL permits concurrent local
+readers and serialises writers through SQLite's one-writer slot with a bounded
+configurable wait. This is a same-effective-user trust boundary: busy results
+surface as `StorageBusy` and the adapter does not retry them. PostgreSQL,
+Windows SQLite, remote MCP, public service-store allocation or materialisation,
+record operations, administration, and hosted deployment are not available.
 
 ## Public v1 direction
 
@@ -57,7 +60,8 @@ To run the durable SQLite registry, supply a process-local principal and either
 an explicit root or a platform default:
 
     uv run aipcs serve --profile sqlite --principal-id local-agent \
-      --sqlite-data-root /absolute/operator-owned/aipcs-data
+      --sqlite-data-root /absolute/operator-owned/aipcs-data \
+      --sqlite-busy-timeout-ms 5000
 
 On Linux an omitted root resolves to `$XDG_DATA_HOME/aipcs-mcp` (or
 `~/.local/share/aipcs-mcp`); on macOS it resolves below
@@ -75,9 +79,18 @@ instructions. An explicit SQLite root must be an absolute operator-owned locatio
 The service validates the live path only when it starts; configuration output
 reports structural support, not whether a store is ready.
 
-Use one active writer for a registry. The SQLite adapter requires an
-operator-owned `0700` root and `0600` registry file, never enables WAL, and
-fails closed on Windows. Do not place the registry on a network filesystem.
+The SQLite adapter requires an operator-owned `0700` root and `0600` database
+and WAL/SHM files. It uses persistent WAL, `synchronous=FULL`, one
+`1..30000` ms busy timeout (default `5000`), and SQLite's native
+`BEGIN IMMEDIATE` writer serialisation. It fails closed on Windows and on
+SQLite older than 3.51.3. Do not place the data root on a network filesystem
+or share one SQLite database between hosts.
+
+WAL is part of durable database state. Do not copy, move, delete, or repair a
+live database's `-wal` or `-shm` files, and do not treat copying only the main
+`.sqlite` file as a backup. A supported online backup/export command is not
+available yet; stop every process cleanly before an operator-managed offline
+copy.
 
 ## MCP tools
 

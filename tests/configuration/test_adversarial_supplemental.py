@@ -87,6 +87,7 @@ def test_each_field_proves_environment_over_file_and_file_over_default(tmp_path:
         "transport": "default",
         "principal_id": "default",
         "sqlite_data_root": "default",
+        "sqlite_busy_timeout_ms": "default",
         "postgres_dsn_env": "default",
         "log_level": "default",
     }

@@ -75,18 +75,35 @@ def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
     (root / "coverage.xml").write_text("generated", encoding="utf-8")
     (root / "module.py~").write_text("generated", encoding="utf-8")
     (root / "state.sqlite").write_bytes(b"generated")
+    (root / ".data-local").mkdir()
+    (root / ".data-local" / "state.json").write_text("private", encoding="utf-8")
+    (root / "transcripts").mkdir()
+    (root / "transcripts" / "agent-session.txt").write_text("private", encoding="utf-8")
+    (root / "private-data").mkdir()
+    (root / "private-data" / "snapshot.json").write_text("private", encoding="utf-8")
+    (root / "notes-session.json").write_text("private", encoding="utf-8")
+    (root / ".env.example").write_text("documented configuration", encoding="utf-8")
+    (root / ".env.local").write_text("private", encoding="utf-8")
 
     relative = {
         path.relative_to(root).as_posix() for path in verifier.generated_checkout_artifacts(root)
     }
     assert relative == {
+        ".data-local",
+        ".env.local",
         ".mypy_cache",
         "coverage.xml",
         "module.py~",
+        "notes-session.json",
+        "private-data",
         "src/__pycache__",
         "state.sqlite",
+        "transcripts",
     }
-    with pytest.raises(verifier.ReleaseVerificationError, match="generated or database"):
+    with pytest.raises(
+        verifier.ReleaseVerificationError,
+        match="generated, database, or private",
+    ):
         verifier.require_clean_checkout_artifacts(root)
 
 
@@ -439,8 +456,9 @@ def test_embedded_registry_r2_client_exercises_the_source_contract(
     compile(program, "installed_registry_r2_smoke.py", "exec")
     assert "SQLiteRegistryAdapter" in program
     assert "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc" in program
-    assert 'MigrationState("registry", 1, 2, "incompatible")' in program
-    assert 'MigrationState("registry", 2, 2, "ready")' in program
+    assert 'MigrationState("registry", 1, 3, "incompatible")' in program
+    assert 'MigrationState("registry", 3, 3, "ready")' in program
+    assert 'PRAGMA journal_mode' in program
     assert "CompletedNonLifecycleClaim" in program
     assert "(1000, 2, 1001)" in program
     assert "prove_under_cap_retention(999)" in program
@@ -646,6 +664,44 @@ def test_registry_r2_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert calls[0][2] == tmp_path / "wheel-registry-r2-cwd"
     assert calls[1][2] == tmp_path / "sdist-registry-r2-cwd"
     assert calls[0][2] != calls[1][2]
+
+
+def test_wal_release_smoke_uses_each_installed_interpreter_and_external_cwd(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name in ("wheel", "sdist"):
+        verifier.run_installed_wal_release_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python", tmp_path, name,
+            environment={}, redaction_roots=(),
+        )
+    assert [label for label, _, _ in calls] == [
+        "installed wheel WAL release smoke", "installed sdist WAL release smoke"
+    ]
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][2] == tmp_path / "wheel-wal-release-cwd"
+    assert calls[1][2] == tmp_path / "sdist-wal-release-cwd"
+    program = verifier._wal_release_smoke_program()
+    compile(program, "installed_wal_release_smoke.py", "exec")
+    assert "sqlite_version_info >= (3, 51, 3)" in program
+    assert "LOCK_HELD" in program and "COMMIT_RETURNED" in program
+    assert "contender.mutations.resolve_non_lifecycle" in program
+    assert "frozen_service(mode)" in program
+    assert "frozen_registry(mode)" in program
+    assert "prepared-delete" in program and "prepared-wal" in program
+    assert '"byte-preserved"' in program
+    assert "__FROZEN_R2_DDL__" not in program
+    assert "from aipcs_mcp.storage.sqlite.migrations import R2" not in program
+    assert verifier._FROZEN_R2_DDL
+    assert verifier.hashlib.sha256("\n".join(verifier._FROZEN_R2_DDL).encode()).hexdigest() == (
+        verifier._FROZEN_R2_CHECKSUM
+    )
 
 
 def test_main_hides_unexpected_exception_details(monkeypatch, capsys, verifier) -> None:

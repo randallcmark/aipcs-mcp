@@ -6,6 +6,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -13,7 +14,7 @@ from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 from aipcs_mcp.storage.sqlite import adapter as adapter_module
-from aipcs_mcp.storage.sqlite.migrations import CHECKSUM, R2
+from aipcs_mcp.storage.sqlite.migrations import CHECKSUM, R2, R3
 
 
 def _adapter(tmp_path: Path, name: str = "root") -> tuple[SQLiteRegistryAdapter, Path]:
@@ -60,24 +61,29 @@ def test_missing_history_columns_are_incompatible(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute('DROP TABLE "aipcs_registry_migration"')
         connection.execute('CREATE TABLE "aipcs_registry_migration" ("component" TEXT) STRICT')
-    assert adapter.inspect_migration() == MigrationState("registry", 2, 2, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 3, 3, "incompatible")
 
 
 @pytest.mark.parametrize(
-    ("mapping_name", "key", "replacement"),
+    ("descriptor_field", "key", "replacement"),
     [
-        ("TABLE_XINFO", "aipcs_registry_meta", ()),
-        ("FOREIGN_KEYS", "aipcs_registry_mutation", ()),
-        ("INDEX_LIST", "aipcs_registry_service", ()),
-        ("INDEX_XINFO", "aipcs_registry_service_list", ()),
+        ("table_xinfo", "aipcs_registry_meta", ()),
+        ("foreign_keys", "aipcs_registry_mutation", ()),
+        ("index_list", "aipcs_registry_service", ()),
+        ("index_xinfo", "aipcs_registry_service_list", ()),
     ],
 )
 def test_every_exact_pragma_signature_participates_in_readiness(
-    tmp_path: Path, monkeypatch, mapping_name: str, key: str, replacement: tuple
+    tmp_path: Path, monkeypatch, descriptor_field: str, key: str, replacement: tuple
 ) -> None:
     adapter, _ = _adapter(tmp_path)
-    mapping = getattr(adapter_module, mapping_name)
-    monkeypatch.setitem(mapping, key, replacement)
+    mapping = dict(getattr(R3, descriptor_field))
+    mapping[key] = replacement
+    monkeypatch.setattr(
+        adapter_module,
+        "R3",
+        replace(R3, **{descriptor_field: MappingProxyType(mapping)}),
+    )
     assert adapter.inspect_migration().status == "incompatible"
 
 
@@ -172,22 +178,24 @@ def test_every_ddl_failure_rolls_back_to_uninitialised(
     assert adapter.inspect_migration().status == "uninitialised"
 
 
-def test_precommit_readiness_failure_rolls_back(tmp_path: Path, monkeypatch) -> None:
+def test_prepared_state_verification_failure_before_commit_rolls_back(
+    tmp_path: Path, monkeypatch
+) -> None:
     root = tmp_path / "root"
     adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
+
+    def fail_policy_verification(connection, expected) -> None:
+        raise StorageMigrationError()
+
     with monkeypatch.context() as context:
-        context.setattr(
-            adapter_module,
-            "_inspect_connection",
-            lambda connection, *, integrity: MigrationState("registry", 2, 2, "incompatible"),
-        )
+        context.setattr(adapter_module, "_require_policy_state", fail_policy_verification)
         with pytest.raises(StorageMigrationError) as captured:
             adapter.migrate()
         _assert_bounded(captured.value)
     assert adapter.inspect_migration().status == "uninitialised"
 
 
-def test_exception_after_durable_migration_commit_leaves_ready_history(
+def test_exception_after_durable_prepared_commit_leaves_resumable_dirty_history(
     tmp_path: Path, monkeypatch
 ) -> None:
     root = tmp_path / "root"
@@ -214,7 +222,7 @@ def test_exception_after_durable_migration_commit_leaves_ready_history(
         with pytest.raises(StorageMigrationError) as captured:
             adapter.migrate()
         _assert_bounded(captured.value)
-    assert adapter.inspect_migration().status == "ready"
+    assert adapter.inspect_migration().status == "dirty"
     assert adapter.migrate().status == "ready"
 
 
@@ -226,7 +234,7 @@ def test_history_truth_table_rejects_drift(tmp_path: Path, mutation: str) -> Non
             replacement = "0" * 64 if CHECKSUM != "0" * 64 else "1" * 64
             connection.execute('UPDATE "aipcs_registry_migration" SET checksum=?', (replacement,))
         elif mutation == "newer":
-            connection.execute('UPDATE "aipcs_registry_meta" SET applied_revision=3')
+            connection.execute('UPDATE "aipcs_registry_meta" SET applied_revision=4')
         elif mutation == "missing_history":
             connection.execute('DELETE FROM "aipcs_registry_migration"')
         else:
@@ -235,11 +243,11 @@ def test_history_truth_table_rejects_drift(tmp_path: Path, mutation: str) -> Non
     assert adapter.inspect_migration().status == "incompatible"
 
 
-def test_known_complete_dirty_revision_is_distinguished(tmp_path: Path) -> None:
+def test_ready_policy_with_dirty_meta_is_incompatible(tmp_path: Path) -> None:
     adapter, database = _adapter(tmp_path)
     with sqlite3.connect(database) as connection:
         connection.execute('UPDATE "aipcs_registry_meta" SET dirty=1')
-    assert adapter.inspect_migration().status == "dirty"
+    assert adapter.inspect_migration().status == "incompatible"
 
 
 def test_quick_check_progress_cancellation_is_bounded() -> None:

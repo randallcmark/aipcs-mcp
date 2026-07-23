@@ -21,6 +21,7 @@ from aipcs_mcp.storage.sqlite.codecs import (
     validate_service,
 )
 from aipcs_mcp.storage.sqlite.connection import set_query_only
+from aipcs_mcp.storage.sqlite.location import AnchoredLocation
 from aipcs_mcp.storage.sqlite.uow import SQLiteRegistryUnitOfWork
 
 
@@ -111,11 +112,44 @@ class FaultConnection:
             raise RuntimeError("secret close")
 
 
-@pytest.mark.parametrize("phase", ["read", "write", "commit", "rollback"])
-def test_uow_failure_phases_have_bounded_direct_errors(phase: str) -> None:
+class FaultLocation(AnchoredLocation):
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def verify_database_identity(self) -> None:
+        pass
+
+    def verify_live_database_identity(self) -> None:
+        pass
+
+    def adopt_live_sidecars(self, *, allow_journal: bool) -> None:
+        pass
+
+    def verify_live_sidecars(self, *, allow_journal: bool) -> None:
+        pass
+
+    def verify_closed_sidecars(self, *, allow_journal: bool) -> None:
+        pass
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        ("read", StorageMigrationError),
+        ("write", StorageUnavailable),
+        ("commit", StorageMigrationError),
+        ("rollback", StorageMigrationError),
+    ],
+)
+def test_uow_failure_phases_have_bounded_direct_errors(
+    phase: str, expected: type[Exception]
+) -> None:
     connection = FaultConnection(phase)
-    uow = SQLiteRegistryUnitOfWork(connection)  # type: ignore[arg-type]
-    with pytest.raises(StorageMigrationError) as captured:
+    uow = SQLiteRegistryUnitOfWork(connection, FaultLocation())  # type: ignore[arg-type]
+    with pytest.raises(expected) as captured:
         if phase == "read":
             uow.list("principal", 10)
         elif phase == "write":
@@ -130,7 +164,7 @@ def test_uow_failure_phases_have_bounded_direct_errors(phase: str) -> None:
 @pytest.mark.parametrize("phase", ["close_rollback", "close"])
 def test_close_attempts_cleanup_and_becomes_idempotently_closed(phase: str) -> None:
     connection = FaultConnection(phase)
-    uow = SQLiteRegistryUnitOfWork(connection)  # type: ignore[arg-type]
+    uow = SQLiteRegistryUnitOfWork(connection, FaultLocation())  # type: ignore[arg-type]
     with pytest.raises(StorageMigrationError) as captured:
         uow.close()
     _assert_bounded(captured.value)

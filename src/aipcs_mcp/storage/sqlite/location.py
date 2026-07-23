@@ -9,6 +9,7 @@ import sys
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from aipcs_mcp.storage.errors import StorageUnavailable
 
@@ -16,6 +17,13 @@ _BASENAME = "registry.sqlite"
 _SERVICE_STORES = "service-stores"
 _LOCATOR = re.compile(r"^svc_[0-9a-f]{32}$")
 _SQLITE_HEADER = b"SQLite format 3\x00"
+_JOURNAL_SUFFIX = "-journal"
+_WAL_SUFFIX = "-wal"
+_SHM_SUFFIX = "-shm"
+_SIDECAR_SUFFIXES = (_JOURNAL_SUFFIX, _WAL_SUFFIX, _SHM_SUFFIX)
+
+type SQLiteHeaderMode = Literal["empty", "delete", "wal", "unknown"]
+type _FileIdentity = tuple[int, int]
 
 
 @dataclass(repr=False)
@@ -25,6 +33,7 @@ class AnchoredLocation:
     _database_stat: os.stat_result | None
     journal_present: bool
     _database_name: str = _BASENAME
+    _live_sidecars: dict[str, _FileIdentity] | None = None
 
     def __repr__(self) -> str:
         return "AnchoredLocation(<redacted>)"
@@ -36,6 +45,8 @@ class AnchoredLocation:
         return self._root_path / self._database_name
 
     def verify_database_identity(self) -> None:
+        """Verify the selected main file while no SQLite handle is live."""
+
         if self._database_stat is None:
             raise StorageUnavailable()
         try:
@@ -55,8 +66,33 @@ class AnchoredLocation:
         ):
             raise StorageUnavailable()
 
-    def reject_wal_header(self) -> None:
-        """Reject a selected valid SQLite WAL database before sqlite opens it."""
+    def verify_live_database_identity(self) -> None:
+        """Verify main-file identity without opening a lock-releasing descriptor."""
+
+        if self._database_stat is None:
+            raise StorageUnavailable()
+        try:
+            path_stat = os.stat(self._root_path, follow_symlinks=False)
+            descriptor_stat = os.fstat(self._root_fd)
+            current = os.stat(
+                self._database_name,
+                dir_fd=self._root_fd,
+                follow_symlinks=False,
+            )
+            _validate_file_stat(current)
+        except Exception:
+            raise StorageUnavailable() from None
+        if (
+            not stat.S_ISDIR(path_stat.st_mode)
+            or (path_stat.st_dev, path_stat.st_ino)
+            != (descriptor_stat.st_dev, descriptor_stat.st_ino)
+            or (current.st_dev, current.st_ino)
+            != (self._database_stat.st_dev, self._database_stat.st_ino)
+        ):
+            raise StorageUnavailable()
+
+    def database_header_mode(self) -> SQLiteHeaderMode:
+        """Read the selected main-file header without following another pathname."""
 
         if self._database_stat is None:
             raise StorageUnavailable()
@@ -71,14 +107,60 @@ class AnchoredLocation:
             ):
                 raise StorageUnavailable()
             header = os.pread(descriptor, 100, 0)
-            if _is_wal_header(header):
-                raise StorageUnavailable()
+            return _header_mode(header, current.st_size)
         except Exception:
             raise StorageUnavailable() from None
         finally:
             if descriptor is not None:
                 with suppress(OSError):
                     os.close(descriptor)
+
+    def adopt_live_sidecars(self, *, allow_journal: bool) -> None:
+        """Record one safe observation of SQLite-owned operational siblings."""
+
+        self._live_sidecars = _live_sidecars(
+            self._root_fd,
+            self._database_name,
+            self._database_stat,
+            allow_journal=allow_journal,
+        )
+
+    def verify_live_sidecars(self, *, allow_journal: bool) -> None:
+        if self._live_sidecars is None:
+            raise StorageUnavailable()
+        # A cooperating peer may legitimately unlink a checkpointed WAL/SHM
+        # pathname while this process retains SQLite's open descriptor, then
+        # recreate it for a later connection.  Python does not expose those
+        # SQLite descriptors, so path identity cannot be pinned across peers.
+        # Revalidate the complete metadata boundary and retain the newest
+        # observation instead.
+        self._live_sidecars = _live_sidecars(
+            self._root_fd,
+            self._database_name,
+            self._database_stat,
+            allow_journal=allow_journal,
+        )
+
+    def validate_sidecars(self, *, allow_journal: bool) -> None:
+        """Validate current sidecar metadata without changing the observation."""
+
+        _live_sidecars(
+            self._root_fd,
+            self._database_name,
+            self._database_stat,
+            allow_journal=allow_journal,
+        )
+
+    def verify_closed_sidecars(self, *, allow_journal: bool) -> None:
+        """Accept absence or fresh safe identities after SQLite has closed."""
+
+        _sidecars(
+            self._root_fd,
+            self._database_name,
+            self._database_stat,
+            allow_journal=allow_journal,
+        )
+        self._live_sidecars = None
 
 
 class SQLiteLocationPolicy:
@@ -126,8 +208,18 @@ class SQLiteLocationPolicy:
         try:
             _require_private_root(root_fd)
             database_stat = _open_existing_file(root_fd, _BASENAME, required=False)
-            journal = _sidecars(root_fd, _BASENAME, allow_journal=allow_journal)
-            return AnchoredLocation(root_fd, self._root, database_stat, journal)
+            sidecars = _sidecars(
+                root_fd,
+                _BASENAME,
+                database_stat,
+                allow_journal=allow_journal,
+            )
+            return AnchoredLocation(
+                root_fd,
+                self._root,
+                database_stat,
+                _JOURNAL_SUFFIX in sidecars,
+            )
         except Exception:
             os.close(root_fd)
             failure = StorageUnavailable()
@@ -152,14 +244,19 @@ class SQLiteLocationPolicy:
             _require_owner_directory(container_fd)
             database_name = namespace + ".sqlite"
             database_stat = _open_existing_file(container_fd, database_name, required=False)
-            journal = _sidecars(container_fd, database_name, allow_journal=allow_journal)
+            sidecars = _sidecars(
+                container_fd,
+                database_name,
+                database_stat,
+                allow_journal=allow_journal,
+            )
             os.close(root_fd)
             root_fd = -1
             result = AnchoredLocation(
                 container_fd,
                 self._root / _SERVICE_STORES,
                 database_stat,
-                journal,
+                _JOURNAL_SUFFIX in sidecars,
                 database_name,
             )
             container_fd = None
@@ -194,7 +291,8 @@ def _explicit_root(root: Path, *, create: bool) -> int | None:
         except FileNotFoundError:
             if not create:
                 return None
-            os.mkdir(root.name, 0o700, dir_fd=parent_fd)
+            with suppress(FileExistsError):
+                os.mkdir(root.name, 0o700, dir_fd=parent_fd)
             return os.open(root.name, _directory_flags(), dir_fd=parent_fd)
     except Exception:
         failure = StorageUnavailable()
@@ -235,7 +333,8 @@ def _walk_directories(
                         os.close(descriptor)
                         return None
                     raise
-                os.mkdir(component, 0o700, dir_fd=descriptor)
+                with suppress(FileExistsError):
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
                 child = os.open(component, _directory_flags(), dir_fd=descriptor)
             value = os.fstat(child)
             if (
@@ -262,7 +361,8 @@ def _open_child_directory(parent_fd: int, name: str, *, create: bool) -> int | N
         if not create:
             return None
         try:
-            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            with suppress(FileExistsError):
+                os.mkdir(name, 0o700, dir_fd=parent_fd)
             child = os.open(name, _directory_flags(), dir_fd=parent_fd)
         except Exception:
             raise StorageUnavailable() from None
@@ -352,6 +452,12 @@ def create_database(root_fd: int, name: str = _BASENAME) -> os.stat_result:
         value = os.fstat(descriptor)
         _validate_file_stat(value)
         return value
+    except FileExistsError:
+        existing = _open_existing_file(root_fd, name, required=True)
+        if existing is None:
+            failure = StorageUnavailable()
+        else:
+            return existing
     except Exception:
         failure = StorageUnavailable()
     finally:
@@ -391,19 +497,104 @@ def _validate_file_stat(value: os.stat_result) -> None:
         raise StorageUnavailable()
 
 
-def _is_wal_header(header: bytes) -> bool:
-    """Fail closed on SQLite headers that cannot be rollback-journal format."""
+def _header_mode(header: bytes, size: int) -> SQLiteHeaderMode:
+    if size == 0:
+        return "empty"
+    if len(header) < 100 or header[:16] != _SQLITE_HEADER:
+        return "unknown"
+    if header[18:20] == b"\x01\x01":
+        return "delete"
+    if header[18:20] == b"\x02\x02":
+        return "wal"
+    return "unknown"
 
-    return len(header) >= 20 and header[:16] == _SQLITE_HEADER and header[18:20] != b"\x01\x01"
 
-
-def _sidecars(root_fd: int, database_name: str, *, allow_journal: bool) -> bool:
-    journal = False
-    for name in (database_name + "-journal", database_name + "-wal", database_name + "-shm"):
+def _sidecars(
+    root_fd: int,
+    database_name: str,
+    database_stat: os.stat_result | None,
+    *,
+    allow_journal: bool,
+) -> dict[str, _FileIdentity]:
+    found: dict[str, _FileIdentity] = {}
+    for suffix in _SIDECAR_SUFFIXES:
+        name = database_name + suffix
         value = _open_existing_file(root_fd, name, required=False)
         if value is None:
             continue
-        if name.endswith(("-wal", "-shm")) or not allow_journal:
+        if suffix == _JOURNAL_SUFFIX and not allow_journal:
             raise StorageUnavailable()
-        journal = True
-    return journal
+        found[suffix] = (value.st_dev, value.st_ino)
+    if found and database_stat is None:
+        raise StorageUnavailable()
+    header_mode = (
+        _database_header_mode(root_fd, database_name, database_stat)
+        if found
+        else None
+    )
+    if (_WAL_SUFFIX in found or _SHM_SUFFIX in found) and header_mode != "wal":
+        raise StorageUnavailable()
+    if _JOURNAL_SUFFIX in found and (
+        _WAL_SUFFIX in found
+        or _SHM_SUFFIX in found
+        or header_mode == "wal"
+    ):
+        raise StorageUnavailable()
+    return found
+
+
+def _live_sidecars(
+    root_fd: int,
+    database_name: str,
+    database_stat: os.stat_result | None,
+    *,
+    allow_journal: bool,
+) -> dict[str, _FileIdentity]:
+    """Validate live path metadata without closing an SQLite-locked file."""
+
+    found: dict[str, _FileIdentity] = {}
+    for suffix in _SIDECAR_SUFFIXES:
+        try:
+            value = os.stat(
+                database_name + suffix,
+                dir_fd=root_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            continue
+        except Exception:
+            raise StorageUnavailable() from None
+        _validate_file_stat(value)
+        if suffix == _JOURNAL_SUFFIX and not allow_journal:
+            raise StorageUnavailable()
+        found[suffix] = (value.st_dev, value.st_ino)
+    if found and database_stat is None:
+        raise StorageUnavailable()
+    if _JOURNAL_SUFFIX in found and (
+        _WAL_SUFFIX in found or _SHM_SUFFIX in found
+    ):
+        raise StorageUnavailable()
+    return found
+
+
+def _database_header_mode(
+    root_fd: int,
+    database_name: str,
+    database_stat: os.stat_result | None,
+) -> SQLiteHeaderMode:
+    if database_stat is None:
+        raise StorageUnavailable()
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(database_name, _file_flags(), dir_fd=root_fd)
+        current = os.fstat(descriptor)
+        _validate_file_stat(current)
+        if (current.st_dev, current.st_ino) != (database_stat.st_dev, database_stat.st_ino):
+            raise StorageUnavailable()
+        return _header_mode(os.pread(descriptor, 100, 0), current.st_size)
+    except Exception:
+        raise StorageUnavailable() from None
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)

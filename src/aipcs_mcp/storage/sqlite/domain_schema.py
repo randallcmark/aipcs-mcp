@@ -13,19 +13,26 @@ from aipcs_mcp.storage.contracts import (
     ServiceStoreLocator,
 )
 from aipcs_mcp.storage.errors import (
+    StorageBusy,
     StorageContractError,
     StorageMigrationError,
     StorageUnavailable,
 )
 
 from . import service_store_inspection
-from .connection import connect
+from .connection import (
+    SQLiteConnectionPolicy,
+    SQLiteConnectionPurpose,
+    connect,
+    require_supported_sqlite_runtime,
+)
 from .domain_schema_layout import (
     SQLiteDomainSchemaLayout,
     build_domain_schema_layout,
     build_domain_transition_layout,
 )
 from .location import AnchoredLocation, SQLiteLocationPolicy
+from .result_codes import is_sqlite_busy
 from .service_store_migrations import INDEX_XINFO as FOUNDATION_INDEX_XINFO
 from .service_store_migrations import RESERVED_PREFIX
 from .sql_tokens import sql_tokens_equal
@@ -40,12 +47,14 @@ def _bounded[**P, R](method: Callable[P, R]) -> Callable[P, R]:
             return method(*args, **kwargs)
         except StorageContractError:
             failure: Exception = StorageContractError()
+        except StorageBusy:
+            failure = StorageBusy()
         except StorageUnavailable:
             failure = StorageUnavailable()
         except StorageMigrationError:
             failure = StorageMigrationError()
-        except Exception:
-            failure = StorageMigrationError()
+        except Exception as error:
+            failure = StorageBusy() if is_sqlite_busy(error) else StorageMigrationError()
         raise failure from None
 
     return wrapped
@@ -54,10 +63,22 @@ def _bounded[**P, R](method: Callable[P, R]) -> Callable[P, R]:
 class SQLiteDomainSchemaStore:
     """Own exact domain DDL inside an existing ready service store."""
 
-    def __init__(self, location: SQLiteLocationPolicy) -> None:
+    def __init__(
+        self,
+        location: SQLiteLocationPolicy,
+        *,
+        busy_timeout_ms: int = 5_000,
+        connection_policy: SQLiteConnectionPolicy | None = None,
+    ) -> None:
+        require_supported_sqlite_runtime()
         if not isinstance(location, SQLiteLocationPolicy):
             raise StorageUnavailable()
+        if connection_policy is None:
+            connection_policy = SQLiteConnectionPolicy(busy_timeout_ms)
+        elif type(connection_policy) is not SQLiteConnectionPolicy or busy_timeout_ms != 5_000:
+            raise StorageUnavailable()
         self._location = location
+        self._connection_policy = connection_policy
 
     def __repr__(self) -> str:
         return "SQLiteDomainSchemaStore(<redacted>)"
@@ -70,7 +91,7 @@ class SQLiteDomainSchemaStore:
     ) -> DomainSchemaState:
         namespace = _namespace(locator)
         layout = build_domain_schema_layout(specification)
-        return _inspect_existing(self._location, namespace, layout)
+        return _inspect_existing(self._location, self._connection_policy, namespace, layout)
 
     @_bounded
     def materialise(
@@ -85,22 +106,25 @@ class SQLiteDomainSchemaStore:
 
         anchored: AnchoredLocation | None = None
         connection: sqlite3.Connection | None = None
-        committed = False
         try:
             anchored = _acquire_existing(self._location, namespace)
-            connection = connect(anchored, "rw", query_only=False)
-            connection.execute("BEGIN EXCLUSIVE")
+            connection = connect(
+                anchored,
+                "rw",
+                query_only=False,
+                policy=self._connection_policy,
+                purpose=SQLiteConnectionPurpose.READY_OPERATION,
+            )
+            _begin_immediate(connection, anchored)
             _require_ready_foundation(connection, namespace)
-            anchored.verify_database_identity()
+            anchored.verify_live_database_identity()
             state = _inspect_domain(connection, layout)
             if state.status != "unmaterialised":
-                connection.rollback()
-                anchored.verify_database_identity()
-                connection.close()
+                _rollback(connection, anchored)
+                released_connection, released_location = connection, anchored
                 connection = None
-                anchored.verify_database_identity()
-                anchored.close()
                 anchored = None
+                _release(released_connection, released_location)
                 return state
 
             for statement in layout.ddl:
@@ -108,30 +132,24 @@ class SQLiteDomainSchemaStore:
             _require_ready_foundation(connection, namespace)
             if _inspect_domain(connection, layout).status != "ready":
                 raise StorageMigrationError()
-            anchored.verify_database_identity()
-            connection.commit()
-            committed = True
-            anchored.verify_database_identity()
-            connection.close()
+            anchored.verify_live_database_identity()
+            _commit(connection, anchored)
+            released_connection, released_location = connection, anchored
             connection = None
-            anchored.verify_database_identity()
-            anchored.close()
             anchored = None
+            _release(released_connection, released_location)
 
-            state = _inspect_existing(self._location, namespace, layout)
+            state = _inspect_existing(
+                self._location,
+                self._connection_policy,
+                namespace,
+                layout,
+            )
             if state.status != "ready":
                 raise StorageMigrationError()
             return state
         finally:
-            if connection is not None:
-                if not committed:
-                    with suppress(Exception):
-                        connection.rollback()
-                with suppress(Exception):
-                    connection.close()
-            if anchored is not None:
-                with suppress(Exception):
-                    anchored.close()
+            _release(connection, anchored)
 
     @_bounded
     def evolve(
@@ -144,64 +162,59 @@ class SQLiteDomainSchemaStore:
 
         anchored: AnchoredLocation | None = None
         connection: sqlite3.Connection | None = None
-        committed = False
         try:
             anchored = _acquire_existing(self._location, namespace)
-            connection = connect(anchored, "rw", query_only=False)
-            connection.execute("BEGIN EXCLUSIVE")
+            connection = connect(
+                anchored,
+                "rw",
+                query_only=False,
+                policy=self._connection_policy,
+                purpose=SQLiteConnectionPurpose.READY_OPERATION,
+            )
+            _begin_immediate(connection, anchored)
             _require_ready_foundation(connection, namespace)
-            anchored.verify_database_identity()
+            anchored.verify_live_database_identity()
 
             if _inspect_domain(connection, layout.target).status == "ready":
-                connection.rollback()
-                anchored.verify_database_identity()
-                connection.close()
+                _rollback(connection, anchored)
+                released_connection, released_location = connection, anchored
                 connection = None
-                anchored.verify_database_identity()
-                anchored.close()
                 anchored = None
+                _release(released_connection, released_location)
                 return DomainSchemaState("ready")
 
             if _inspect_domain(connection, layout.current).status != "ready":
-                connection.rollback()
-                anchored.verify_database_identity()
-                connection.close()
+                _rollback(connection, anchored)
+                released_connection, released_location = connection, anchored
                 connection = None
-                anchored.verify_database_identity()
-                anchored.close()
                 anchored = None
+                _release(released_connection, released_location)
                 return DomainSchemaState("incompatible")
 
-            anchored.verify_database_identity()
+            anchored.verify_live_database_identity()
             for statement in layout.ddl:
                 connection.execute(statement)
             _require_ready_foundation(connection, namespace)
             if _inspect_domain(connection, layout.target).status != "ready":
                 raise StorageMigrationError()
-            anchored.verify_database_identity()
-            connection.commit()
-            committed = True
-            anchored.verify_database_identity()
-            connection.close()
+            anchored.verify_live_database_identity()
+            _commit(connection, anchored)
+            released_connection, released_location = connection, anchored
             connection = None
-            anchored.verify_database_identity()
-            anchored.close()
             anchored = None
+            _release(released_connection, released_location)
 
-            state = _inspect_existing(self._location, namespace, layout.target)
+            state = _inspect_existing(
+                self._location,
+                self._connection_policy,
+                namespace,
+                layout.target,
+            )
             if state.status != "ready":
                 raise StorageMigrationError()
             return state
         finally:
-            if connection is not None:
-                if not committed:
-                    with suppress(Exception):
-                        connection.rollback()
-                with suppress(Exception):
-                    connection.close()
-            if anchored is not None:
-                with suppress(Exception):
-                    anchored.close()
+            _release(connection, anchored)
 
 
 def _namespace(locator: ServiceStoreLocator) -> str:
@@ -234,6 +247,7 @@ def _require_ready_foundation(connection: sqlite3.Connection, namespace: str) ->
 
 def _inspect_existing(
     location: SQLiteLocationPolicy,
+    connection_policy: SQLiteConnectionPolicy,
     namespace: str,
     layout: SQLiteDomainSchemaLayout,
 ) -> DomainSchemaState:
@@ -241,15 +255,21 @@ def _inspect_existing(
     connection: sqlite3.Connection | None = None
     try:
         anchored = _acquire_existing(location, namespace)
-        connection = connect(anchored, "ro", query_only=True)
+        connection = connect(
+            anchored,
+            "ro",
+            query_only=True,
+            policy=connection_policy,
+            purpose=SQLiteConnectionPurpose.READY_INSPECTION,
+        )
+        connection.execute("BEGIN")
         _require_ready_foundation(connection, namespace)
         state = _inspect_domain(connection, layout)
-        anchored.verify_database_identity()
-        connection.close()
+        _rollback(connection, anchored)
+        released_connection, released_location = connection, anchored
         connection = None
-        anchored.verify_database_identity()
-        anchored.close()
         anchored = None
+        _release(released_connection, released_location)
         return state
     finally:
         _close(connection, anchored)
@@ -331,7 +351,9 @@ def _inspect_domain(
         return DomainSchemaState("ready")
     except StorageMigrationError:
         raise
-    except Exception:
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise StorageBusy() from None
         return DomainSchemaState("incompatible")
 
 
@@ -348,7 +370,9 @@ def _foreign_keys_clean(connection: sqlite3.Connection) -> bool:
     try:
         connection.set_progress_handler(progress, 1_000)
         return connection.execute("PRAGMA foreign_key_check").fetchone() is None
-    except Exception:
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise StorageBusy() from None
         if interrupted:
             raise StorageMigrationError() from None
         return False
@@ -361,9 +385,73 @@ def _close(
     connection: sqlite3.Connection | None,
     location: AnchoredLocation | None,
 ) -> None:
+    _release(connection, location)
+
+
+def _begin_immediate(
+    connection: sqlite3.Connection,
+    location: AnchoredLocation,
+) -> None:
+    location.verify_live_database_identity()
+    location.verify_live_sidecars(allow_journal=False)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+    except Exception:
+        location.adopt_live_sidecars(allow_journal=False)
+        raise
+    location.adopt_live_sidecars(allow_journal=False)
+    location.verify_live_sidecars(allow_journal=False)
+    location.verify_live_database_identity()
+
+
+def _commit(connection: sqlite3.Connection, location: AnchoredLocation) -> None:
+    location.verify_live_database_identity()
+    location.verify_live_sidecars(allow_journal=False)
+    connection.commit()
+    location.verify_live_sidecars(allow_journal=False)
+    location.verify_live_database_identity()
+
+
+def _rollback(connection: sqlite3.Connection, location: AnchoredLocation) -> None:
+    location.verify_live_database_identity()
+    location.verify_live_sidecars(allow_journal=False)
+    connection.rollback()
+    location.verify_live_sidecars(allow_journal=False)
+    location.verify_live_database_identity()
+
+
+def _release(
+    connection: sqlite3.Connection | None,
+    location: AnchoredLocation | None,
+) -> None:
+    failure: Exception | None = None
     if connection is not None:
-        with suppress(Exception):
+        try:
+            if connection.in_transaction and location is not None:
+                _rollback(connection, location)
+            elif location is not None:
+                location.verify_live_database_identity()
+                location.verify_live_sidecars(allow_journal=False)
+        except StorageUnavailable:
+            failure = StorageUnavailable()
+        except Exception as error:
+            failure = StorageBusy() if is_sqlite_busy(error) else StorageMigrationError()
+        try:
             connection.close()
+        except Exception as error:
+            if failure is None:
+                failure = StorageBusy() if is_sqlite_busy(error) else StorageMigrationError()
+        if location is not None:
+            try:
+                location.verify_database_identity()
+                location.verify_closed_sidecars(allow_journal=False)
+            except Exception:
+                failure = StorageUnavailable()
     if location is not None:
-        with suppress(Exception):
+        try:
             location.close()
+        except Exception:
+            if failure is None:
+                failure = StorageUnavailable()
+    if failure is not None:
+        raise failure

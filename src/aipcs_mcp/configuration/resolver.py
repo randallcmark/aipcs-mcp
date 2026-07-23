@@ -8,6 +8,7 @@ import stat
 import sys
 import tomllib
 from collections.abc import Mapping
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ _FIELDS = {
     "transport": "AIPCS_TRANSPORT",
     "principal_id": "AIPCS_PRINCIPAL_ID",
     "sqlite_data_root": "AIPCS_SQLITE_DATA_ROOT",
+    "sqlite_busy_timeout_ms": "AIPCS_SQLITE_BUSY_TIMEOUT_MS",
     "postgres_dsn_env": "AIPCS_POSTGRES_DSN_ENV",
     "log_level": "AIPCS_LOG_LEVEL",
 }
@@ -29,6 +31,7 @@ _DEFAULTS = {
     "transport": "stdio",
     "principal_id": None,
     "sqlite_data_root": None,
+    "sqlite_busy_timeout_ms": 5000,
     "postgres_dsn_env": None,
     "log_level": "warning",
 }
@@ -59,7 +62,17 @@ def resolve_configuration(
         root = _default_sqlite_root(environ)
     dsn_ref = _dsn_reference(values["postgres_dsn_env"])
     level = _choice(values["log_level"], {"debug", "info", "warning", "error"}, "log_level")
-    _validate_profile(profile, principal, root, dsn_ref, file_values)
+    busy_timeout_ms = _sqlite_busy_timeout(
+        values["sqlite_busy_timeout_ms"], sources["sqlite_busy_timeout_ms"]
+    )
+    _validate_profile(
+        profile,
+        principal,
+        root,
+        dsn_ref,
+        file_values,
+        sqlite_busy_timeout_explicit=sources["sqlite_busy_timeout_ms"] != "default",
+    )
     return ResolvedConfiguration(
         profile=profile,
         transport=transport,
@@ -68,12 +81,14 @@ def resolve_configuration(
         postgres_dsn_env=dsn_ref,
         log_level=level,
         sources=sources,
+        sqlite_busy_timeout_ms=busy_timeout_ms,
     )
 
 
 def require_runnable(config: ResolvedConfiguration) -> None:
     if config.profile == "postgresql" or (
-        config.profile == "sqlite" and not is_supported_sqlite_platform()
+        config.profile == "sqlite"
+        and (not is_supported_sqlite_platform() or not is_supported_sqlite_runtime())
     ):
         raise ConfigurationError(ErrorCode.UNSUPPORTED_OPERATION, "profile")
 
@@ -82,6 +97,19 @@ def is_supported_sqlite_platform() -> bool:
     """Return only the POSIX platforms certified by the SQLite location policy."""
 
     return sys.platform == "darwin" or sys.platform.startswith("linux")
+
+
+def is_supported_sqlite_runtime() -> bool:
+    """Return whether the loaded SQLite runtime includes the WAL-reset bug fix."""
+
+    runtime = import_module("sqlite3")
+    version = getattr(runtime, "sqlite_version_info", None)
+    return (
+        type(version) is tuple
+        and len(version) >= 3
+        and all(type(part) is int for part in version[:3])
+        and version[:3] >= (3, 51, 3)
+    )
 
 
 def _read_file(path: Path | None) -> dict[str, object]:
@@ -119,7 +147,7 @@ def _read_file(path: Path | None) -> dict[str, object]:
     }
     allowed_sections = {
         "identity": {"principal_id"},
-        "sqlite": {"data_root"},
+        "sqlite": {"data_root", "busy_timeout_ms"},
         "postgresql": {"dsn_env"},
         "logging": {"level"},
     }
@@ -131,6 +159,7 @@ def _read_file(path: Path | None) -> dict[str, object]:
         "transport": parsed.get("transport"),
         "principal_id": sections["identity"].get("principal_id"),
         "sqlite_data_root": sections["sqlite"].get("data_root"),
+        "sqlite_busy_timeout_ms": sections["sqlite"].get("busy_timeout_ms"),
         "postgres_dsn_env": sections["postgresql"].get("dsn_env"),
         "log_level": sections["logging"].get("level"),
     }
@@ -234,22 +263,52 @@ def _dsn_reference(value: object) -> str | None:
     return value
 
 
+def _sqlite_busy_timeout(value: object, source: str) -> int:
+    """Validate the sole SQLite busy-handler policy without coercion."""
+
+    if source in {"cli", "environment"}:
+        if (
+            not isinstance(value, str)
+            or not re.fullmatch(r"(?:[1-9][0-9]*)", value)
+            or len(value) > 5
+        ):
+            raise ConfigurationError(path="sqlite")
+        parsed = int(value)
+    elif source in {"file", "default"}:
+        if type(value) is not int:
+            raise ConfigurationError(path="sqlite")
+        parsed = value
+    else:
+        raise ConfigurationError(path="sqlite")
+    if not 1 <= parsed <= 30_000:
+        raise ConfigurationError(path="sqlite")
+    return parsed
+
+
 def _validate_profile(
     profile: str,
     principal: str | None,
     root: Path | None,
     dsn_ref: str | None,
     file_values: Mapping[str, object],
+    *,
+    sqlite_busy_timeout_explicit: bool,
 ) -> None:
     if profile != "stateless" and principal is None:
         raise ConfigurationError(path="principal_id")
     sqlite_present = bool(file_values.get("__sqlite_present__"))
     pg_present = bool(file_values.get("__postgresql_present__"))
     if profile == "stateless" and (
-        sqlite_present or pg_present or root is not None or dsn_ref is not None
+        sqlite_present
+        or pg_present
+        or root is not None
+        or dsn_ref is not None
+        or sqlite_busy_timeout_explicit
     ):
         raise ConfigurationError(path="storage")
     if profile == "sqlite" and (pg_present or dsn_ref is not None):
         raise ConfigurationError(path="postgresql")
-    if profile == "postgresql" and (sqlite_present or root is not None or dsn_ref is None):
+    if profile == "postgresql" and (
+        sqlite_present or root is not None or dsn_ref is None or sqlite_busy_timeout_explicit
+    ):
         raise ConfigurationError(path="storage")

@@ -35,6 +35,17 @@ def _database(root: Path, locator: ServiceStoreLocator) -> Path:
     return root / "service-stores" / f"{locator.namespace}.sqlite"
 
 
+def _replace_wal_database_with_empty_substitute(database: Path, original: Path) -> None:
+    """Move the main file and active WAL siblings as one coherent database."""
+
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(str(database) + suffix)
+        if source.exists():
+            source.rename(Path(str(original) + suffix))
+    descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+
+
 def _manifest(payload: dict[str, object]) -> ManifestV2:
     return ManifestV2.model_validate(payload)
 
@@ -286,7 +297,7 @@ def test_evolution_admission_detaches_a_transition_before_policy_mutation(tmp_pa
 
 
 @pytest.mark.parametrize("fault_index", range(4))
-def test_evolve_begins_exclusive_then_rolls_back_each_transition_ddl_fault(
+def test_evolve_begins_immediate_then_rolls_back_each_transition_ddl_fault(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault_index: int
 ) -> None:
     root = tmp_path / "root"
@@ -335,7 +346,7 @@ def test_evolve_begins_exclusive_then_rolls_back_each_transition_ddl_fault(
         with pytest.raises(StorageMigrationError) as captured:
             store.evolve(locator, transition)
         _assert_bounded(captured.value, root)
-    assert statements[0] == "BEGIN EXCLUSIVE"
+    assert statements[0] == "BEGIN IMMEDIATE"
     assert _store(root).inspect(locator, current) == DomainSchemaState("ready")
     assert _store(root).inspect(locator, transition.target) == DomainSchemaState("incompatible")
     with sqlite3.connect(database) as connection:
@@ -527,9 +538,7 @@ def test_identity_replacement_at_each_precommit_checkpoint_never_mutates_substit
         inspections += 1
         state = real_inspect(connection, layout)  # type: ignore[arg-type]
         if inspections == replacement_check:
-            database.rename(original)
-            descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(descriptor)
+            _replace_wal_database_with_empty_substitute(database, original)
         return state
 
     with monkeypatch.context() as context:
@@ -539,13 +548,20 @@ def test_identity_replacement_at_each_precommit_checkpoint_never_mutates_substit
         _assert_bounded(captured.value, root)
     assert database.stat().st_size == 0
     with sqlite3.connect(original) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         tables = {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name,1,7) <> 'sqlite_'"
             )
         }
-    assert tables == {"__aipcs_service_store_meta", "__aipcs_service_store_migration", "note", "project"}
+    assert tables == {
+        "__aipcs_service_store_meta",
+        "__aipcs_service_store_migration",
+        "__aipcs_service_store_policy",
+        "note",
+        "project",
+    }
 
 
 def test_target_ready_noop_identity_replacement_is_unavailable_not_ready(
@@ -570,9 +586,7 @@ def test_target_ready_noop_identity_replacement_is_unavailable_not_ready(
         inspections += 1
         state = real_inspect(connection, layout)  # type: ignore[arg-type]
         if inspections == 1:
-            database.rename(original)
-            descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(descriptor)
+            _replace_wal_database_with_empty_substitute(database, original)
         return state
 
     with monkeypatch.context() as context:
@@ -582,6 +596,7 @@ def test_target_ready_noop_identity_replacement_is_unavailable_not_ready(
         _assert_bounded(captured.value, root)
     assert database.stat().st_size == 0
     with sqlite3.connect(original) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         tables = {
             row[0]
             for row in connection.execute(
@@ -591,6 +606,7 @@ def test_target_ready_noop_identity_replacement_is_unavailable_not_ready(
     assert tables == {
         "__aipcs_service_store_meta",
         "__aipcs_service_store_migration",
+        "__aipcs_service_store_policy",
         "note",
         "project",
         "task",
@@ -620,9 +636,7 @@ def test_neither_exact_identity_replacement_is_unavailable_not_incompatible(
         inspections += 1
         state = real_inspect(connection, layout)  # type: ignore[arg-type]
         if inspections == 2:
-            database.rename(original)
-            descriptor = os.open(database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(descriptor)
+            _replace_wal_database_with_empty_substitute(database, original)
         return state
 
     with monkeypatch.context() as context:
@@ -632,5 +646,6 @@ def test_neither_exact_identity_replacement_is_unavailable_not_incompatible(
         _assert_bounded(captured.value, root)
     assert database.stat().st_size == 0
     with sqlite3.connect(original) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("SELECT name FROM sqlite_schema WHERE name='task'").fetchone() is None
         assert [row[1] for row in connection.execute('PRAGMA table_xinfo("project")')][-1] == "tag"

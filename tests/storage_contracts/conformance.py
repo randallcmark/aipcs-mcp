@@ -89,9 +89,16 @@ def assert_service_store_catalog_conformance(
     assert second == ServiceStoreLocator.for_service(backend, second_id)  # type: ignore[arg-type]
     assert second != first
 
-    expected_uninitialised = MigrationState("service_store", 0, 1, "uninitialised")
-    expected_ready = MigrationState("service_store", 1, 1, "ready")
-    assert catalog.inspect_migration(first) == expected_uninitialised
+    expected_uninitialised = catalog.inspect_migration(first)
+    assert expected_uninitialised == MigrationState(
+        "service_store", 0, expected_uninitialised.target_revision, "uninitialised"
+    )
+    expected_ready = MigrationState(
+        "service_store",
+        expected_uninitialised.target_revision,
+        expected_uninitialised.target_revision,
+        "ready",
+    )
     assert catalog.inspect_migration(second) == expected_uninitialised
     assert catalog.migrate(first) == expected_ready
     assert catalog.inspect_migration(first) == expected_ready

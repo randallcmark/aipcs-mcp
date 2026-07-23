@@ -21,7 +21,7 @@ from aipcs_mcp.storage import (
 )
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
 from aipcs_mcp.storage.sqlite.domain_schema import SQLiteDomainSchemaStore
-from aipcs_mcp.storage.sqlite.service_store_migrations import META, MIGRATION
+from aipcs_mcp.storage.sqlite.service_store_migrations import META, MIGRATION, R2_POLICY
 
 
 def _locator(value: int = 1) -> ServiceStoreLocator:
@@ -162,7 +162,7 @@ def test_materialise_exactly_maps_all_types_relationships_and_indices(tmp_path: 
                 "SELECT name FROM sqlite_schema WHERE type='table' AND substr(name, 1, 7) <> 'sqlite_'"
             )
         }
-        assert names == {META, MIGRATION, "project", "team"}
+        assert names == {META, MIGRATION, R2_POLICY.table_name, "project", "team"}
         for table, expected in _expected_columns().items():
             actual = [
                 (row[1], row[2], row[3], row[5])

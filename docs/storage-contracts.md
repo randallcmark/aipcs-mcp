@@ -7,16 +7,25 @@ separate service-store portion as an uncomposed foundation. Neither is a
 general adapter plugin API or a PostgreSQL implementation.
 
 The reference adapter is certified only for local POSIX filesystems on Linux
-and macOS, one host and one active writer. It uses a descriptor-anchored `0700`
-root and `0600` database files, rejects WAL/SHM, allows native rollback-journal
-recovery only during an explicit migration, and fails closed on Windows. It is
-not supported on network filesystems or as a multi-writer store.
+and macOS, one host, Python 3.12+, SQLite 3.51.3+, and cooperating processes
+running as the same effective user. It uses a descriptor-anchored `0700` root
+and `0600` database/WAL/SHM files. Persistent WAL permits concurrent readers
+and one native SQLite writer at a time. Native rollback-journal recovery is
+owned only by explicit migration. Windows, network filesystems, and multi-host
+SQLite are unsupported.
 
 These filesystem controls operate within a local same-effective-user trust
 boundary. They reject unsafe modes, links, nonregular files, and observable
-path or file replacement, but they are not a sandbox against a malicious
-process running as the same operating-system user. Keep the data root private
-and do not run untrusted same-user processes against it.
+root or main-database replacement. SQLite-managed WAL/SHM pathnames may
+legitimately disappear or be recreated by a cooperating peer while another
+connection retains an internal descriptor, so every current pathname is
+revalidated but cross-process sidecar inode continuity is not claimed. Full
+no-follow open/fstat validation is restricted to before SQLite opens and after
+it closes; live checks use descriptor-relative no-follow metadata lookup so
+the adapter never closes an independently opened descriptor onto an inode
+whose POSIX advisory locks SQLite may hold. These controls are not a sandbox
+against a malicious process running as the same operating-system user. Keep
+the data root private and do not run untrusted same-user processes against it.
 
 `aipcs serve --profile sqlite` is the sole public composition path: it obtains
 the opaque location from resolved configuration, calls `migrate()` once before
@@ -49,9 +58,31 @@ manifest, schema, record, or export versions.
 `inspect_migration()` is observation only. `migrate()` is the sole explicit
 initialisation or layout-changing operation. The public runtime uses only the
 registry migration at SQLite startup; no tool call allocates or migrates a
-service store. Safe diagnostics remain intentionally bounded.
+service store. Inspection uses one read snapshot and changes no application,
+schema, ledger, or journal-mode state. A valid SQLite WAL open may still
+create, rebuild, retain, replace, or remove SQLite-managed WAL/SHM operational
+files; every observable file remains inside the same secured location policy.
+Safe diagnostics remain intentionally bounded.
 
-The V1-08B registry R2 migration is a private sequential, checksummed upgrade.
+Registry R3 and service-store R2 record the WAL physical policy as exact
+checksummed migrations. Each database contains one permanent singleton policy
+row for `aipcs.sqlite.wal.v1`, in `prepared` or `ready` phase. Explicit
+migration commits a dirty prepared predecessor in DELETE mode, switches the
+persistent header to WAL, then commits the ready policy and target history.
+Only exact predecessor/DELETE, prepared/DELETE, prepared/WAL, and ready/WAL
+states are adopted; every other marker/header/ledger combination fails closed.
+Each successful ready migration runs one PASSIVE checkpoint and independently
+re-observes readiness.
+
+`sqlite_busy_timeout_ms` configures Python connection waiting and SQLite's one
+busy handler, from 1 through 30,000 ms (default 5,000). `StorageBusy` is created
+only from a numeric SQLite BUSY-family primary result or a PASSIVE-checkpoint
+busy indicator. It is not inferred from driver text, `SQLITE_LOCKED`, elapsed
+wall time, or an uncertain post-commit outcome. The adapters contain no retry
+loop.
+
+The historical V1-08B registry R2 migration is a private sequential,
+checksummed upgrade beneath the current R3 WAL policy.
 It admits only an exact, clean, public-reachable R1 registry and otherwise
 fails closed; it does not recalculate R1 evidence, relabel an R1 database, or
 offer repair. Fresh creation applies the same R1 then R2 migration history.
@@ -68,14 +99,13 @@ incompatible without a repair write. Ordinary unit-of-work open does not add an
 unbounded full-registry scan; each row codec remains strict when that row is
 used.
 
-R2 retains one global registry mutation/idempotency ledger across legacy and
+The historical R2 layout retains one global registry mutation/idempotency ledger across legacy and
 future lifecycle work. Exact legacy completed replays keep their stored result
 bytes; a future lifecycle intent is `prepared`, `completed`, or
 `recovery_required`, with prepared and recovery-required rows acting as the
 per-service transition blocker and completion releasing it. This describes
-durable registry state only. It does not compose a
-service-store coordinator, inspect a service store, change SQLite WAL/busy
-behavior, or expose a lifecycle operation.
+durable registry state only. It does not compose a service-store coordinator,
+inspect a service store, or expose a lifecycle operation.
 
 Registry unit-of-work callers close every successfully acquired unit exactly
 once. A successful commit or rollback ends its transaction attempt, then close
@@ -104,8 +134,10 @@ it has no configuration, environment, CLI, MCP, or audit-query surface.
 The private SQLite service-store catalog declares only `service_store`
 ownership. `allocate()` purely derives the canonical locator and performs no
 filesystem or registry I/O. `inspect_migration()` does not create a directory,
-database, table, journal, or sidecar. Explicit `migrate()` maps a validated
-locator to the adapter-private layout below and initialises revision 1:
+database, table, migration row, or journal-mode change, subject to SQLite's
+documented operational WAL/SHM open effects above. Explicit `migrate()` maps a
+validated locator to the adapter-private layout below and initialises the R1
+predecessor followed by the R2 WAL policy:
 
 ```text
 <sqlite-data-root>/
@@ -115,8 +147,9 @@ locator to the adapter-private layout below and initialises revision 1:
 ```
 
 The container is `0700`; every selected database is an owned, single-link
-regular `0600` file. The database contains only two reserved adapter tables:
-service-store metadata and its independent checksummed migration ledger. The
+regular `0600` file. The database contains three reserved adapter tables:
+service-store metadata, its independent checksummed migration ledger, and the
+WAL policy marker. The
 metadata binds the database to the exact locator namespace, so copying or
 renaming a valid database to a different locator cannot report ready. It stores
 no principal, domain name, manifest, schema version, lifecycle state, audit,
@@ -150,7 +183,7 @@ directory or database, compose with the registry, or add a public storage
 adapter surface.
 
 Every `inspect()` and `materialise()` call first requires that selected,
-already-existing database to pass the exact revision-1 service-store foundation
+already-existing database to pass the exact revision-2 WAL-ready service-store foundation
 inspection on the very connection used for the domain operation. A missing,
 empty, dirty, incompatible, copied, or otherwise non-ready foundation is a
 `StorageMigrationError`, not a domain `unmaterialised` result. In particular,
@@ -190,7 +223,7 @@ the exact layout is a no-op, and an incompatible layout is preserved. SQLite
 foreign keys are named, `ON DELETE RESTRICT ON UPDATE RESTRICT`, immediate,
 and never `DEFERRABLE`; nullable foreign-key fields are the supported way to
 stage otherwise cyclic data. `evolve()` deeply revalidates one caller-supplied,
-adjacent additive transition, then under one exclusive transaction accepts an
+adjacent additive transition, then under one `BEGIN IMMEDIATE` transaction accepts an
 exact target as a no-op or an exact current layout as the source for canonical
 DDL. It may create new entity tables, append nullable fields to existing
 tables, and create new explicit indexes; relationships are emitted only from a

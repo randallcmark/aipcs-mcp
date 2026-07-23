@@ -16,14 +16,14 @@ from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteServiceStoreCatalog
 from aipcs_mcp.storage.sqlite import service_store as catalog_module
 from aipcs_mcp.storage.sqlite import service_store_inspection as inspection_module
-from aipcs_mcp.storage.sqlite.connection import connect
+from aipcs_mcp.storage.sqlite.connection import SQLiteConnectionPurpose, connect
 from aipcs_mcp.storage.sqlite.service_store_migrations import (
     CHECKSUM,
-    DDL,
     EXPECTED_SQL,
     META,
     MIGRATION,
     RESERVED_PREFIX,
+    TARGET_REVISION,
 )
 
 
@@ -45,7 +45,9 @@ def _ready(
     root = tmp_path / "root"
     catalog = _catalog(root)
     locator = _locator(value)
-    assert catalog.migrate(locator) == MigrationState("service_store", 1, 1, "ready")
+    assert catalog.migrate(locator) == MigrationState(
+        "service_store", TARGET_REVISION, TARGET_REVISION, "ready"
+    )
     return catalog, locator, root, _database(root, locator)
 
 
@@ -54,20 +56,6 @@ def _assert_bounded(error: BaseException, root: Path) -> None:
     assert error.__context__ is None
     assert str(root) not in str(error)
     assert "sqlite" not in str(error).lower()
-
-
-def _directory_snapshot(directory: Path) -> tuple[tuple[str, int, int, int], ...]:
-    return tuple(
-        sorted(
-            (
-                entry.name,
-                entry.stat().st_mode,
-                entry.stat().st_size,
-                entry.stat().st_mtime_ns,
-            )
-            for entry in directory.iterdir()
-        )
-    )
 
 
 def _leave_wal_header_without_sidecars(database: Path, *, malformed: bool) -> None:
@@ -97,7 +85,7 @@ def test_allocate_and_absent_inspection_are_pure_and_side_effect_free(tmp_path: 
     assert catalog.allocate(UUID(int=1)) == first
     assert not root.exists()
     assert catalog.inspect_migration(first) == MigrationState(
-        "service_store", 0, 1, "uninitialised"
+        "service_store", 0, TARGET_REVISION, "uninitialised"
     )
     assert not root.exists()
 
@@ -165,12 +153,17 @@ def test_connection_inspector_reports_ready_for_existing_hardened_connection(
 
     connection = None
     try:
-        connection = connect(anchored, "ro", query_only=True)
+        connection = connect(
+            anchored,
+            "ro",
+            query_only=True,
+            purpose=SQLiteConnectionPurpose.POLICY_INSPECTION,
+        )
         assert inspection_module.inspect_connection(
             connection,
             locator.namespace,
             integrity=True,
-        ) == MigrationState("service_store", 1, 1, "ready")
+        ) == MigrationState("service_store", TARGET_REVISION, TARGET_REVISION, "ready")
     finally:
         if connection is not None:
             connection.close()
@@ -193,7 +186,9 @@ def test_future_plain_table_and_index_do_not_redefine_adapter_readiness(
     with sqlite3.connect(database) as connection:
         connection.execute('CREATE TABLE "future_entity" ("id" TEXT PRIMARY KEY NOT NULL) STRICT')
         connection.execute('CREATE INDEX "future_entity_id" ON "future_entity" ("id")')
-    assert catalog.inspect_migration(locator) == MigrationState("service_store", 1, 1, "ready")
+    assert catalog.inspect_migration(locator) == MigrationState(
+        "service_store", TARGET_REVISION, TARGET_REVISION, "ready"
+    )
 
 
 def test_reserved_prefix_text_in_future_table_and_index_ddl_remains_ready(
@@ -220,7 +215,9 @@ def test_reserved_prefix_text_in_future_table_and_index_ddl_remains_ready(
             )
         )
     assert RESERVED_PREFIX in stored_sql.lower()
-    assert catalog.inspect_migration(locator) == MigrationState("service_store", 1, 1, "ready")
+    assert catalog.inspect_migration(locator) == MigrationState(
+        "service_store", TARGET_REVISION, TARGET_REVISION, "ready"
+    )
 
 
 @pytest.mark.parametrize(
@@ -242,7 +239,7 @@ def test_reserved_objects_views_triggers_and_references_are_incompatible(
     catalog, locator, _, database = _ready(tmp_path)
     with sqlite3.connect(database) as connection:
         connection.executescript(statement)
-    expected = MigrationState("service_store", 1, 1, "incompatible")
+    expected = MigrationState("service_store", TARGET_REVISION, TARGET_REVISION, "incompatible")
     assert catalog.inspect_migration(locator) == expected
     assert catalog.migrate(locator) == expected
 
@@ -253,8 +250,10 @@ def test_namespace_binding_rejects_cross_locator_database_copy(tmp_path: Path) -
     destination = _database(root, second)
     shutil.copyfile(source, destination)
     destination.chmod(0o600)
-    assert catalog.inspect_migration(first) == MigrationState("service_store", 1, 1, "ready")
-    expected = MigrationState("service_store", 0, 1, "incompatible")
+    assert catalog.inspect_migration(first) == MigrationState(
+        "service_store", TARGET_REVISION, TARGET_REVISION, "ready"
+    )
+    expected = MigrationState("service_store", 0, TARGET_REVISION, "incompatible")
     assert catalog.inspect_migration(second) == expected
     assert catalog.migrate(second) == expected
 
@@ -262,11 +261,11 @@ def test_namespace_binding_rejects_cross_locator_database_copy(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
-        ("checksum", MigrationState("service_store", 1, 1, "incompatible")),
-        ("newer", MigrationState("service_store", 2, 1, "incompatible")),
-        ("missing_history", MigrationState("service_store", 1, 1, "incompatible")),
-        ("namespace", MigrationState("service_store", 0, 1, "incompatible")),
-        ("dirty", MigrationState("service_store", 1, 1, "dirty")),
+        ("checksum", MigrationState("service_store", TARGET_REVISION, TARGET_REVISION, "incompatible")),
+        ("newer", MigrationState("service_store", TARGET_REVISION + 1, TARGET_REVISION, "incompatible")),
+        ("missing_history", MigrationState("service_store", TARGET_REVISION, TARGET_REVISION, "incompatible")),
+        ("namespace", MigrationState("service_store", 0, TARGET_REVISION, "incompatible")),
+        ("dirty", MigrationState("service_store", TARGET_REVISION, TARGET_REVISION, "incompatible")),
     ],
 )
 def test_migration_state_matrix_detects_history_and_binding_drift(
@@ -278,7 +277,7 @@ def test_migration_state_matrix_detects_history_and_binding_drift(
             replacement = "0" * 64 if CHECKSUM != "0" * 64 else "1" * 64
             connection.execute(f'UPDATE "{MIGRATION}" SET checksum=?', (replacement,))
         elif mutation == "newer":
-            connection.execute(f'UPDATE "{META}" SET applied_revision=2')
+            connection.execute(f'UPDATE "{META}" SET applied_revision=?', (TARGET_REVISION + 1,))
         elif mutation == "missing_history":
             connection.execute(f'DELETE FROM "{MIGRATION}"')
         elif mutation == "namespace":
@@ -308,17 +307,18 @@ def test_empty_and_nonempty_unversioned_databases_classify_without_ddl(tmp_path:
     assert catalog.inspect_migration(unversioned_locator).status == "incompatible"
 
 
-@pytest.mark.parametrize("fault_index", range(len(DDL)))
-def test_each_revision_ddl_fault_rolls_back_without_durable_dirty_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault_index: int
+def test_preparation_ddl_fault_rolls_back_without_durable_dirty_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "root"
     catalog = _catalog(root)
     locator = _locator()
-    faulty = list(DDL)
-    faulty[fault_index] = "NOT VALID SQL"
     with monkeypatch.context() as context:
-        context.setattr(catalog_module, "DDL", tuple(faulty))
+        context.setattr(
+            catalog_module,
+            "_prepare_predecessor",
+            lambda connection: connection.execute("NOT VALID SQL"),
+        )
         with pytest.raises(StorageMigrationError) as captured:
             catalog.migrate(locator)
         _assert_bounded(captured.value, root)
@@ -336,11 +336,12 @@ def test_precommit_readiness_fault_rolls_back_to_uninitialised(
             inspection_module,
             "inspect_connection",
             lambda connection, namespace, *, integrity: MigrationState(
-                "service_store", 1, 1, "incompatible"
+                "service_store", TARGET_REVISION, TARGET_REVISION, "incompatible"
             ),
         )
-        with pytest.raises(StorageMigrationError):
-            catalog.migrate(locator)
+        assert catalog.migrate(locator) == MigrationState(
+            "service_store", TARGET_REVISION, TARGET_REVISION, "incompatible"
+        )
     assert catalog.inspect_migration(locator).status == "uninitialised"
 
 
@@ -355,13 +356,16 @@ def test_postcommit_exception_is_bounded_and_idempotently_ready(
     class CommitAfterDurable:
         def __init__(self, wrapped: sqlite3.Connection) -> None:
             self.wrapped = wrapped
+            self.commits = 0
 
         def __getattr__(self, name: str):
             return getattr(self.wrapped, name)
 
         def commit(self) -> None:
             self.wrapped.commit()
-            raise sqlite3.OperationalError("secret commit uncertainty")
+            self.commits += 1
+            if self.commits == 2:
+                raise sqlite3.OperationalError("secret commit uncertainty")
 
     with monkeypatch.context() as context:
         context.setattr(
@@ -409,42 +413,39 @@ def test_store_container_must_be_private_owned_directory(tmp_path: Path, kind: s
 
 
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
-def test_service_store_sidecars_fail_closed_and_only_migration_recovers_journal(
+def test_service_store_unsafe_sidecars_fail_closed(
     tmp_path: Path, suffix: str
 ) -> None:
     catalog, locator, root, database = _ready(tmp_path)
     sidecar = Path(str(database) + suffix)
-    descriptor = os.open(sidecar, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    os.write(descriptor, b"synthetic-sidecar")
-    os.close(descriptor)
+    if sidecar.exists():
+        sidecar.chmod(0o644)
+    else:
+        descriptor = os.open(sidecar, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(descriptor, b"synthetic-sidecar")
+        os.close(descriptor)
     with pytest.raises(StorageUnavailable):
         catalog.inspect_migration(locator)
-    if suffix == "-journal":
-        assert catalog.migrate(locator).status == "ready"
-        assert not sidecar.exists()
-    else:
-        with pytest.raises(StorageUnavailable):
-            catalog.migrate(locator)
-        assert sidecar.exists()
-    assert catalog.inspect_migration(locator).status == "ready" if suffix == "-journal" else True
+    with pytest.raises(StorageUnavailable):
+        catalog.migrate(locator)
+    assert sidecar.exists()
     assert str(root) not in repr(catalog)
 
 
-@pytest.mark.parametrize("malformed", [False, True], ids=["valid", "malformed"])
-def test_wal_header_without_sidecars_never_changes_service_store_layout(
-    tmp_path: Path, malformed: bool
-) -> None:
+def test_ready_wal_header_without_sidecars_is_inspectable(tmp_path: Path) -> None:
     catalog, locator, _, database = _ready(tmp_path)
-    _leave_wal_header_without_sidecars(database, malformed=malformed)
-    container = database.parent
-    before = _directory_snapshot(container)
+    _leave_wal_header_without_sidecars(database, malformed=False)
+    assert catalog.inspect_migration(locator).status == "ready"
+    assert catalog.migrate(locator).status == "ready"
 
+
+def test_malformed_wal_header_fails_bounded(tmp_path: Path) -> None:
+    catalog, locator, _, database = _ready(tmp_path)
+    _leave_wal_header_without_sidecars(database, malformed=True)
     with pytest.raises(StorageUnavailable):
         catalog.inspect_migration(locator)
-    assert _directory_snapshot(container) == before
     with pytest.raises(StorageUnavailable):
         catalog.migrate(locator)
-    assert _directory_snapshot(container) == before
 
 
 def test_observable_database_replacement_is_detected_at_identity_checkpoint(
@@ -465,7 +466,8 @@ def test_observable_database_replacement_is_detected_at_identity_checkpoint(
         anchored.close()
     assert database.stat().st_size == 0
     assert original.stat().st_size > 0
-    assert catalog.inspect_migration(locator).status == "uninitialised"
+    with pytest.raises(StorageUnavailable):
+        catalog.inspect_migration(locator)
     assert str(root) not in repr(catalog)
 
 

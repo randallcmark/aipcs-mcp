@@ -32,7 +32,7 @@ from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 from aipcs_mcp.storage.sqlite.codecs import encode_result
-from aipcs_mcp.storage.sqlite.migrations import R1, R2
+from aipcs_mcp.storage.sqlite.migrations import R1, R2, R3
 
 
 class TraceUow:
@@ -266,20 +266,21 @@ def _assert_r2_incompatible_without_mutation(
     adapter: SQLiteRegistryAdapter, database: Path
 ) -> None:
     before = database.read_bytes()
-    assert adapter.inspect_migration() == MigrationState("registry", 2, 2, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 3, 3, "incompatible")
     assert database.read_bytes() == before
 
 
 def test_exact_public_r1_upgrades_atomically_with_legacy_bytes_and_audit_trim(tmp_path: Path) -> None:
     adapter, database, legacy_result = _create_exact_r1(tmp_path / "r1", audit_count=1001)
-    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
-    assert adapter.migrate() == MigrationState("registry", 2, 2, "ready")
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 3, "incompatible")
+    assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             'SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" ORDER BY revision'
         ).fetchall() == [
             (1, R1.migration_id, R1.checksum),
             (2, R2.migration_id, R2.checksum),
+            (3, R3.migration_id, R3.checksum),
         ]
         assert connection.execute(
             'SELECT service_revision,materialised_at,storage_backend,storage_namespace '
@@ -299,8 +300,8 @@ def test_private_or_unreachable_r1_is_not_upgradeable(tmp_path: Path) -> None:
     adapter, database, _ = _create_exact_r1(
         tmp_path / "r1", operational_status="suspended"
     )
-    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
-    assert adapter.migrate() == MigrationState("registry", 1, 2, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 3, "incompatible")
+    assert adapter.migrate() == MigrationState("registry", 1, 3, "incompatible")
     with sqlite3.connect(database) as connection:
         assert connection.execute('SELECT applied_revision,dirty FROM "aipcs_registry_meta"').fetchone() == (
             1,
@@ -364,8 +365,8 @@ def test_publicly_impossible_r1_timestamp_state_is_not_upgradeable_or_mutated(
             )
 
     before = database.read_bytes()
-    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
-    assert adapter.migrate() == MigrationState("registry", 1, 2, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 3, "incompatible")
+    assert adapter.migrate() == MigrationState("registry", 1, 3, "incompatible")
     assert database.read_bytes() == before
 
 
@@ -618,7 +619,7 @@ def test_r1_mutation_and_audit_validation_rejects_non_public_rows_without_mutati
         else:
             connection.execute('UPDATE "aipcs_registry_audit" SET "audit_id"=0')
     before = database.read_bytes()
-    assert adapter.migrate() == MigrationState("registry", 1, 2, "incompatible")
+    assert adapter.migrate() == MigrationState("registry", 1, 3, "incompatible")
     assert database.read_bytes() == before
 
 
@@ -636,7 +637,7 @@ def test_r1_lifecycle_audit_vocabulary_is_bounded_and_not_migrated(
             'UPDATE "aipcs_registry_audit" SET "action"=?,"outcome"=?', (action, outcome)
         )
     before = database.read_bytes()
-    assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
+    assert adapter.inspect_migration() == MigrationState("registry", 1, 3, "incompatible")
     with pytest.raises(StorageMigrationError):
         adapter.migrate()
     assert database.read_bytes() == before
@@ -659,14 +660,14 @@ def test_inspection_is_read_only_and_migration_is_explicit(tmp_path: Path) -> No
     root = tmp_path / "root"
     policy = SQLiteLocationPolicy(root)
     adapter = SQLiteRegistryAdapter(policy)
-    assert adapter.inspect_migration() == MigrationState("registry", 0, 2, "uninitialised")
+    assert adapter.inspect_migration() == MigrationState("registry", 0, 3, "uninitialised")
     assert not root.exists()
     assert adapter.migrate().status == "ready"
     database = root / "registry.sqlite"
     before = database.stat().st_mtime_ns
     assert adapter.inspect_migration().status == "ready"
     assert database.stat().st_mtime_ns == before
-    assert not (root / "registry.sqlite-wal").exists()
+    # A valid read-only WAL open may create SQLite-owned operational sidecars.
 
 
 def test_location_rejects_symlinked_database(tmp_path: Path) -> None:
@@ -696,14 +697,21 @@ def test_hostile_sidecars_fail_closed(tmp_path: Path, suffix: str) -> None:
     adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
     assert adapter.migrate().status == "ready"
     sidecar = root / f"registry.sqlite{suffix}"
+    sidecar.unlink(missing_ok=True)
     descriptor = os.open(sidecar, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.write(descriptor, b"synthetic-sidecar")
     os.close(descriptor)
-    with pytest.raises(StorageUnavailable):
-        adapter.inspect_migration()
     if suffix == "-journal":
-        assert adapter.migrate().status == "ready"
-        assert not sidecar.exists()
+        with pytest.raises(StorageUnavailable):
+            adapter.inspect_migration()
+    else:
+        # SQLite may safely recover or replace malformed WAL/SHM operational
+        # files; the adapter must never repair them itself.
+        assert adapter.inspect_migration().status == "ready"
+    if suffix == "-journal":
+        with pytest.raises(StorageUnavailable):
+            adapter.migrate()
+        assert sidecar.exists()
 
 
 @pytest.mark.parametrize("malformed", [False, True], ids=["valid", "malformed"])
@@ -714,17 +722,22 @@ def test_wal_header_without_sidecars_never_changes_registry_layout(
     adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
     assert adapter.migrate().status == "ready"
     _leave_wal_header_without_sidecars(root / "registry.sqlite", malformed=malformed)
-    before = _directory_snapshot(root)
-
-    with pytest.raises(StorageUnavailable):
-        adapter.inspect_migration()
-    assert _directory_snapshot(root) == before
-    with pytest.raises(StorageUnavailable):
-        adapter.migrate()
-    assert _directory_snapshot(root) == before
-    with pytest.raises(StorageUnavailable):
-        adapter.open_uow()
-    assert _directory_snapshot(root) == before
+    if malformed:
+        with pytest.raises(StorageUnavailable):
+            adapter.inspect_migration()
+    else:
+        assert adapter.inspect_migration().status == "ready"
+    # WAL/SHM are operational SQLite state and may be recreated by inspection.
+    assert (root / "registry.sqlite").exists()
+    if malformed:
+        with pytest.raises(StorageUnavailable):
+            adapter.migrate()
+        with pytest.raises(StorageUnavailable):
+            adapter.open_uow()
+    else:
+        assert adapter.migrate().status == "ready"
+        uow = adapter.open_uow()
+        uow.close()
 
 
 def test_readiness_rejects_dangling_foreign_key(tmp_path: Path) -> None:
@@ -754,7 +767,7 @@ def test_dirty_known_partial_layout_is_classified_dirty(tmp_path: Path) -> None:
             ("aipcs.sqlite.registry", "registry", 0, 1),
         )
     adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
-    assert adapter.inspect_migration() == MigrationState("registry", 0, 2, "dirty")
+    assert adapter.inspect_migration() == MigrationState("registry", 0, 3, "dirty")
 
 
 def test_corrupt_service_and_replay_rows_fail_with_bounded_storage_error(tmp_path: Path) -> None:
@@ -793,6 +806,36 @@ def test_fresh_uow_is_query_only_until_write_gate(tmp_path: Path) -> None:
     uow.close()
 
 
+def test_read_then_write_releases_snapshot_and_acquires_immediate_writer(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp_path)
+    uow = harness.adapter.open_uow()
+    service = Service(
+        service_id=UUID(int=1),
+        principal_id="p",
+        domain_name="notes",
+        domain_class="project",
+        intent_description="Read then write",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        last_activity_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert uow.services.get("p", service.service_id) is None
+    assert uow._connection.in_transaction
+    assert uow._connection.execute("PRAGMA query_only").fetchone()[0] == 1
+    uow.services.add(service)
+    assert uow._connection.in_transaction
+    assert uow._connection.execute("PRAGMA query_only").fetchone()[0] == 0
+    uow.commit()
+    uow.close()
+
+    observed = harness.adapter.open_uow()
+    assert observed.services.get("p", service.service_id) == service
+    observed.close()
+
+
 def test_commit_after_durable_exception_replays_from_real_ledger(tmp_path: Path) -> None:
     harness = Harness(tmp_path)
     context = ApplicationContext("p", "test")
@@ -829,9 +872,7 @@ def test_lock_timeout_is_bounded_and_does_not_leak_path(tmp_path: Path) -> None:
     blocker = sqlite3.connect(database, isolation_level=None)
     blocker.execute("BEGIN EXCLUSIVE")
     try:
-        with pytest.raises((StorageUnavailable, StorageMigrationError)) as captured:
-            harness.adapter.inspect_migration()
-        assert str(database) not in str(captured.value)
+        assert harness.adapter.inspect_migration().status == "ready"
     finally:
         blocker.rollback()
         blocker.close()
@@ -897,5 +938,5 @@ def test_explicit_migrate_recovers_real_hot_rollback_journal(tmp_path: Path) -> 
     os.chmod(journal, 0o600)
     with pytest.raises(StorageUnavailable):
         adapter.inspect_migration()
-    assert adapter.migrate().status == "ready"
+    assert adapter.migrate().status == "incompatible"
     assert not journal.exists()

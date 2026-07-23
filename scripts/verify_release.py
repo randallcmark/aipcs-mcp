@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -30,6 +31,8 @@ _FROZEN_R1_MIGRATION_ID = "registry-0001-initial"
 _FROZEN_R1_CHECKSUM = "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc"
 _FROZEN_R2_MIGRATION_ID = "registry-0002-durable-intent"
 _FROZEN_R2_CHECKSUM = "b6190247d4f709728bab59cb4eb5fd149d4b7424472615f377b83f5191e0d8ea"
+_FROZEN_R2_DDL = ('CREATE TABLE "aipcs_registry_service" (\n    "service_id" TEXT PRIMARY KEY NOT NULL CHECK (\n        length("service_id") = 36 AND "service_id" = lower("service_id")\n        AND substr("service_id", 9, 1) = \'-\' AND substr("service_id", 14, 1) = \'-\'\n        AND substr("service_id", 19, 1) = \'-\' AND substr("service_id", 24, 1) = \'-\'\n        AND replace("service_id", \'-\', \'\') NOT GLOB \'*[^0-9a-f]*\'\n        AND length(replace("service_id", \'-\', \'\')) = 32\n        AND replace("service_id", \'-\', \'\') != \'00000000000000000000000000000000\'\n    ),\n    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),\n    "domain_name" TEXT NOT NULL CHECK (length("domain_name") BETWEEN 1 AND 63),\n    "domain_class" TEXT NOT NULL CHECK (length("domain_class") BETWEEN 1 AND 64),\n    "intent_description" TEXT NOT NULL CHECK (length("intent_description") BETWEEN 1 AND 1000),\n    "created_at" TEXT NOT NULL CHECK (length("created_at") = 27),\n    "updated_at" TEXT NOT NULL CHECK (length("updated_at") = 27),\n    "last_activity_at" TEXT NOT NULL CHECK (length("last_activity_at") = 27),\n    "manifest_json" TEXT,\n    "schema_version" INTEGER CHECK ("schema_version" IS NULL OR "schema_version" BETWEEN 1 AND 65),\n    "design_state" TEXT NOT NULL CHECK ("design_state" IN (\'seeded\', \'materialised\')),\n    "operational_status" TEXT NOT NULL CHECK (\n        "operational_status" IN (\'active\', \'suspended\', \'archived\')\n    ),\n    "service_revision" INTEGER NOT NULL CHECK (\n        "service_revision" BETWEEN 1 AND 9223372036854775807\n    ),\n    "materialised_at" TEXT CHECK (\n        "materialised_at" IS NULL OR length("materialised_at") = 27\n    ),\n    "storage_backend" TEXT CHECK (\n        "storage_backend" IS NULL OR "storage_backend" IN (\'sqlite\', \'postgresql\')\n    ),\n    "storage_namespace" TEXT CHECK (\n        "storage_namespace" IS NULL OR (\n            length("storage_namespace") = 36\n            AND substr("storage_namespace", 1, 4) = \'svc_\'\n            AND substr("storage_namespace", 5) NOT GLOB \'*[^0-9a-f]*\'\n            AND substr("storage_namespace", 5) != \'00000000000000000000000000000000\'\n        )\n    ),\n    CHECK (\n        ("manifest_json" IS NULL AND "schema_version" IS NULL)\n        OR ("manifest_json" IS NOT NULL AND "schema_version" IS NOT NULL)\n    ),\n    CHECK (\n        ("design_state" = \'seeded\' AND "materialised_at" IS NULL\n            AND "storage_backend" IS NULL AND "storage_namespace" IS NULL)\n        OR ("design_state" = \'materialised\' AND "manifest_json" IS NOT NULL\n            AND "materialised_at" IS NOT NULL AND "storage_backend" IS NOT NULL\n            AND "storage_namespace" IS NOT NULL\n            AND substr("storage_namespace", 5) = replace("service_id", \'-\', \'\'))\n    ),\n    UNIQUE ("service_id", "principal_id"),\n    UNIQUE ("principal_id", "domain_name")\n) STRICT', 'CREATE TABLE "aipcs_registry_mutation" (\n    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),\n    "idempotency_key" TEXT NOT NULL CHECK (length("idempotency_key") BETWEEN 1 AND 128),\n    "fingerprint" TEXT NOT NULL CHECK (\n        length("fingerprint") = 64 AND "fingerprint" = lower("fingerprint")\n        AND "fingerprint" NOT GLOB \'*[^0-9a-f]*\'\n    ),\n    "service_id" TEXT NOT NULL,\n    "operation_kind" TEXT NOT NULL CHECK (\n        "operation_kind" IN (\'legacy\', \'seed\', \'design\', \'materialise\', \'evolve\')\n    ),\n    "phase" TEXT NOT NULL CHECK (\n        "phase" IN (\'prepared\', \'completed\', \'recovery_required\')\n    ),\n    "created_via" TEXT CHECK (\n        "created_via" IS NULL OR length("created_via") BETWEEN 1 AND 64\n    ),\n    "expected_service_revision" INTEGER CHECK (\n        "expected_service_revision" IS NULL\n        OR "expected_service_revision" BETWEEN 1 AND 9223372036854775807\n    ),\n    "expected_schema_version" INTEGER CHECK (\n        "expected_schema_version" IS NULL OR "expected_schema_version" BETWEEN 1 AND 65\n    ),\n    "target_manifest_json" TEXT,\n    "result_json" TEXT,\n    "recovery_category" TEXT CHECK (\n        "recovery_category" IS NULL OR "recovery_category" = \'recovery_required\'\n    ),\n    PRIMARY KEY ("principal_id", "idempotency_key"),\n    FOREIGN KEY ("service_id", "principal_id")\n        REFERENCES "aipcs_registry_service" ("service_id", "principal_id")\n        ON UPDATE RESTRICT ON DELETE RESTRICT,\n    CHECK (\n        (\n            "operation_kind" IN (\'legacy\', \'seed\', \'design\')\n            AND "phase" = \'completed\' AND "created_via" IS NULL\n            AND "expected_service_revision" IS NULL\n            AND "expected_schema_version" IS NULL\n            AND "target_manifest_json" IS NULL\n            AND "result_json" IS NOT NULL AND "recovery_category" IS NULL\n        )\n        OR (\n            "operation_kind" = \'materialise\' AND "created_via" IS NOT NULL\n            AND "expected_service_revision" IS NOT NULL\n            AND "expected_schema_version" IS NOT NULL\n            AND "expected_schema_version" = 1\n            AND "target_manifest_json" IS NOT NULL\n            AND (\n                ("phase" = \'prepared\' AND "result_json" IS NULL\n                    AND "recovery_category" IS NULL)\n                OR ("phase" = \'completed\' AND "result_json" IS NOT NULL\n                    AND "recovery_category" IS NULL)\n                OR ("phase" = \'recovery_required\' AND "result_json" IS NULL\n                    AND "recovery_category" IS NOT NULL\n                    AND "recovery_category" = \'recovery_required\')\n            )\n        )\n        OR (\n            "operation_kind" = \'evolve\' AND "created_via" IS NOT NULL\n            AND "expected_service_revision" IS NOT NULL\n            AND "expected_schema_version" IS NOT NULL\n            AND "expected_schema_version" BETWEEN 1 AND 64\n            AND "target_manifest_json" IS NOT NULL\n            AND (\n                ("phase" = \'prepared\' AND "result_json" IS NULL\n                    AND "recovery_category" IS NULL)\n                OR ("phase" = \'completed\' AND "result_json" IS NOT NULL\n                    AND "recovery_category" IS NULL)\n                OR ("phase" = \'recovery_required\' AND "result_json" IS NULL\n                    AND "recovery_category" IS NOT NULL\n                    AND "recovery_category" = \'recovery_required\')\n            )\n        )\n    )\n) STRICT', 'CREATE TABLE "aipcs_registry_audit" (\n    "audit_id" INTEGER PRIMARY KEY,\n    "action" TEXT NOT NULL CHECK (\n        "action" IN (\'seed\', \'design\', \'materialise\', \'evolve\')\n    ),\n    "outcome" TEXT NOT NULL CHECK (\n        "outcome" IN (\'created\', \'duplicate\', \'accepted\', \'completed\', \'recovery_required\')\n    ),\n    "service_id" TEXT NOT NULL,\n    "principal_id" TEXT NOT NULL CHECK (length("principal_id") BETWEEN 1 AND 128),\n    "created_via" TEXT NOT NULL CHECK (length("created_via") BETWEEN 1 AND 64),\n    "at" TEXT NOT NULL CHECK (length("at") = 27),\n    CHECK (\n        ("action" = \'seed\' AND "outcome" IN (\'created\', \'duplicate\'))\n        OR ("action" = \'design\' AND "outcome" = \'accepted\')\n        OR ("action" IN (\'materialise\', \'evolve\')\n            AND "outcome" IN (\'completed\', \'recovery_required\'))\n    ),\n    FOREIGN KEY ("service_id", "principal_id")\n        REFERENCES "aipcs_registry_service" ("service_id", "principal_id")\n        ON UPDATE RESTRICT ON DELETE RESTRICT\n) STRICT', 'CREATE INDEX "aipcs_registry_service_list"\n    ON "aipcs_registry_service" ("principal_id", "created_at" ASC, "service_id" ASC)', 'CREATE UNIQUE INDEX "aipcs_registry_mutation_active_lifecycle"\n    ON "aipcs_registry_mutation" ("principal_id", "service_id")\n    WHERE "operation_kind" IN (\'materialise\', \'evolve\')\n      AND "phase" IN (\'prepared\', \'recovery_required\')', 'CREATE INDEX "aipcs_registry_audit_principal"\n    ON "aipcs_registry_audit" ("principal_id", "audit_id" DESC)')
+
 _FROZEN_R1_DDL = (
     """CREATE TABLE "aipcs_registry_meta" (
     "singleton" INTEGER PRIMARY KEY NOT NULL CHECK ("singleton" = 1),
@@ -159,6 +162,39 @@ _GENERATED_FILE_SUFFIXES = frozenset(
 )
 _GENERATED_FILE_NAMES = frozenset({".coverage", ".ds_store", "coverage.xml"})
 _GENERATED_FILE_ENDINGS = ("-journal", "-wal", "-shm")
+_PRIVATE_DIRECTORY_NAMES = frozenset(
+    {
+        ".agents",
+        ".claude",
+        ".codex",
+        ".cursor",
+        ".vscode",
+        "archives",
+        "captures",
+        "exec-plans",
+        "private-data",
+        "research",
+        "transcripts",
+    }
+)
+_PRIVATE_FILE_NAMES = frozenset(
+    {
+        "agents.md",
+        "claude.md",
+        "credentials.json",
+        "destination-sha256.tsv",
+        "secrets.json",
+        "source-sha256.tsv",
+    }
+)
+_PRIVATE_FILE_SUFFIXES = frozenset(
+    {".cer", ".crt", ".key", ".p12", ".pem", ".pfx"}
+)
+_PRIVATE_TRANSCRIPT = re.compile(
+    r"(?:^|/)(?:20\d{2}-\d{2}-\d{2}-.+|[^/]*(?:transcript|session)[^/]*)"
+    r"\.(?:txt|md|json)$",
+    re.I,
+)
 
 
 class ReleaseVerificationError(RuntimeError):
@@ -282,7 +318,7 @@ def require_local_preconditions(root: Path, uv: str | None = None) -> str:
 
 
 def generated_checkout_artifacts(root: Path) -> tuple[Path, ...]:
-    """Find denied ignored/generated material without entering .git or the development venv."""
+    """Find denied private/generated material without entering .git or the development venv."""
 
     artifacts: list[Path] = []
     for current, directories, names in os.walk(root, topdown=True, followlinks=False):
@@ -291,16 +327,29 @@ def generated_checkout_artifacts(root: Path) -> tuple[Path, ...]:
             directories[:] = [name for name in directories if name not in {".git", ".venv"}]
         for directory in tuple(directories):
             folded = directory.casefold()
-            if folded in _GENERATED_DIRECTORY_NAMES or folded.endswith(".egg-info"):
+            if (
+                folded in _GENERATED_DIRECTORY_NAMES
+                or folded in _PRIVATE_DIRECTORY_NAMES
+                or folded.startswith(".data")
+                or folded.endswith(".egg-info")
+            ):
                 artifacts.append(current_path / directory)
                 directories.remove(directory)
         for name in names:
             path = current_path / name
             folded = name.casefold()
+            relative = path.relative_to(root).as_posix()
             if (
                 folded in _GENERATED_FILE_NAMES
+                or folded in _PRIVATE_FILE_NAMES
+                or folded.startswith(".data")
+                or (folded.startswith(".env") and folded != ".env.example")
                 or path.suffix.casefold() in _GENERATED_FILE_SUFFIXES
+                or path.suffix.casefold() in _PRIVATE_FILE_SUFFIXES
                 or folded.endswith(_GENERATED_FILE_ENDINGS)
+                or _PRIVATE_TRANSCRIPT.search(relative)
+                or "private-artifact" in folded
+                or "preservation-manifest" in folded
                 or name.endswith("~")
                 or name.startswith(".#")
                 or (len(name) > 2 and name.startswith("#") and name.endswith("#"))
@@ -311,7 +360,9 @@ def generated_checkout_artifacts(root: Path) -> tuple[Path, ...]:
 
 def require_clean_checkout_artifacts(root: Path) -> None:
     if generated_checkout_artifacts(root):
-        raise ReleaseVerificationError("source checkout contains generated or database artifacts.")
+        raise ReleaseVerificationError(
+            "source checkout contains generated, database, or private artifacts."
+        )
 
 
 def _safe_relative_path(value: str) -> PurePosixPath:
@@ -812,13 +863,13 @@ if mode not in {"baseline", "heavy"}:
 assert not root.exists()
 missing = first.inspect_migration(locator_a)
 assert (missing.component, missing.applied_revision, missing.target_revision, missing.status) == (
-    "service_store", 0, 1, "uninitialised"
+    "service_store", 0, 2, "uninitialised"
 )
 assert not root.exists()
 
 ready = first.migrate(locator_a)
 assert (ready.component, ready.applied_revision, ready.target_revision, ready.status) == (
-    "service_store", 1, 1, "ready"
+    "service_store", 2, 2, "ready"
 )
 db_a = database(locator_a)
 assert db_a.is_file()
@@ -829,7 +880,9 @@ with sqlite3.connect(f"file:{db_a}?mode=ro", uri=True) as connection:
             "SELECT name FROM sqlite_schema WHERE substr(name,1,7) <> 'sqlite_'"
         )
     }
-assert objects == {"__aipcs_service_store_meta", "__aipcs_service_store_migration"}
+assert objects == {"__aipcs_service_store_meta", "__aipcs_service_store_migration", "__aipcs_service_store_policy"}
+with sqlite3.connect(f"file:{db_a}?mode=ro", uri=True) as connection:
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
 ledger = migration_row(locator_a)
 assert first.migrate(locator_a) == ready
 assert migration_row(locator_a) == ledger
@@ -890,7 +943,7 @@ def run_installed_catalog_smoke(
 def _domain_schema_smoke_program() -> str:
     """Standalone installed V1-07B/C/D domain-schema proof with no checkout imports."""
 
-    return r'''
+    program = r'''
 import site
 import sqlite3
 import sys
@@ -1131,6 +1184,7 @@ assert store.evolve(locator, transition) == DomainSchemaState("ready")
 assert schema_snapshot() == before_retry
 assert_target_state(prove_token_tolerance=False)
 '''
+    return program
 
 
 def run_installed_domain_schema_smoke(
@@ -1816,7 +1870,7 @@ def run_installed_lifecycle_contract_smoke(
 
 
 def _registry_r2_smoke_program() -> str:
-    """Standalone installed V1-08B registry migration and ledger proof."""
+    """Standalone installed registry R2-to-R3 migration and ledger proof."""
 
     program = r'''
 from __future__ import annotations
@@ -1850,7 +1904,7 @@ from aipcs_mcp.lifecycle import LifecyclePhase, MaterialiseCommand
 from aipcs_mcp.manifest_v2 import ManifestV2
 from aipcs_mcp.storage import MigrationState
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
-from aipcs_mcp.storage.sqlite.migrations import R1, R2
+from aipcs_mcp.storage.sqlite.migrations import R1, R2, R3
 
 frozen_r1_ddl = __FROZEN_R1_DDL__
 frozen_r1_migration_id = "__FROZEN_R1_MIGRATION_ID__"
@@ -1977,15 +2031,18 @@ with sqlite3.connect(database) as connection:
     )
 
 adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(root))
-assert adapter.inspect_migration() == MigrationState("registry", 1, 2, "incompatible")
-assert adapter.migrate() == MigrationState("registry", 2, 2, "ready")
+assert adapter.inspect_migration() == MigrationState("registry", 1, 3, "incompatible")
+assert adapter.migrate() == MigrationState("registry", 3, 3, "ready")
+assert adapter.inspect_migration() == MigrationState("registry", 3, 3, "ready")
 with sqlite3.connect(database) as connection:
     assert connection.execute(
         'SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" ORDER BY revision'
     ).fetchall() == [
         (1, frozen_r1_migration_id, frozen_r1_checksum),
         (2, frozen_r2_migration_id, frozen_r2_checksum),
+        (3, R3.migration_id, R3.checksum),
     ]
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert connection.execute(
         'SELECT "service_revision","materialised_at","storage_backend","storage_namespace" '
         'FROM "aipcs_registry_service" ORDER BY "service_id"'
@@ -2074,9 +2131,9 @@ def prove_under_cap_retention(count):
         )
     case_adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(case_root))
     assert case_adapter.inspect_migration() == MigrationState(
-        "registry", 1, 2, "incompatible"
+        "registry", 1, 3, "incompatible"
     )
-    assert case_adapter.migrate() == MigrationState("registry", 2, 2, "ready")
+    assert case_adapter.migrate() == MigrationState("registry", 3, 3, "ready")
     with sqlite3.connect(case_database) as connection:
         assert connection.execute(
             'SELECT count(*),min(audit_id),max(audit_id) '
@@ -2232,7 +2289,10 @@ assert [(row[0], row[1]) for row in phases] == [
 assert phases[0][2] is not None and phases[0][3] is None
 assert phases[1][2:] == (None, None)
 assert phases[2][2:] == (None, "recovery_required")
-assert adapter.inspect_migration() == MigrationState("registry", 2, 2, "ready")
+assert adapter.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+# A plain main-file copy must not omit committed WAL frames in this legacy corruption check.
+with sqlite3.connect(database) as connection:
+    connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
 
 def prove_corruption_fails_closed(name, statement, parameters=()):
     corrupt_root = (cwd / f"corrupt-{name}-root").resolve()
@@ -2245,11 +2305,11 @@ def prove_corruption_fails_closed(name, statement, parameters=()):
     corrupt_before = corrupt_database.read_bytes()
     corrupt_adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy(corrupt_root))
     assert corrupt_adapter.inspect_migration() == MigrationState(
-        "registry", 2, 2, "incompatible"
+        "registry", 3, 3, "incompatible"
     )
     assert corrupt_database.read_bytes() == corrupt_before
     assert corrupt_adapter.migrate() == MigrationState(
-        "registry", 2, 2, "incompatible"
+        "registry", 3, 3, "incompatible"
     )
     assert corrupt_database.read_bytes() == corrupt_before
 
@@ -2296,6 +2356,254 @@ def run_installed_registry_r2_smoke(
     run_stage(
         f"installed {name} registry R2 smoke",
         [python, "-I", client],
+        cwd=cwd,
+        environment=environment,
+        timeout=SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+
+
+def _wal_release_smoke_program() -> str:
+    """Installed R3/R2 WAL proof; child modes deliberately use this same -I program."""
+
+    program = r'''
+from __future__ import annotations
+import json, os, site, sqlite3, subprocess, sys
+from pathlib import Path
+from uuid import UUID
+import aipcs_mcp.storage.sqlite.adapter as adapter_module
+import aipcs_mcp.storage.sqlite.service_store as store_module
+from aipcs_mcp.storage import MigrationState, StorageBusy, StorageMigrationError, StorageUnavailable
+from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter, SQLiteServiceStoreCatalog
+
+root = Path(sys.argv[1]).resolve()
+mode = sys.argv[2] if len(sys.argv) > 2 else "parent"
+assert sqlite3.sqlite_version_info >= (3, 51, 3)
+sites = tuple(Path(value).resolve() for value in site.getsitepackages())
+for module in (adapter_module, store_module):
+    assert any(Path(module.__file__).resolve().is_relative_to(value) for value in sites)
+db = root / "registry.sqlite"
+if mode == "holder":
+    connection = sqlite3.connect(db, isolation_level=None)
+    connection.execute("BEGIN IMMEDIATE")
+    print("LOCK_HELD", flush=True)
+    sys.stdin.read(1)
+    connection.rollback(); connection.close(); raise SystemExit(0)
+if mode == "crash":
+    connection = sqlite3.connect(db, isolation_level=None)
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute('UPDATE "aipcs_registry_meta" SET "dirty"=0')
+    connection.commit(); print("COMMIT_RETURNED", flush=True)
+    os._exit(0)
+
+root.mkdir(mode=0o700)
+registry = SQLiteRegistryAdapter(SQLiteLocationPolicy(root), busy_timeout_ms=50)
+assert registry.migrate() == MigrationState("registry", 3, 3, "ready")
+assert registry.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+with sqlite3.connect(db) as connection:
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert connection.execute('SELECT phase FROM "aipcs_registry_storage_policy"').fetchone() == ("ready",)
+holder = subprocess.Popen([sys.executable, "-I", __file__, str(root), "holder"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+assert holder.stdout.readline().strip() == "LOCK_HELD"
+# WAL readers coexist with an IMMEDIATE writer; a second writer is bounded and typed.
+assert registry.inspect_migration().status == "ready"
+try:
+    contender = registry.open_uow()
+    try:
+        contender.mutations.resolve_non_lifecycle(
+            "seed",
+            "release-principal",
+            "release-busy-key",
+            "a" * 64,
+        )
+    finally:
+        contender.close()
+except StorageBusy:
+    pass
+else:
+    raise AssertionError("writer was not bounded busy")
+holder.stdin.write("x"); holder.stdin.close(); assert holder.wait(timeout=10) == 0
+crash = subprocess.Popen([sys.executable, "-I", __file__, str(root), "crash"], stdout=subprocess.PIPE, text=True)
+assert crash.stdout.readline().strip() == "COMMIT_RETURNED"; assert crash.wait(timeout=10) == 0
+assert registry.inspect_migration().status == "ready"
+
+# SQLite-created operational files are allowed only with secure regular-file metadata.
+with sqlite3.connect(db) as connection:
+    connection.execute("BEGIN IMMEDIATE"); connection.execute('SELECT 1'); connection.rollback()
+for suffix in ("-wal", "-shm"):
+    path = Path(str(db) + suffix)
+    if path.exists(): assert (path.stat().st_mode & 0o077) == 0
+bad = Path(str(db) + "-wal")
+bad.unlink(missing_ok=True)
+bad.write_bytes(b"hostile"); bad.chmod(0o644)
+try:
+    registry.inspect_migration()
+except (StorageMigrationError, StorageUnavailable):
+    pass
+else:
+    raise AssertionError("hostile sidecar was accepted")
+bad.unlink(missing_ok=True)
+
+# Frozen R2 is embedded by the release script; fixture construction deliberately imports no R2.
+frozen_r1_ddl = __FROZEN_R1_DDL__
+frozen_r2_ddl = __FROZEN_R2_DDL__
+registry_policy_ddl = """CREATE TABLE "aipcs_registry_storage_policy" (
+    "singleton" INTEGER PRIMARY KEY NOT NULL CHECK ("singleton" = 1),
+    "policy_id" TEXT NOT NULL CHECK ("policy_id" = 'aipcs.sqlite.wal.v1'),
+    "policy_checksum" TEXT NOT NULL CHECK (
+        length("policy_checksum") = 64
+        AND "policy_checksum" = lower("policy_checksum")
+        AND "policy_checksum" NOT GLOB '*[^0-9a-f]*'
+    ),
+    "phase" TEXT NOT NULL CHECK ("phase" IN ('prepared', 'ready'))
+) STRICT"""
+registry_policy_checksum = "661d993c71dfe09a237e8f8018a9636b154ae5f9d39deabcbb8a55b6e49baade"
+def frozen_registry(mode):
+    fixture_root = root / ("registry-" + mode); fixture_root.mkdir(mode=0o700)
+    fixture_db = fixture_root / "registry.sqlite"
+    service_id = "00000000-0000-0000-0000-00000000000a"; at = "2026-01-01T00:00:00.000000Z"
+    result_json = json.dumps(
+        {
+            "service_id": service_id,
+            "principal_id": "frozen-principal",
+            "domain_name": "frozen_domain",
+            "domain_class": "release",
+            "intent_description": "frozen registry",
+            "created_at": at,
+            "updated_at": at,
+            "last_activity_at": at,
+            "manifest": None,
+            "schema_version": None,
+            "design_state": "seeded",
+            "operational_status": "active",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    with sqlite3.connect(fixture_db) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        for statement in frozen_r1_ddl[:2]: connection.execute(statement)
+        for statement in frozen_r2_ddl: connection.execute(statement)
+        connection.execute('INSERT INTO "aipcs_registry_meta" VALUES (1,?,?,?,?)', ("aipcs.sqlite.registry", "registry", 2, 1 if mode != "clean" else 0))
+        connection.executemany('INSERT INTO "aipcs_registry_migration" VALUES (?,?,?,?,?)', [("registry", 1, "registry-0001-initial", "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc", at), ("registry", 2, "registry-0002-durable-intent", "b6190247d4f709728bab59cb4eb5fd149d4b7424472615f377b83f5191e0d8ea", at)])
+        connection.execute('INSERT INTO "aipcs_registry_service" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (service_id, "frozen-principal", "frozen_domain", "release", "frozen registry", at, at, at, None, None, "seeded", "active", 1, None, None, None))
+        connection.execute('INSERT INTO "aipcs_registry_mutation" VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', ("frozen-principal", "frozen-key", "a" * 64, service_id, "legacy", "completed", None, None, None, None, result_json, None))
+        connection.execute('INSERT INTO "aipcs_registry_audit" VALUES (?,?,?,?,?,?,?)', (1, "seed", "created", service_id, "frozen-principal", "release", at))
+        if mode != "clean":
+            connection.execute(registry_policy_ddl)
+            connection.execute('INSERT INTO "aipcs_registry_storage_policy" VALUES (1,?,?,?)', ("aipcs.sqlite.wal.v1", registry_policy_checksum, "prepared"))
+    fixture_db.chmod(0o600)
+    if mode == "prepared-wal":
+        with sqlite3.connect(fixture_db) as connection: assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    frozen = SQLiteRegistryAdapter(SQLiteLocationPolicy(fixture_root))
+    outcome = frozen.migrate()
+    assert outcome == MigrationState("registry", 3, 3, "ready"), (mode, outcome)
+    assert frozen.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+    with sqlite3.connect(fixture_db) as connection:
+        assert connection.execute('SELECT "result_json" FROM "aipcs_registry_mutation"').fetchone() == (result_json,)
+        assert connection.execute('SELECT count(*),min("audit_id"),max("audit_id") FROM "aipcs_registry_audit"').fetchone() == (1, 1, 1)
+        assert connection.execute('SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" ORDER BY revision').fetchall() == [(1, "registry-0001-initial", "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc"), (2, "registry-0002-durable-intent", "b6190247d4f709728bab59cb4eb5fd149d4b7424472615f377b83f5191e0d8ea"), (3, "registry-0003-wal-policy", registry_policy_checksum)]
+        assert connection.execute('SELECT phase FROM "aipcs_registry_storage_policy"').fetchone() == ("ready",)
+for fixture_mode in ("clean", "prepared-delete", "prepared-wal"): frozen_registry(fixture_mode)
+
+catalog = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(root))
+locator = catalog.allocate(UUID(int=9))
+assert catalog.migrate(locator) == MigrationState("service_store", 2, 2, "ready")
+assert catalog.inspect_migration(locator) == MigrationState("service_store", 2, 2, "ready")
+service_db = root / "service-stores" / f"{locator.namespace}.sqlite"
+with sqlite3.connect(service_db) as connection:
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert connection.execute('SELECT phase FROM "__aipcs_service_store_policy"').fetchone() == ("ready",)
+
+# Independently constructed frozen service-store R1 / prepared DELETE / prepared WAL fixtures.
+service_r1_ddl = (
+"""CREATE TABLE "__aipcs_service_store_meta" (
+    "singleton" INTEGER PRIMARY KEY NOT NULL CHECK ("singleton" = 1),
+    "adapter_id" TEXT NOT NULL CHECK ("adapter_id" = 'aipcs.sqlite.service_store'),
+    "component" TEXT NOT NULL CHECK ("component" = 'service_store'),
+    "namespace" TEXT NOT NULL CHECK (
+        length("namespace") = 36 AND substr("namespace", 1, 4) = 'svc_'
+        AND "namespace" = lower("namespace")
+        AND substr("namespace", 5) NOT GLOB '*[^0-9a-f]*'
+    ),
+    "applied_revision" INTEGER NOT NULL CHECK ("applied_revision" >= 0),
+    "dirty" INTEGER NOT NULL CHECK ("dirty" IN (0, 1))
+) STRICT""",
+"""CREATE TABLE "__aipcs_service_store_migration" (
+    "component" TEXT NOT NULL CHECK ("component" = 'service_store'),
+    "revision" INTEGER NOT NULL CHECK ("revision" > 0),
+    "migration_id" TEXT NOT NULL CHECK (length("migration_id") BETWEEN 1 AND 96),
+    "checksum" TEXT NOT NULL CHECK (
+        length("checksum") = 64 AND "checksum" = lower("checksum")
+        AND "checksum" NOT GLOB '*[^0-9a-f]*'
+    ),
+    "applied_at" TEXT NOT NULL CHECK (
+        length("applied_at") = 27 AND substr("applied_at", 11, 1) = 'T'
+        AND substr("applied_at", 20, 1) = '.' AND substr("applied_at", 27, 1) = 'Z'
+    ),
+    PRIMARY KEY ("component", "revision"),
+    UNIQUE ("component", "migration_id")
+) STRICT""")
+service_policy_ddl = """CREATE TABLE "__aipcs_service_store_policy" (
+    "singleton" INTEGER PRIMARY KEY NOT NULL CHECK ("singleton" = 1),
+    "policy_id" TEXT NOT NULL CHECK ("policy_id" = 'aipcs.sqlite.wal.v1'),
+    "policy_checksum" TEXT NOT NULL CHECK (
+        length("policy_checksum") = 64
+        AND "policy_checksum" = lower("policy_checksum")
+        AND "policy_checksum" NOT GLOB '*[^0-9a-f]*'
+    ),
+    "phase" TEXT NOT NULL CHECK ("phase" IN ('prepared', 'ready'))
+) STRICT"""
+service_r1_checksum = "e56f32848bf4f5b762abe4a164e5869658360408d908da73a6b75d8f52c42f1b"
+service_policy_checksum = "d639ef1e1a897e6eaa5109676417f4ab1bc9bbd7a56ce798eee8e2816ce4d8f5"
+def frozen_service(mode):
+    fixture_root = root / ("service-" + mode); fixture_root.mkdir(mode=0o700)
+    namespace = "svc_0000000000000000000000000000000a"
+    fixture_db = fixture_root / "service-stores" / (namespace + ".sqlite")
+    fixture_db.parent.mkdir(mode=0o700)
+    with sqlite3.connect(fixture_db) as connection:
+        for statement in service_r1_ddl: connection.execute(statement)
+        connection.execute('CREATE TABLE "note" ("id" TEXT PRIMARY KEY, "body" TEXT NOT NULL) STRICT')
+        connection.execute('INSERT INTO "note" VALUES (?,?)', ("frozen-note", "byte-preserved"))
+        connection.execute('INSERT INTO "__aipcs_service_store_meta" VALUES (1,?,?,?,?,?)', ("aipcs.sqlite.service_store", "service_store", namespace, 1, 1 if mode != "clean" else 0))
+        connection.execute('INSERT INTO "__aipcs_service_store_migration" VALUES (?,?,?,?,?)', ("service_store", 1, "service-store-0001-foundation", service_r1_checksum, "2026-01-01T00:00:00.000000Z"))
+        if mode != "clean":
+            connection.execute(service_policy_ddl)
+            connection.execute('INSERT INTO "__aipcs_service_store_policy" VALUES (1,?,?,?)', ("aipcs.sqlite.wal.v1", service_policy_checksum, "prepared"))
+    fixture_db.chmod(0o600)
+    if mode == "prepared-wal":
+        with sqlite3.connect(fixture_db) as connection: assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    frozen = SQLiteServiceStoreCatalog(SQLiteLocationPolicy(fixture_root))
+    fixture_locator = frozen.allocate(UUID(hex=namespace[4:]))
+    outcome = frozen.migrate(fixture_locator)
+    assert outcome == MigrationState("service_store", 2, 2, "ready"), (mode, outcome)
+    assert frozen.inspect_migration(fixture_locator) == MigrationState("service_store", 2, 2, "ready")
+    with sqlite3.connect(fixture_db) as connection:
+        assert connection.execute('SELECT "body" FROM "note"').fetchone() == ("byte-preserved",)
+        assert connection.execute('SELECT revision,migration_id,checksum FROM "__aipcs_service_store_migration" ORDER BY revision').fetchall() == [(1, "service-store-0001-foundation", service_r1_checksum), (2, "service-store-0002-wal-policy", service_policy_checksum)]
+        assert connection.execute('SELECT phase FROM "__aipcs_service_store_policy"').fetchone() == ("ready",)
+for fixture_mode in ("clean", "prepared-delete", "prepared-wal"): frozen_service(fixture_mode)
+'''
+    return (
+        program.replace("__FROZEN_R1_DDL__", repr(_FROZEN_R1_DDL))
+        .replace("__FROZEN_R2_DDL__", repr(_FROZEN_R2_DDL))
+    )
+
+
+def run_installed_wal_release_smoke(
+    python: Path, workspace: Path, name: str, *, environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Run the one bounded installed WAL/process/restart proof per artifact."""
+
+    client = workspace / f"{name}-wal-release-smoke.py"
+    client.write_text(_wal_release_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"{name}-wal-release-cwd"
+    cwd.mkdir(mode=0o700)
+    run_stage(
+        f"installed {name} WAL release smoke",
+        [python, "-I", client, workspace / f"{name}-wal-root"],
         cwd=cwd,
         environment=environment,
         timeout=SMOKE_TIMEOUT_SECONDS,
@@ -2597,6 +2905,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_wal_release_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_wheel_restart_principal_smoke(
             wheel_python,
             workspace,
@@ -2650,6 +2965,13 @@ def verify_release(root: Path = ROOT, *, keep_failed_workdir: bool = False) -> N
             redaction_roots=redaction_roots,
         )
         run_installed_registry_r2_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_wal_release_smoke(
             sdist_python,
             workspace,
             "sdist",

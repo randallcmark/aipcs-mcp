@@ -37,7 +37,11 @@ from aipcs_mcp.lifecycle import (
     lifecycle_fingerprint,
     prepare_intent,
 )
-from aipcs_mcp.storage.errors import StorageMigrationError
+from aipcs_mcp.storage.errors import (
+    StorageBusy,
+    StorageMigrationError,
+    StorageUnavailable,
+)
 
 from .codecs import (
     decode_legacy_result,
@@ -50,6 +54,8 @@ from .codecs import (
     encode_time,
 )
 from .connection import set_query_only
+from .location import AnchoredLocation
+from .result_codes import is_sqlite_busy
 
 
 def _bounded_uow[**P, R](method: Callable[P, R]) -> Callable[P, R]:
@@ -57,18 +63,28 @@ def _bounded_uow[**P, R](method: Callable[P, R]) -> Callable[P, R]:
     def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return method(*args, **kwargs)
-        except Exception:
-            pass
-        raise StorageMigrationError() from None
+        except StorageBusy:
+            failure: Exception = StorageBusy()
+        except StorageUnavailable:
+            failure = StorageUnavailable()
+        except StorageMigrationError:
+            failure = StorageMigrationError()
+        except Exception as error:
+            failure = StorageBusy() if is_sqlite_busy(error) else StorageMigrationError()
+        raise failure from None
 
     return wrapped
 
 
 class SQLiteRegistryUnitOfWork:
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: sqlite3.Connection, location: AnchoredLocation) -> None:
+        if not isinstance(location, AnchoredLocation):
+            raise StorageUnavailable()
         self._connection = connection
+        self._location = location
         self._closed = False
         self._terminal = False
+        self._write_transaction = False
         self.services = self
         self.mutations = self
         self.audits = self
@@ -77,15 +93,42 @@ class SQLiteRegistryUnitOfWork:
         if self._closed or self._terminal:
             raise StorageMigrationError()
 
-    def _write(self) -> None:
+    def _verify_live(self) -> None:
+        self._location.verify_live_database_identity()
+        self._location.verify_live_sidecars(allow_journal=False)
+
+    def _read(self) -> None:
         self._open()
         if not self._connection.in_transaction:
+            self._verify_live()
+            self._connection.execute("BEGIN")
+            self._verify_live()
+
+    def _write(self) -> None:
+        self._open()
+        if self._connection.in_transaction and not self._write_transaction:
+            # A read-only UoW owns a stable deferred snapshot. SQLite cannot
+            # safely upgrade that snapshot in place, so release it before
+            # acquiring the writer slot; repository write methods then
+            # re-read any required state under BEGIN IMMEDIATE.
+            self._verify_live()
+            self._connection.rollback()
+            self._verify_live()
+        if not self._connection.in_transaction:
+            self._verify_live()
             set_query_only(self._connection, False)
-            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+            except Exception:
+                self._location.adopt_live_sidecars(allow_journal=False)
+                raise
+            self._location.adopt_live_sidecars(allow_journal=False)
+            self._verify_live()
+            self._write_transaction = True
 
     @_bounded_uow
     def find_domain(self, principal_id: str, domain_name: str) -> Service | None:
-        self._open()
+        self._read()
         row = self._connection.execute(
             'SELECT * FROM "aipcs_registry_service" WHERE "principal_id"=? AND "domain_name"=?',
             (principal_id, domain_name),
@@ -94,7 +137,7 @@ class SQLiteRegistryUnitOfWork:
 
     @_bounded_uow
     def get(self, principal_id: str, service_id: UUID) -> Service | None:
-        self._open()
+        self._read()
         row = self._connection.execute(
             'SELECT * FROM "aipcs_registry_service" WHERE "principal_id"=? AND "service_id"=?',
             (principal_id, str(service_id)),
@@ -103,7 +146,7 @@ class SQLiteRegistryUnitOfWork:
 
     @_bounded_uow
     def list(self, principal_id: str, limit: int) -> list[Service]:
-        self._open()
+        self._read()
         rows = self._connection.execute(
             'SELECT * FROM "aipcs_registry_service" WHERE "principal_id"=? '
             'ORDER BY "created_at" ASC, "service_id" ASC LIMIT ?',
@@ -496,32 +539,52 @@ class SQLiteRegistryUnitOfWork:
     @_bounded_uow
     def commit(self) -> None:
         self._open()
+        self._verify_live()
         self._connection.commit()
+        self._verify_live()
         self._terminal = True
 
     @_bounded_uow
     def rollback(self) -> None:
         if self._closed or self._terminal:
             return
+        self._verify_live()
         self._connection.rollback()
+        self._verify_live()
         self._terminal = True
 
     @_bounded_uow
     def close(self) -> None:
         if self._closed:
             return
-        failed = False
+        failure: Exception | None = None
         try:
             if not self._terminal and self._connection.in_transaction:
+                self._verify_live()
                 self._connection.rollback()
-        except Exception:
-            failed = True
+                self._verify_live()
+            self._verify_live()
+        except StorageUnavailable:
+            failure = StorageUnavailable()
+        except Exception as error:
+            failure = StorageBusy() if is_sqlite_busy(error) else StorageMigrationError()
         try:
             self._connection.close()
+        except Exception as error:
+            if failure is None:
+                failure = StorageBusy() if is_sqlite_busy(error) else StorageMigrationError()
+        try:
+            self._location.verify_database_identity()
+            self._location.verify_closed_sidecars(allow_journal=False)
         except Exception:
-            failed = True
+            failure = StorageUnavailable()
+        try:
+            self._location.close()
+        except Exception:
+            if failure is None:
+                failure = StorageUnavailable()
         finally:
             self._closed = True
             self._terminal = True
-        if failed:
-            raise StorageMigrationError()
+        if failure is not None:
+            raise failure

@@ -11,7 +11,7 @@ from functools import wraps
 from aipcs_mcp.application.models import Service
 from aipcs_mcp.application.ports import RegistryUnitOfWork
 from aipcs_mcp.storage.contracts import MigrationState, StorageAdapterInfo
-from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
+from aipcs_mcp.storage.errors import StorageBusy, StorageMigrationError, StorageUnavailable
 
 from .codecs import (
     decode_r1_service,
@@ -23,19 +23,23 @@ from .codecs import (
     validate_r1_mutation_row,
     validate_r2_mutation_row,
 )
-from .connection import connect
+from .connection import (
+    SQLiteConnectionPolicy,
+    SQLiteConnectionPurpose,
+    connect,
+    require_supported_sqlite_runtime,
+)
 from .location import AnchoredLocation, SQLiteLocationPolicy, create_database
 from .migrations import (
-    EXPECTED_SQL,
-    FOREIGN_KEYS,
-    INDEX_LIST,
-    INDEX_XINFO,
     R1,
     R2,
-    TABLE_XINFO,
+    R3,
+    R3_POLICY,
     TARGET_REVISION,
 )
+from .result_codes import is_sqlite_busy
 from .uow import SQLiteRegistryUnitOfWork
+from .wal_policy import WAL_POLICY_ID, WALPolicyEvidence, WALPolicyState, classify_wal_policy
 
 
 def _bounded_adapter[**P, R](method: Callable[P, R]) -> Callable[P, R]:
@@ -43,22 +47,26 @@ def _bounded_adapter[**P, R](method: Callable[P, R]) -> Callable[P, R]:
     def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return method(*args, **kwargs)
+        except StorageBusy:
+            failure: Exception = StorageBusy()
         except StorageUnavailable:
             failure = StorageUnavailable()
         except StorageMigrationError:
             failure = StorageMigrationError()
-        except Exception:
-            failure = StorageMigrationError()
+        except Exception as error:
+            failure = StorageBusy() if is_sqlite_busy(error) else StorageMigrationError()
         raise failure from None
 
     return wrapped
 
 
 class SQLiteRegistryAdapter:
-    def __init__(self, location: SQLiteLocationPolicy) -> None:
+    def __init__(self, location: SQLiteLocationPolicy, *, busy_timeout_ms: int = 5_000) -> None:
+        require_supported_sqlite_runtime()
         if not isinstance(location, SQLiteLocationPolicy):
             raise StorageUnavailable()
         self._location = location
+        self._connection_policy = SQLiteConnectionPolicy(busy_timeout_ms)
 
     def __repr__(self) -> str:
         return "SQLiteRegistryAdapter(<redacted>)"
@@ -76,63 +84,65 @@ class SQLiteRegistryAdapter:
                 return _state(0, "uninitialised")
             if anchored._database_stat.st_size == 0:
                 return _state(0, "uninitialised")
-            connection = connect(anchored, "ro", query_only=True)
-            return _inspect_connection(connection, integrity=True)
+            connection = connect(
+                anchored,
+                "ro",
+                query_only=True,
+                policy=self._connection_policy,
+                purpose=SQLiteConnectionPurpose.POLICY_INSPECTION,
+            )
+            connection.execute("BEGIN")
+            try:
+                return _inspect_connection(connection, integrity=True)
+            finally:
+                connection.rollback()
         finally:
-            _close(connection, anchored)
+            _close(connection, anchored, allow_journal=False)
 
     @_bounded_adapter
     def migrate(self) -> MigrationState:
         anchored: AnchoredLocation | None = None
         connection: sqlite3.Connection | None = None
         try:
-            anchored = self._location.acquire(create_root=True, allow_journal=True)
-            if anchored is None:
-                raise StorageUnavailable()
-            if anchored.journal_present:
-                if anchored._database_stat is None:
-                    raise StorageUnavailable()
-                connection = connect(anchored, "rw", query_only=False)
-                connection.execute("SELECT 1").fetchone()
-                connection.close()
-                connection = None
-                anchored.close()
-                anchored = None
-                anchored = self._location.acquire(create_root=True, allow_journal=False)
-                if anchored is None:
-                    raise StorageUnavailable()
-            upgrade_r1 = False
-            if anchored._database_stat is None:
-                anchored._database_stat = create_database(anchored._root_fd)
-            elif anchored._database_stat.st_size:
-                connection = connect(anchored, "rw", query_only=False)
-                state = _inspect_connection(connection, integrity=True)
-                upgrade_r1 = _is_exact_upgradeable_r1(connection)
-                connection.close()
-                connection = None
-                if state.status == "ready":
-                    return state
-                if not upgrade_r1:
-                    return state
-            connection = connect(anchored, "rw", query_only=False)
-            connection.execute("BEGIN EXCLUSIVE")
-            if upgrade_r1:
-                if not _is_exact_upgradeable_r1(connection):
-                    raise StorageMigrationError()
-            else:
+            anchored = self._acquire_for_migration()
+            connection = self._migration_connection(anchored)
+            connection.execute("BEGIN IMMEDIATE")
+            action = _prepare_under_writer_lock(connection)
+            if action == "ready":
+                connection.rollback()
+            elif action == "prepare":
+                _prepare_r3(connection)
+                _require_policy_state(connection, WALPolicyState.PREPARED_DELETE)
+                connection.commit()
+            elif action == "fresh":
                 _create_r1(connection)
-            _upgrade_r1_to_r2(connection)
-            if _inspect_connection(connection, integrity=True).status != "ready":
+                _upgrade_r1_to_r2(connection)
+                _prepare_r3(connection)
+                _require_policy_state(connection, WALPolicyState.PREPARED_DELETE)
+                connection.commit()
+            elif action == "legacy_r1":
+                _upgrade_r1_to_r2(connection)
+                _prepare_r3(connection)
+                _require_policy_state(connection, WALPolicyState.PREPARED_DELETE)
+                connection.commit()
+            elif action in {"prepared_delete", "prepared_wal"}:
+                connection.rollback()
+            elif action == "incompatible":
+                connection.rollback()
+                return _inspect_connection(connection, integrity=True)
+            else:
                 raise StorageMigrationError()
-            connection.commit()
-            connection.close()
+            _close(connection, anchored, allow_journal=False)
             connection = None
-            anchored.verify_database_identity()
-            anchored.close()
             anchored = None
-            return self.inspect_migration()
+
+            if action in {"fresh", "legacy_r1", "prepare", "prepared_delete"}:
+                self._switch_prepared_delete_to_wal()
+            if action != "ready":
+                self._finalise_prepared_wal()
+            return self._checkpoint_and_observe_ready()
         finally:
-            _close(connection, anchored)
+            _close(connection, anchored, allow_journal=True)
 
     @_bounded_adapter
     def open_uow(self) -> RegistryUnitOfWork:
@@ -142,16 +152,115 @@ class SQLiteRegistryAdapter:
             anchored = self._location.acquire(create_root=False, allow_journal=False)
             if anchored is None or anchored._database_stat is None:
                 raise StorageUnavailable()
-            connection = connect(anchored, "rw", query_only=True)
-            if _inspect_connection(connection, integrity=False).status != "ready":
-                raise StorageMigrationError()
-            anchored.close()
-            anchored = None
-            result = SQLiteRegistryUnitOfWork(connection)
+            connection = connect(
+                anchored,
+                "rw",
+                query_only=True,
+                policy=self._connection_policy,
+                purpose=SQLiteConnectionPurpose.READY_UNIT_OF_WORK,
+            )
+            connection.execute("BEGIN")
+            try:
+                if _inspect_connection(connection, integrity=False).status != "ready":
+                    raise StorageMigrationError()
+            finally:
+                connection.rollback()
+            result = SQLiteRegistryUnitOfWork(connection, anchored)
             connection = None
+            anchored = None
             return result
         finally:
             _close(connection, anchored)
+
+    def _acquire_for_migration(self) -> AnchoredLocation:
+        anchored = self._location.acquire(create_root=True, allow_journal=True)
+        if anchored is None:
+            raise StorageUnavailable()
+        if anchored.journal_present:
+            if anchored._database_stat is None:
+                raise StorageUnavailable()
+            connection = self._migration_connection(anchored)
+            connection.execute("SELECT 1").fetchone()
+            _close(connection, anchored, allow_journal=True)
+            anchored = self._location.acquire(create_root=True, allow_journal=False)
+            if anchored is None:
+                raise StorageUnavailable()
+        if anchored._database_stat is None:
+            anchored._database_stat = create_database(anchored._root_fd)
+        return anchored
+
+    def _migration_connection(self, anchored: AnchoredLocation) -> sqlite3.Connection:
+        return connect(
+            anchored,
+            "rw",
+            query_only=False,
+            policy=self._connection_policy,
+            purpose=SQLiteConnectionPurpose.MIGRATION,
+        )
+
+    def _switch_prepared_delete_to_wal(self) -> None:
+        anchored = self._location.acquire(create_root=True, allow_journal=False)
+        connection: sqlite3.Connection | None = None
+        try:
+            if anchored is None or anchored._database_stat is None:
+                raise StorageUnavailable()
+            connection = self._migration_connection(anchored)
+            _require_policy_state(connection, WALPolicyState.PREPARED_DELETE)
+            row = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+            if row is None or row[0] != "wal":
+                raise StorageMigrationError()
+            _require_policy_state(connection, WALPolicyState.PREPARED_WAL)
+            anchored.adopt_live_sidecars(allow_journal=False)
+            anchored.verify_live_sidecars(allow_journal=False)
+        finally:
+            _close(connection, anchored, allow_journal=False)
+
+    def _finalise_prepared_wal(self) -> None:
+        anchored = self._location.acquire(create_root=True, allow_journal=False)
+        connection: sqlite3.Connection | None = None
+        try:
+            if anchored is None or anchored._database_stat is None:
+                raise StorageUnavailable()
+            connection = self._migration_connection(anchored)
+            connection.execute("BEGIN IMMEDIATE")
+            state = _wal_state(connection)
+            if state is WALPolicyState.READY_WAL:
+                connection.rollback()
+                return
+            if state is not WALPolicyState.PREPARED_WAL:
+                raise StorageMigrationError()
+            connection.execute(
+                f'UPDATE "{R3_POLICY.table_name}" SET "phase"=\'ready\' WHERE "singleton"=1'
+            )
+            connection.execute(
+                'INSERT INTO "aipcs_registry_migration" VALUES (?,?,?,?,?)',
+                ("registry", R3.revision, R3.migration_id, R3.checksum, encode_time(datetime.now(UTC))),
+            )
+            connection.execute(
+                'UPDATE "aipcs_registry_meta" SET "applied_revision"=?,"dirty"=0 '
+                'WHERE "singleton"=1',
+                (R3.revision,),
+            )
+            _require_policy_state(connection, WALPolicyState.READY_WAL)
+            connection.commit()
+        finally:
+            _close(connection, anchored)
+
+    def _checkpoint_and_observe_ready(self) -> MigrationState:
+        anchored = self._location.acquire(create_root=False, allow_journal=False)
+        connection: sqlite3.Connection | None = None
+        try:
+            if anchored is None or anchored._database_stat is None:
+                raise StorageUnavailable()
+            connection = self._migration_connection(anchored)
+            _require_policy_state(connection, WALPolicyState.READY_WAL)
+            _checkpoint_passive(connection)
+        finally:
+            _close(connection, anchored)
+        state = self.inspect_migration()
+        if state.status != "ready":
+            raise StorageMigrationError()
+        return state
 
 
 def _create_r1(connection: sqlite3.Connection) -> None:
@@ -238,7 +347,9 @@ def _is_exact_upgradeable_r1(connection: sqlite3.Connection) -> bool:
             validate_r1_mutation_row(row)
         for row in connection.execute('SELECT * FROM "aipcs_registry_audit"'):
             validate_r1_audit_row(row)
-    except Exception:
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise
         return False
     return True
 
@@ -274,16 +385,119 @@ def _inspect_connection(connection: sqlite3.Connection, *, integrity: bool) -> M
         ):
             return _state(revision, "dirty")
         return _state(revision, "incompatible")
-    descriptor = R1 if revision == 1 else R2 if revision == 2 else None
+    descriptor = R1 if revision == 1 else R2 if revision == 2 else R3 if revision == 3 else None
     if descriptor is None:
         return _state(revision, "incompatible")
-    history_ok = _history_prefix(connection, by_name, revision)
-    layout_ok = _layout_matches(connection, by_name, descriptor, integrity=integrity)
-    if dirty == 1 and history_ok and layout_ok:
-        return _state(revision, "dirty")
-    if dirty != 0 or revision != TARGET_REVISION or not history_ok:
+    if revision == 1:
+        history_ok = _history_prefix(connection, by_name, revision)
+        layout_ok = _layout_matches(connection, by_name, descriptor, integrity=integrity)
+        if dirty == 1 and history_ok and layout_ok:
+            return _state(revision, "dirty")
         return _state(revision, "incompatible")
-    return _state(revision, "ready" if layout_ok else "incompatible")
+    state = _wal_state(connection, by_name=by_name, integrity=integrity)
+    if state is WALPolicyState.READY_WAL:
+        return _state(R3.revision, "ready")
+    if state in {WALPolicyState.PREPARED_DELETE, WALPolicyState.PREPARED_WAL}:
+        return _state(R2.revision, "dirty")
+    return _state(revision, "incompatible")
+
+
+def _prepare_under_writer_lock(connection: sqlite3.Connection) -> str:
+    """Classify again after BEGIN IMMEDIATE; never act on a stale observation."""
+
+    by_name = _objects(connection)
+    if not by_name:
+        return "fresh"
+    meta = _meta(connection, by_name)
+    if meta == (R1.revision, 0) and _is_exact_upgradeable_r1(connection):
+        return "legacy_r1"
+    state = _wal_state(connection, by_name=by_name, integrity=True)
+    if state is WALPolicyState.CLEAN_PREDECESSOR:
+        return "prepare"
+    if state is WALPolicyState.PREPARED_DELETE:
+        return "prepared_delete"
+    if state is WALPolicyState.PREPARED_WAL:
+        return "prepared_wal"
+    if state is WALPolicyState.READY_WAL:
+        return "ready"
+    return "incompatible"
+
+
+def _prepare_r3(connection: sqlite3.Connection) -> None:
+    connection.execute(R3_POLICY.ddl)
+    connection.execute(
+        f'INSERT INTO "{R3_POLICY.table_name}" VALUES (?,?,?,?)',
+        (1, WAL_POLICY_ID, R3_POLICY.checksum, "prepared"),
+    )
+    connection.execute('UPDATE "aipcs_registry_meta" SET "dirty"=1 WHERE "singleton"=1')
+
+
+def _require_policy_state(connection: sqlite3.Connection, expected: WALPolicyState) -> None:
+    if _wal_state(connection) is not expected:
+        raise StorageMigrationError()
+
+
+def _wal_state(
+    connection: sqlite3.Connection,
+    *,
+    by_name: dict[str, sqlite3.Row] | None = None,
+    integrity: bool = True,
+) -> WALPolicyState:
+    try:
+        by_name = _objects(connection) if by_name is None else by_name
+        meta = _meta(connection, by_name)
+        if meta is None:
+            return WALPolicyState.INCOMPATIBLE
+        revision, dirty = meta
+        policy_object = by_name.get(R3_POLICY.table_name)
+        rows: tuple[tuple[object, ...], ...] = ()
+        if policy_object is not None:
+            rows = tuple(
+                tuple(row)
+                for row in connection.execute(
+                    f'SELECT singleton,policy_id,policy_checksum,phase '
+                    f'FROM "{R3_POLICY.table_name}"'
+                )
+            )
+        descriptor = R3 if policy_object is not None else R2
+        evidence = WALPolicyEvidence(
+            revision=revision,
+            dirty=dirty,
+            journal_mode=connection.execute("PRAGMA journal_mode").fetchone()[0],
+            layout_matches=_layout_matches(connection, by_name, descriptor, integrity=integrity),
+            history_matches=_history_prefix(connection, by_name, revision),
+            policy_table_sql=None if policy_object is None else policy_object["sql"],
+            policy_rows=rows,
+        )
+        return classify_wal_policy(
+            evidence,
+            predecessor_revision=R2.revision,
+            target_revision=R3.revision,
+            descriptor=R3_POLICY,
+        )
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise
+        return WALPolicyState.INCOMPATIBLE
+
+
+def _checkpoint_passive(connection: sqlite3.Connection) -> None:
+    row = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+    if row is None or len(row) != 3 or any(type(value) is not int for value in row):
+        raise StorageMigrationError()
+    busy, log_frames, checkpointed_frames = row
+    if busy == 1:
+        raise StorageBusy()
+    if busy != 0:
+        raise StorageMigrationError()
+    if (log_frames, checkpointed_frames) == (-1, -1):
+        return
+    if (
+        log_frames < 0
+        or checkpointed_frames < 0
+        or checkpointed_frames > log_frames
+    ):
+        raise StorageMigrationError()
 
 
 def _meta(
@@ -301,7 +515,9 @@ def _meta(
         if type(revision) is not int or revision < 0 or dirty not in (0, 1):
             return None
         return revision, dirty
-    except Exception:
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise
         return None
 
 
@@ -324,7 +540,7 @@ def _history_prefix(
             "SELECT component,revision,migration_id,checksum,applied_at "
             'FROM "aipcs_registry_migration" ORDER BY revision'
         ).fetchall()
-        descriptors = (R1, R2)
+        descriptors = (R1, R2, R3)
         if revision > len(descriptors) or len(rows) != revision:
             return False
         for row, descriptor in zip(rows, descriptors[:revision], strict=True):
@@ -346,8 +562,6 @@ def _history_prefix(
 
 
 def _descriptor_maps(descriptor):
-    if descriptor is R2:
-        return EXPECTED_SQL, TABLE_XINFO, FOREIGN_KEYS, INDEX_LIST, INDEX_XINFO
     return (
         descriptor.expected_sql,
         descriptor.table_xinfo,
@@ -375,8 +589,9 @@ def _layout_matches(
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             return False
         _quick_check(connection)
-        if descriptor is R2 and not _r2_data_matches(connection):
-            return False
+        if descriptor is R2 or descriptor is R3:
+            if not _r2_data_matches(connection):
+                return False
     return True
 
 
@@ -436,7 +651,9 @@ def _r2_data_matches(connection: sqlite3.Connection) -> bool:
             'GROUP BY "principal_id" HAVING count(*) > 1000 LIMIT 1'
         ).fetchone() is not None:
             return False
-    except Exception:
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise
         return False
     return True
 
@@ -473,7 +690,9 @@ def _signatures(connection: sqlite3.Connection, descriptor=R2) -> bool:
             if tuple(map(tuple, rows)) != expected:
                 return False
         return True
-    except Exception:
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise
         return False
 
 
@@ -490,7 +709,9 @@ def _quick_check(connection: sqlite3.Connection) -> None:
         row = connection.execute("PRAGMA quick_check(1)").fetchone()
         if row is None or row[0] != "ok":
             raise ValueError
-    except Exception:
+    except Exception as error:
+        if is_sqlite_busy(error):
+            raise StorageBusy() from None
         failure = StorageMigrationError()
     else:
         return
@@ -504,10 +725,45 @@ def _state(revision: int, status: str) -> MigrationState:
     return MigrationState("registry", revision, TARGET_REVISION, status)  # type: ignore[arg-type]
 
 
-def _close(connection: sqlite3.Connection | None, location: AnchoredLocation | None) -> None:
+def _close(
+    connection: sqlite3.Connection | None,
+    location: AnchoredLocation | None,
+    *,
+    allow_journal: bool = False,
+) -> None:
+    """Release a live SQLite handle only after its anchored state is rechecked."""
+
+    failure: BaseException | None = None
+    if location is not None and location._database_stat is not None and connection is not None:
+        try:
+            location.verify_live_database_identity()
+            if allow_journal:
+                location.validate_sidecars(allow_journal=True)
+            else:
+                location.verify_live_sidecars(allow_journal=False)
+        except Exception as error:
+            failure = error
     if connection is not None:
-        with suppress(Exception):
+        try:
             connection.close()
+        except Exception as error:
+            if failure is None:
+                failure = error
     if location is not None:
-        with suppress(Exception):
-            location.close()
+        try:
+            if location._database_stat is not None:
+                location.verify_database_identity()
+                location.verify_closed_sidecars(allow_journal=False)
+        except Exception as error:
+            # Metadata/identity violations dominate a concurrent SQLite error.
+            failure = error
+        finally:
+            try:
+                location.close()
+            except Exception as error:
+                if failure is None:
+                    failure = error
+    if failure is not None:
+        if is_sqlite_busy(failure):
+            raise StorageBusy() from None
+        raise StorageUnavailable() from None

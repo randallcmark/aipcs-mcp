@@ -21,7 +21,9 @@ from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _config(root: Path | None, *, profile: str = "sqlite") -> ResolvedConfiguration:
+def _config(
+    root: Path | None, *, profile: str = "sqlite", busy_timeout_ms: int = 5000
+) -> ResolvedConfiguration:
     return ResolvedConfiguration(
         profile=profile,  # type: ignore[arg-type]
         transport="stdio",
@@ -34,9 +36,11 @@ def _config(root: Path | None, *, profile: str = "sqlite") -> ResolvedConfigurat
             "transport": "default",
             "principal_id": "cli" if root is not None else "default",
             "sqlite_data_root": "cli" if root is not None else "default",
+            "sqlite_busy_timeout_ms": "default",
             "postgres_dsn_env": "default",
             "log_level": "default",
         },
+        sqlite_busy_timeout_ms=busy_timeout_ms,
     )
 
 
@@ -70,8 +74,9 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
             return object()
 
     class Adapter:
-        def __init__(self, location: object) -> None:
+        def __init__(self, location: object, *, busy_timeout_ms: int) -> None:
             assert location is not None
+            assert busy_timeout_ms == 123
             calls.append("adapter")
 
         def migrate(self) -> MigrationState:
@@ -84,7 +89,7 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
 
     monkeypatch.setattr(runtime, "SQLiteLocationPolicy", Location)
     monkeypatch.setattr(runtime, "SQLiteRegistryAdapter", Adapter)
-    server = runtime.compose_server(_config(root))
+    server = runtime.compose_server(_config(root, busy_timeout_ms=123))
     assert calls == ["location", "adapter", "migrate"]
     assert anyio.run(_tool_names, server) == [
         "aipcs_server_info",
@@ -109,7 +114,7 @@ def test_non_ready_sqlite_fails_before_mcp_construction(
             return object()
 
     class Adapter:
-        def __init__(self, location: object) -> None:
+        def __init__(self, location: object, *, busy_timeout_ms: int) -> None:
             pass
 
         def migrate(self) -> MigrationState:
@@ -127,6 +132,19 @@ def test_non_ready_sqlite_fails_before_mcp_construction(
     with pytest.raises(RuntimeError, match="Registry is not ready"):
         runtime.compose_server(_config(root))
     assert called is False
+
+
+def test_unsupported_sqlite_runtime_fails_before_location_or_adapter_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runtime, "is_supported_sqlite_runtime", lambda: False)
+    monkeypatch.setattr(
+        runtime,
+        "SQLiteLocationPolicy",
+        type("UnexpectedLocation", (), {"from_resolved": lambda *_: (_ for _ in ()).throw(AssertionError)}),
+    )
+    with pytest.raises(RuntimeError, match="Unsupported runtime profile"):
+        runtime.compose_server(_config(tmp_path / "root"))
 
 
 def _run_bad_startup(root: Path) -> subprocess.CompletedProcess[str]:
