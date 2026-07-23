@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from functools import wraps
 from uuid import UUID
 
+from aipcs_mcp.storage.codecs import encode_time
 from aipcs_mcp.storage.contracts import MigrationState, ServiceStoreLocator, StorageAdapterInfo
 from aipcs_mcp.storage.errors import (
     StorageBusy,
@@ -19,7 +20,6 @@ from aipcs_mcp.storage.errors import (
 )
 
 from . import service_store_inspection
-from .codecs import encode_time
 from .connection import (
     SQLiteConnectionPolicy,
     SQLiteConnectionPurpose,

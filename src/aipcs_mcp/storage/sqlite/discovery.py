@@ -35,9 +35,9 @@ from aipcs_mcp.records import (
     ServiceSummary,
     SummaryQuery,
 )
+from aipcs_mcp.storage.codecs import decode_time, encode_time
 from aipcs_mcp.storage.errors import StorageUnavailable
 
-from .codecs import decode_time, encode_time
 from .service_store_migrations import R3_BRANCH_TABLE, R3_RECORD_BRANCH_TABLE
 
 _AUTHORITY_FIELDS = frozenset(

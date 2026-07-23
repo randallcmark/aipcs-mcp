@@ -55,6 +55,7 @@ from aipcs_mcp.records import (
     UpdateBranchCommand,
     UpdateRecordCommand,
 )
+from aipcs_mcp.storage.codecs import decode_time, encode_time
 from aipcs_mcp.storage.contracts import ServiceStoreLocator
 from aipcs_mcp.storage.errors import (
     StorageBusy,
@@ -64,7 +65,6 @@ from aipcs_mcp.storage.errors import (
 )
 
 from . import discovery, service_store_inspection
-from .codecs import decode_time, encode_time
 from .connection import (
     SQLiteConnectionPolicy,
     SQLiteConnectionPurpose,

@@ -36,8 +36,8 @@ from aipcs_mcp.records import (
     RecordSpecification,
     UpdateBranchCommand,
 )
+from aipcs_mcp.storage.codecs import decode_time, encode_time
 
-from .codecs import decode_time, encode_time
 from .service_store_migrations import (
     R3_BRANCH_TABLE,
     R3_HISTORY_TABLE,

@@ -1,4 +1,4 @@
-"""Minimal storage vocabulary shared by future reference adapters.
+"""Minimal storage vocabulary shared by reference adapters.
 
 These values deliberately describe logical backend state only. They do not
 accept or retain a filesystem path, connection location, credential, SQL

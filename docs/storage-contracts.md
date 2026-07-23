@@ -6,9 +6,11 @@ failure categories, and explicit transaction ownership. Paths, DSNs, SQL,
 connections, cursors, driver exceptions, filesystem layouts, and migration
 table names are private adapter details.
 
-SQLite is the current implementation. PostgreSQL is deferred; its future
-adapter must preserve the behavioral contract rather than reproduce SQLite
-DDL.
+SQLite is the default local reference implementation. PostgreSQL is the
+supported generic public-v1 secondary reference implementation when installed
+with its `[postgresql]` extra. It preserves the same behavioral ports and
+outcomes while using native PostgreSQL mechanics rather than reproducing
+SQLite DDL.
 
 ## Adapter vocabulary
 
@@ -225,9 +227,58 @@ SQLite operational sidecars are durable state. The adapter does not copy,
 delete, edit, or repair them. Network filesystems, multi-host sharing, Windows
 SQLite, and hostile same-user processes are unsupported.
 
+## PostgreSQL reference-adapter contract
+
+One AIPCS installation uses one operator-provisioned PostgreSQL database. The
+registry occupies the exact private schema `aipcs_registry`; every materialised
+service occupies one exact private `svc_<uuid hex>` schema in the same
+database. The logical service locator remains opaque above the adapter and is
+never an endpoint, database name, or credential.
+
+The adapter is designed for a dedicated non-superuser role with only database
+`CONNECT` and schema-creation authority. It neither creates databases, roles,
+or extensions nor requires superuser, `CREATEDB`, `CREATEROLE`, replication,
+or row-security-bypass privileges. Installation policy revokes public schema
+access. Transport security and certificate policy remain operator-managed
+libpq connection settings supplied through the secret DSN.
+
+Registry and service work retain their existing transaction boundary: a
+registry transaction is committed before service-schema work begins, and
+finalisation uses a new registry transaction and connection. Foundation,
+domain, and data mutations are transactional within their owning schema.
+Adapter migration and lifecycle serialisation use transaction-scoped advisory
+locks with bounded lock and statement timeouts. Inspection is read-only,
+queries structured `pg_catalog` state, and never executes DDL.
+
+PostgreSQL R1 is the behavioral counterpart of the current SQLite foundation,
+not a byte-for-byte or DDL-equivalent format. It uses native `uuid`, `bigint`,
+`double precision`, `boolean`, microsecond UTC `timestamptz`, text, and `jsonb`
+representations. Text columns and text comparison/index expressions use the
+built-in deterministic `C` collation so equality, uniqueness, ordering, and
+cursor boundaries remain bytewise across operator database locales. Object
+references are schema-qualified wherever PostgreSQL grammar permits;
+`CREATE INDEX` uses its validated explicit unqualified index name with a
+schema-qualified target table and catalog verification of the resulting index
+schema. Exact semantic conformance is measured using synthetic normalized
+results across adapters; database files, private SQL, and migration history are
+not portable artifacts.
+
+The supported compatibility policy is PostgreSQL major versions 16 through 18.
+Release verification passes the full contract-parity suites on pinned
+PostgreSQL 16 and 18 endpoints. `psycopg` 3 is an optional PostgreSQL
+dependency. The adapter has no general driver or adapter retry loop. For a
+data mutation with commit uncertainty only, it may make one evidence-led
+re-observation and safe retry using the same idempotency key, matching SQLite;
+it never retries from generic SQLSTATE or error text. Private, phase-aware
+SQLSTATE outcomes map into the existing bounded storage failure categories
+without exposing SQLSTATE, driver text, identifiers, endpoints, or
+credentials.
+
 ## Deferred adapter work
 
-The current ports do not imply implemented PostgreSQL, adapter discovery,
-export/import, online backup, repair, archive/resume, purge, an administration
-CLI, or a cross-store transaction. Those features require explicit contracts
-and validation rather than exposure of private SQLite modules.
+PostgreSQL is a supported generic public-v1 stdio reference adapter when the
+package is installed with its `[postgresql]` extra. Third-party adapters,
+mixed-backend composition, physical export/import, online backup, repair,
+archive/resume, purge, an administration CLI, and cross-store transactions
+remain deferred. Those features require explicit contracts and validation
+rather than exposure of either reference adapter's private modules.

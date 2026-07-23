@@ -24,6 +24,9 @@ _FIELDS = {
     "sqlite_data_root": "AIPCS_SQLITE_DATA_ROOT",
     "sqlite_busy_timeout_ms": "AIPCS_SQLITE_BUSY_TIMEOUT_MS",
     "postgres_dsn_env": "AIPCS_POSTGRES_DSN_ENV",
+    "postgres_connect_timeout_seconds": "AIPCS_POSTGRES_CONNECT_TIMEOUT_SECONDS",
+    "postgres_lock_timeout_ms": "AIPCS_POSTGRES_LOCK_TIMEOUT_MS",
+    "postgres_statement_timeout_ms": "AIPCS_POSTGRES_STATEMENT_TIMEOUT_MS",
     "log_level": "AIPCS_LOG_LEVEL",
 }
 _DEFAULTS = {
@@ -33,6 +36,9 @@ _DEFAULTS = {
     "sqlite_data_root": None,
     "sqlite_busy_timeout_ms": 5000,
     "postgres_dsn_env": None,
+    "postgres_connect_timeout_seconds": 10,
+    "postgres_lock_timeout_ms": 5000,
+    "postgres_statement_timeout_ms": 30000,
     "log_level": "warning",
 }
 _DSN_ENV = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
@@ -65,6 +71,27 @@ def resolve_configuration(
     busy_timeout_ms = _sqlite_busy_timeout(
         values["sqlite_busy_timeout_ms"], sources["sqlite_busy_timeout_ms"]
     )
+    postgres_connect_timeout_seconds = _bounded_timeout(
+        values["postgres_connect_timeout_seconds"],
+        sources["postgres_connect_timeout_seconds"],
+        path="postgresql",
+        minimum=1,
+        maximum=60,
+    )
+    postgres_lock_timeout_ms = _bounded_timeout(
+        values["postgres_lock_timeout_ms"],
+        sources["postgres_lock_timeout_ms"],
+        path="postgresql",
+        minimum=1,
+        maximum=30_000,
+    )
+    postgres_statement_timeout_ms = _bounded_timeout(
+        values["postgres_statement_timeout_ms"],
+        sources["postgres_statement_timeout_ms"],
+        path="postgresql",
+        minimum=1_000,
+        maximum=300_000,
+    )
     _validate_profile(
         profile,
         principal,
@@ -72,6 +99,16 @@ def resolve_configuration(
         dsn_ref,
         file_values,
         sqlite_busy_timeout_explicit=sources["sqlite_busy_timeout_ms"] != "default",
+        postgres_timeouts_explicit=any(
+            sources[field] != "default"
+            for field in (
+                "postgres_connect_timeout_seconds",
+                "postgres_lock_timeout_ms",
+                "postgres_statement_timeout_ms",
+            )
+        ),
+        postgres_lock_timeout_ms=postgres_lock_timeout_ms,
+        postgres_statement_timeout_ms=postgres_statement_timeout_ms,
     )
     return ResolvedConfiguration(
         profile=profile,
@@ -82,13 +119,15 @@ def resolve_configuration(
         log_level=level,
         sources=sources,
         sqlite_busy_timeout_ms=busy_timeout_ms,
+        postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
+        postgres_lock_timeout_ms=postgres_lock_timeout_ms,
+        postgres_statement_timeout_ms=postgres_statement_timeout_ms,
     )
 
 
 def require_runnable(config: ResolvedConfiguration) -> None:
-    if config.profile == "postgresql" or (
-        config.profile == "sqlite"
-        and (not is_supported_sqlite_platform() or not is_supported_sqlite_runtime())
+    if config.profile == "sqlite" and (
+        not is_supported_sqlite_platform() or not is_supported_sqlite_runtime()
     ):
         raise ConfigurationError(ErrorCode.UNSUPPORTED_OPERATION, "profile")
 
@@ -148,7 +187,12 @@ def _read_file(path: Path | None) -> dict[str, object]:
     allowed_sections = {
         "identity": {"principal_id"},
         "sqlite": {"data_root", "busy_timeout_ms"},
-        "postgresql": {"dsn_env"},
+        "postgresql": {
+            "dsn_env",
+            "connect_timeout_seconds",
+            "lock_timeout_ms",
+            "statement_timeout_ms",
+        },
         "logging": {"level"},
     }
     for name, section in sections.items():
@@ -161,6 +205,11 @@ def _read_file(path: Path | None) -> dict[str, object]:
         "sqlite_data_root": sections["sqlite"].get("data_root"),
         "sqlite_busy_timeout_ms": sections["sqlite"].get("busy_timeout_ms"),
         "postgres_dsn_env": sections["postgresql"].get("dsn_env"),
+        "postgres_connect_timeout_seconds": sections["postgresql"].get(
+            "connect_timeout_seconds"
+        ),
+        "postgres_lock_timeout_ms": sections["postgresql"].get("lock_timeout_ms"),
+        "postgres_statement_timeout_ms": sections["postgresql"].get("statement_timeout_ms"),
         "log_level": sections["logging"].get("level"),
     }
     values["__sqlite_present__"] = "sqlite" in parsed
@@ -266,22 +315,30 @@ def _dsn_reference(value: object) -> str | None:
 def _sqlite_busy_timeout(value: object, source: str) -> int:
     """Validate the sole SQLite busy-handler policy without coercion."""
 
+    return _bounded_timeout(value, source, path="sqlite", minimum=1, maximum=30_000)
+
+
+def _bounded_timeout(
+    value: object, source: str, *, path: str, minimum: int, maximum: int
+) -> int:
+    """Validate one explicit timeout without accepting textual coercions."""
+
     if source in {"cli", "environment"}:
         if (
             not isinstance(value, str)
             or not re.fullmatch(r"(?:[1-9][0-9]*)", value)
-            or len(value) > 5
+            or len(value) > len(str(maximum))
         ):
-            raise ConfigurationError(path="sqlite")
+            raise ConfigurationError(path=path)
         parsed = int(value)
     elif source in {"file", "default"}:
         if type(value) is not int:
-            raise ConfigurationError(path="sqlite")
+            raise ConfigurationError(path=path)
         parsed = value
     else:
-        raise ConfigurationError(path="sqlite")
-    if not 1 <= parsed <= 30_000:
-        raise ConfigurationError(path="sqlite")
+        raise ConfigurationError(path=path)
+    if not minimum <= parsed <= maximum:
+        raise ConfigurationError(path=path)
     return parsed
 
 
@@ -293,6 +350,9 @@ def _validate_profile(
     file_values: Mapping[str, object],
     *,
     sqlite_busy_timeout_explicit: bool,
+    postgres_timeouts_explicit: bool,
+    postgres_lock_timeout_ms: int,
+    postgres_statement_timeout_ms: int,
 ) -> None:
     if profile != "stateless" and principal is None:
         raise ConfigurationError(path="principal_id")
@@ -304,11 +364,14 @@ def _validate_profile(
         or root is not None
         or dsn_ref is not None
         or sqlite_busy_timeout_explicit
+        or postgres_timeouts_explicit
     ):
         raise ConfigurationError(path="storage")
-    if profile == "sqlite" and (pg_present or dsn_ref is not None):
+    if profile == "sqlite" and (pg_present or dsn_ref is not None or postgres_timeouts_explicit):
         raise ConfigurationError(path="postgresql")
     if profile == "postgresql" and (
         sqlite_present or root is not None or dsn_ref is None or sqlite_busy_timeout_explicit
     ):
         raise ConfigurationError(path="storage")
+    if profile == "postgresql" and postgres_statement_timeout_ms < postgres_lock_timeout_ms:
+        raise ConfigurationError(path="postgresql")

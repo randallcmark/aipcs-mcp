@@ -20,6 +20,9 @@ def safe_config_report(config: ResolvedConfiguration) -> dict[str, object]:
             "sqlite_data_root_configured": config.sources["sqlite_data_root"] != "default",
             "sqlite_busy_timeout_ms": config.sqlite_busy_timeout_ms,
             "postgresql_dsn_configured": config.postgres_dsn_env is not None,
+            "postgresql_connect_timeout_seconds": config.postgres_connect_timeout_seconds,
+            "postgresql_lock_timeout_ms": config.postgres_lock_timeout_ms,
+            "postgresql_statement_timeout_ms": config.postgres_statement_timeout_ms,
         },
         "sources": dict(config.sources),
     }
@@ -39,4 +42,4 @@ def _structurally_runnable(config: ResolvedConfiguration) -> bool:
         config.profile == "sqlite"
         and is_supported_sqlite_platform()
         and is_supported_sqlite_runtime()
-    )
+    ) or config.profile == "postgresql"

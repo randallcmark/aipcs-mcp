@@ -5,8 +5,8 @@ is immutable and is passed to runtime wiring; application use cases do not read
 configuration files or environment variables.
 
 Configuration selects a fixed V1 runtime shape. Resolution itself never creates
-storage, connects to a database, or migrates an adapter. `serve` is the only
-command that evaluates live SQLite readiness.
+storage, reads a database secret, connects to a database, or migrates an
+adapter. `serve` is the only command that may evaluate live adapter readiness.
 
 ## Commands
 
@@ -24,7 +24,9 @@ stdio MCP protocol.
 
 The supported non-secret overrides are `--profile`, `--transport`,
 `--principal-id`, `--sqlite-data-root`, `--sqlite-busy-timeout-ms`,
-`--postgres-dsn-env`, and `--log-level`.
+`--postgres-dsn-env`, `--postgres-connect-timeout-seconds`,
+`--postgres-lock-timeout-ms`, `--postgres-statement-timeout-ms`, and
+`--log-level`.
 When `serve` succeeds, the resolved log level is applied to stderr logging;
 configuration commands do not mutate process logging.
 
@@ -46,6 +48,9 @@ values fail validation.
 | SQLite data-root descriptor | `AIPCS_SQLITE_DATA_ROOT` |
 | SQLite busy timeout (milliseconds) | `AIPCS_SQLITE_BUSY_TIMEOUT_MS` |
 | PostgreSQL DSN reference | `AIPCS_POSTGRES_DSN_ENV` |
+| PostgreSQL connect timeout (seconds) | `AIPCS_POSTGRES_CONNECT_TIMEOUT_SECONDS` |
+| PostgreSQL lock timeout (milliseconds) | `AIPCS_POSTGRES_LOCK_TIMEOUT_MS` |
+| PostgreSQL statement timeout (milliseconds) | `AIPCS_POSTGRES_STATEMENT_TIMEOUT_MS` |
 | Stderr log level | `AIPCS_LOG_LEVEL` |
 
 Only these exact names participate in AIPCS field precedence. For an omitted
@@ -79,11 +84,21 @@ is accepted.
     profile = "stateless"
     transport = "stdio"
 
+For a PostgreSQL profile, the selected document instead supplies the persistent
+identity and secret reference:
+
+    config_version = 1
+    profile = "postgresql"
+    transport = "stdio"
+
     [identity]
     principal_id = "local_operator"
 
-    [sqlite]
-    busy_timeout_ms = 5000
+    [postgresql]
+    dsn_env = "AIPCS_DATABASE_DSN"
+    connect_timeout_seconds = 10
+    lock_timeout_ms = 5000
+    statement_timeout_ms = 30000
 
     [logging]
     level = "warning"
@@ -97,10 +112,16 @@ path, and reports it as not explicitly configured. SQLite `busy_timeout_ms`
 is an integer from 1 through 30,000 and defaults to 5,000. TOML must provide a
 real integer; CLI and environment values must be canonical unsigned decimal
 text (with no signs, whitespace, leading zeroes, or separators). Explicit
-SQLite settings are invalid for stateless and PostgreSQL profiles. PostgreSQL requires a
-`dsn_env` reference matching `^[A-Z][A-Z0-9_]{0,127}$`; its value is not read and
-connectivity is not tested. Logging level is one of `debug`, `info`, `warning`,
-or `error`.
+SQLite settings are invalid for stateless and PostgreSQL profiles.
+
+PostgreSQL requires a `dsn_env` reference matching
+`^[A-Z][A-Z0-9_]{0,127}$`. The referenced value is not read and connectivity
+is not tested during resolution, `config show`, or `config validate`.
+`connect_timeout_seconds` is 1–60 and defaults to 10; `lock_timeout_ms` is
+1–30,000 and defaults to 5,000; `statement_timeout_ms` is 1,000–300,000 and
+defaults to 30,000. The statement timeout must be at least the lock timeout.
+Explicit PostgreSQL settings are invalid for stateless and SQLite profiles.
+Logging level is one of `debug`, `info`, `warning`, or `error`.
 
 ## Profiles and availability
 
@@ -109,7 +130,7 @@ or `error`.
 | stateless | Available | Starts a server-info-only stdio process. |
 | sqlite on Linux or macOS with SQLite 3.51.3+ | Available | Performs the sole explicit registry migration, then starts the 21-tool lifecycle/data server only if storage is ready; service stores are created by admitted materialise/evolve calls, and exact R2 service stores are upgraded to R3 only by admitted lifecycle/data/topology mutations. Read-side calls never migrate. |
 | sqlite on Windows | Unavailable | Rejected before server construction. |
-| postgresql | Unavailable | Rejected before server construction. |
+| postgresql | Available when its complete non-secret shape is valid | With the `[postgresql]` extra installed and the referenced DSN available at startup, `serve` starts the supported generic stdio reference backend. It uses one operator-provisioned database with fixed registry and per-service schemas. |
 
 Persistent profiles require an explicit printable `principal_id` of at most 128
 characters. Stateless mode may omit
@@ -120,9 +141,10 @@ authentication or tenancy mechanism.
 
 The reports' `available` and `runnable` fields state structural profile support,
 not live store readiness. Missing parents, unsafe permissions, inaccessible
-locations, database incompatibility, and migration state are deliberately not
-probed by configuration commands. They can only cause `serve` to fail safely
-before MCP starts.
+locations, missing secret values or optional drivers, database
+incompatibility, and migration state are deliberately not probed by
+configuration commands. They can only cause `serve` to fail safely before MCP
+starts.
 
 For a SQLite process, either supply an absolute `sqlite_data_root` or use the
 redacted platform default described above. The root is a local POSIX directory;
@@ -130,8 +152,10 @@ cooperating processes under the same effective user may have many readers, but
 SQLite serialises writers under the configured timeout. A contention result is
 `StorageBusy`; the adapter performs no internal retry. Do not treat the profile
 as network-filesystem, multi-host, hostile-same-user, or Windows support.
-PostgreSQL fields remain recognised only for future configuration compatibility
-and do not select an adapter.
+PostgreSQL configuration selects the supported stdio backend only when `serve`
+can load the optional dependency and read the referenced DSN. It does not
+provision, connect to, or validate a database during configuration resolution,
+`config show`, or `config validate`.
 
 ## Safe reports and failures
 
@@ -144,11 +168,12 @@ raw TOML, or untrusted environment values.
 `config validate` succeeds only for a structurally valid runnable profile.
 Invalid configuration returns the existing `validation_failed` error envelope.
 Listener requests return `transport_not_supported`; unavailable Windows SQLite
-and PostgreSQL profiles return `unsupported_operation`. Failures are one public
-envelope on stderr and return exit status 2; successful config commands return
-one JSON success envelope on stdout and exit 0. A storage/startup failure from
-`serve` is one bounded `internal_error` envelope on stderr; it does not start
-MCP or expose a path, database name, principal, driver, or migration detail.
+returns `unsupported_operation`. Failures are one public envelope on stderr
+and return exit status 2; successful config commands return one JSON success
+envelope on stdout and exit 0. A storage/startup failure from `serve` is one
+bounded error envelope on stderr; it does not start MCP or expose a path, DSN
+reference, endpoint, database name, principal, driver, SQLSTATE, or migration
+detail.
 
 There is no dotenv loading, configuration inheritance, include mechanism,
 secret-file support, remote configuration, profile plugin system, automatic

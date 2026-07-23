@@ -9,7 +9,7 @@ server, stable generic tools, and schemas that agents can design and evolve.
 | Generate MCP tools from each schema. | One stable 21-tool surface operates over agent-defined schemas. |
 | Generate a web service for every memory domain. | One local-first primitive server manages many services. |
 | Treat undeveloped seeds as abandoned. | Seeds are durable cues; archive and purge remain explicit future actions. |
-| Make SQLite the product model. | SQLite is the first adapter; backend-neutral application contracts preserve a later PostgreSQL path. |
+| Make SQLite the product model. | SQLite is the default reference adapter; PostgreSQL is the schema-isolated secondary reference that proves the behavioral ports. |
 | Treat local SQLite as general multi-writer storage. | One local POSIX host and effective user; WAL permits readers and serialises one writer. |
 | Retain aliases and generated pointers. | Agents evolve schemas and move records explicitly. |
 | Persist classification confidence and session counters as registry concepts. | Those concepts are retired; domain schemas may declare their own useful fields. |
@@ -51,8 +51,10 @@ contract.
 
 ## Still deferred
 
-The current implementation remains local-first and pre-release. PostgreSQL,
-semantic search, export/import/purge, an administration CLI, supported `uvx`
-installation, remote MCP, hosted identity, and maintenance/deprecation policy
-remain separate future work. Their absence is deliberate and is not filled by
-private modules, examples, or research artifacts.
+The current implementation remains local-first and pre-release. PostgreSQL is
+a supported generic public-v1 stdio reference backend when installed with its
+`[postgresql]` extra. Semantic search, portable data lifecycle, an
+administration CLI, supported `uvx` installation, remote MCP, hosted identity,
+and maintenance/deprecation policy remain separate future work. Their absence
+is deliberate and is not filled by private modules, examples, or research
+artifacts.

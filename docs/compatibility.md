@@ -1,17 +1,17 @@
 # Compatibility and release boundary
 
 `aipcs-mcp` remains pre-release (`0.0.0.dev0`). The source tree implements the
-contract below, but the project does not yet claim a supported installation,
-release window, deprecation policy, or security-fix commitment.
+public-v1 contract below. A supported distribution channel, release window,
+deprecation policy, and security-fix commitment remain to be defined.
 
 | Layer | Identifier | Current source contract |
 | --- | --- | --- |
-| Distribution | `aipcs-mcp` SemVer | Development package and `aipcs` command; no supported release installation. |
-| MCP capability | `aipcs_mcp_contract` | `1.2.0`; 21-tool SQLite surface when all features are bound. |
+| Distribution | `aipcs-mcp` SemVer | Development package and `aipcs` command; no supported distribution channel yet. |
+| MCP capability | `aipcs_mcp_contract` | `1.2.0`; 21-tool SQLite or PostgreSQL surface when the selected persistent profile is ready. |
 | Schema | `manifest_version` | Manifest v2 is normal design input. |
 | Configuration | `config_version` | Strict configuration v1 with documented precedence. |
-| Registry storage | adapter revision | SQLite registry R3. |
-| Service storage | adapter revision | SQLite service store R3, including record/topology foundations. |
+| Registry storage | adapter revision | SQLite registry R3; PostgreSQL fixed-schema R1. |
+| Service storage | adapter revision | SQLite service store R3; PostgreSQL schema-isolated R1 foundation, including record/topology storage. |
 | Export bundle | `export_format_version` | Not implemented. |
 
 These identifiers are independent. `schema_version`, server-owned
@@ -39,6 +39,12 @@ SQLite 3.51.3 or newer, and cooperating processes under the same effective
 user. Persistent WAL supports concurrent readers and one serialised writer.
 Windows SQLite, network filesystems, multi-host writers, and hostile same-user
 isolation are outside the boundary.
+
+PostgreSQL is a supported generic public-v1 stdio reference adapter for major
+versions 16 through 18 when installed with the `[postgresql]` extra. It uses
+`psycopg` 3 and one operator-provisioned database with a fixed registry schema
+and schema-isolated service storage. Release verification passes the full
+contract-parity suites on pinned PostgreSQL 16 and 18 endpoints.
 
 ## Schema and lifecycle compatibility
 
@@ -130,7 +136,7 @@ never compatibility data.
 
 No compatibility commitment yet exists for:
 
-- PostgreSQL or third-party adapters;
+- third-party adapters or mixed-backend runtime composition;
 - semantic, fuzzy, embedding, or cross-service search;
 - export/import/restore, online backup, repair, archive/resume, or purge;
 - administration CLI workflows or supported `uvx` packaging;

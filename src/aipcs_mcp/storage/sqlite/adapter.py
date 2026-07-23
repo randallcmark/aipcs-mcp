@@ -10,10 +10,7 @@ from functools import wraps
 
 from aipcs_mcp.application.models import Service
 from aipcs_mcp.application.ports import RegistryUnitOfWork
-from aipcs_mcp.storage.contracts import MigrationState, StorageAdapterInfo
-from aipcs_mcp.storage.errors import StorageBusy, StorageMigrationError, StorageUnavailable
-
-from .codecs import (
+from aipcs_mcp.storage.codecs import (
     decode_r1_service,
     decode_service,
     decode_time,
@@ -23,6 +20,9 @@ from .codecs import (
     validate_r1_mutation_row,
     validate_r2_mutation_row,
 )
+from aipcs_mcp.storage.contracts import MigrationState, StorageAdapterInfo
+from aipcs_mcp.storage.errors import StorageBusy, StorageMigrationError, StorageUnavailable
+
 from .connection import (
     SQLiteConnectionPolicy,
     SQLiteConnectionPurpose,

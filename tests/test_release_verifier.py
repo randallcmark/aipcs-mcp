@@ -271,6 +271,130 @@ def test_scrubbing_redaction_and_cleanup_are_bounded(tmp_path: Path, verifier) -
     assert retained.exists()
 
 
+def test_postgresql_release_environment_rejects_ambient_database_selection(verifier) -> None:
+    environment = verifier.postgresql_release_environment(
+        {
+            "KEEP": "yes",
+            "PGHOST": "maintainer-host",
+            "PGSERVICE": "maintainer-service",
+            "POSTGRES_PASSWORD": "maintainer-secret",
+            "AIPCS_POSTGRES_DSN_ENV": "AIPCS_MAINTAINER_DSN",
+            "AIPCS_POSTGRES_TEST_IMAGE": "untrusted-image",
+            "AIPCS_RELEASE_POSTGRES_DSN": "postgresql://ambient-secret@host/database",
+            "DATABASE_URL": "postgresql://maintainer-secret@host/database",
+        }
+    )
+    assert environment["KEEP"] == "yes"
+    assert "PGHOST" not in environment
+    assert "PGSERVICE" not in environment
+    assert "POSTGRES_PASSWORD" not in environment
+    assert "AIPCS_POSTGRES_DSN_ENV" not in environment
+    assert "AIPCS_POSTGRES_TEST_IMAGE" not in environment
+    assert "AIPCS_RELEASE_POSTGRES_DSN" not in environment
+    assert "DATABASE_URL" not in environment
+
+
+def test_postgresql_release_container_requires_local_image_and_exact_id_cleanup(verifier) -> None:
+    commands: list[tuple[tuple[str, ...], str | None]] = []
+    container_id = "a" * 64
+
+    def runner(command, *, input_text=None):
+        command_tuple = tuple(command)
+        commands.append((command_tuple, input_text))
+        if command_tuple[:3] == ("docker", "image", "inspect"):
+            return "sha256:local-only\n"
+        if command_tuple[:2] == ("docker", "run"):
+            return f"{container_id}\n"
+        if command_tuple[:2] == ("docker", "port"):
+            return "127.0.0.1:45678\n"
+        return ""
+
+    fixture = verifier.DisposablePostgreSQLRelease("16", runner=runner)
+    target = fixture.start()
+    fixture.close()
+
+    assert target.host == "127.0.0.1"
+    assert target.port == 45678
+    inspect, run, port, ready, provision, cleanup = [command for command, _ in commands]
+    assert inspect[:3] == ("docker", "image", "inspect")
+    assert "--pull=never" in run
+    assert all(command[0][1] not in {"pull", "ps", "compose"} for command in commands)
+    assert port == ("docker", "port", container_id, "5432/tcp")
+    assert ready[:3] == ("docker", "exec", container_id)
+    assert provision[:3] == ("docker", "exec", "--interactive")
+    assert provision[-1] == f"--dbname={target.database}"
+    assert "NOSUPERUSER" in (commands[4][1] or "")
+    assert "GRANT CONNECT, CREATE ON DATABASE" in (commands[4][1] or "")
+    assert cleanup == ("docker", "container", "rm", "--force", container_id)
+
+
+def test_postgresql_config_probe_failure_discards_secret_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verifier
+) -> None:
+    secret = "postgresql://runtime:synthetic-secret@127.0.0.1/private"
+    target = verifier.PostgreSQLReleaseTarget("127.0.0.1", 5432, "db", "runtime", "password")
+    monkeypatch.setattr(
+        verifier,
+        "run_stage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            verifier.ReleaseVerificationError(secret)
+        ),
+    )
+    with pytest.raises(verifier.ReleaseVerificationError) as raised:
+        verifier.run_postgresql_config_redaction(
+            Path(sys.executable),
+            tmp_path,
+            tmp_path / "aipcs",
+            "principal",
+            target,
+            environment={"KEEP": "yes"},
+            redaction_roots=(tmp_path,),
+        )
+    assert str(raised.value) == "Installed PostgreSQL config redaction failed."
+    assert secret not in str(raised.value)
+
+
+def test_postgresql_verifier_mode_dispatches_without_a_dsn(
+    monkeypatch: pytest.MonkeyPatch, verifier
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        verifier,
+        "verify_postgresql_integration",
+        lambda **kwargs: calls.append((kwargs["postgres_major"], kwargs["keep_failed_workdir"])),
+    )
+    assert verifier.main(["--postgres-integration", "--postgres-major", "18"]) == 0
+    assert calls == [("18", False)]
+
+
+def test_postgresql_stdio_probe_covers_public_workflow_without_embedded_dsn(verifier) -> None:
+    program = verifier._postgresql_stdio_probe_program()
+    for tool in (
+        "aipcs_bootstrap",
+        "aipcs_service_seed",
+        "aipcs_service_design",
+        "aipcs_service_materialise",
+        "aipcs_record_create",
+        "aipcs_record_get",
+        "aipcs_record_list",
+        "aipcs_record_search",
+        "aipcs_record_update",
+        "aipcs_record_history",
+        "aipcs_branch_create",
+        "aipcs_branch_list",
+        "aipcs_branch_update",
+        "aipcs_branch_assign_records",
+        "aipcs_service_summary",
+        "aipcs_maintenance_scan",
+        "aipcs_service_evolve",
+    ):
+        assert tool in program
+    assert 'mode="restart"' in program
+    assert 'mode="isolation"' in program
+    assert "postgresql://" not in program
+    assert "AIPCS_RELEASE_POSTGRES_DSN" in program
+
+
 def test_cleanup_failure_blocks_success_without_masking_an_existing_failure(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:

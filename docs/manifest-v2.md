@@ -28,10 +28,10 @@ projections.
 
 Supported attribute types are string, integer, number, boolean, datetime, uuid,
 and string_list. Enumerated values and retrieval modes are type-checked.
-Integer values use the signed-64 range. Number values use finite SQLite REAL
-values; an integral JSON value supplied for a number must be within the
-IEEE-754 exact-integer range (`-2^53` through `2^53`) so persistence never
-silently rounds it. String and string-list element values may not contain NUL
+Integer values use the signed-64 range. Number values use finite IEEE-754
+binary64 values; an integral JSON value supplied for a number must be within
+the exact-integer range (`-2^53` through `2^53`) so persistence never silently
+rounds it. String and string-list element values may not contain NUL
 characters. `allowed_values` is application metadata, not a physical database
 constraint. The record boundary validates every supplied value, including each
 `string_list` member, before persistence. For a `string_list`, `allowed_values`

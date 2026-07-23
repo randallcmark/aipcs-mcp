@@ -37,8 +37,7 @@ def test_persistent_rules_blank_and_runnable() -> None:
         environ={},
         config_path=None,
     )
-    with pytest.raises(ConfigurationError):
-        require_runnable(config)
+    require_runnable(config)
 
 
 def test_absolute_sqlite_and_contradiction() -> None:

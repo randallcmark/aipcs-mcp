@@ -13,20 +13,32 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from tarfile import open as open_tar
+from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_OUTPUT_CHARS = 4_000
 DEFAULT_TIMEOUT_SECONDS = 300
 SMOKE_TIMEOUT_SECONDS = 60
+POSTGRES_SMOKE_TIMEOUT_SECONDS = 90
+POSTGRES_RELEASE_DSN_ENV = "AIPCS_RELEASE_POSTGRES_DSN"
+_POSTGRES_RELEASE_IMAGES = {
+    "16": "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
+    "18": "postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
+}
+_CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
+_LOOPBACK_PORT = re.compile(r"^127\.0\.0\.1:(?P<port>[1-9][0-9]{0,4})$")
 _FROZEN_R1_MIGRATION_ID = "registry-0001-initial"
 _FROZEN_R1_CHECKSUM = "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc"
 _FROZEN_R2_MIGRATION_ID = "registry-0002-durable-intent"
@@ -232,6 +244,209 @@ class CleanCopy:
     root: Path
     source_files: tuple[Path, ...]
     copied_files: tuple[Path, ...]
+
+
+@dataclass(frozen=True, repr=False)
+class PostgreSQLReleaseTarget:
+    """Ephemeral verifier-owned runtime credentials; never render their values."""
+
+    host: str
+    port: int
+    database: str
+    username: str
+    password: str
+
+    @property
+    def dsn(self) -> str:
+        return f"postgresql://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
+
+
+def postgresql_release_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Discard every ambient database selector before the verifier creates its own."""
+
+    environment = scrubbed_environment(base)
+    for key in tuple(environment):
+        upper = key.upper()
+        if (
+            upper.startswith("PG")
+            or upper.startswith("POSTGRES")
+            or upper.startswith("AIPCS_POSTGRES")
+            or upper == POSTGRES_RELEASE_DSN_ENV
+            or upper in {"DATABASE_URL", "DB_URL", "DB_DSN"}
+        ):
+            environment.pop(key, None)
+    return environment
+
+
+def _container_command(
+    command: Sequence[str], *, input_text: str | None = None
+) -> str:
+    """Run one verifier-owned Docker command without retaining its diagnostics."""
+
+    try:
+        completed = subprocess.run(
+            list(command),
+            check=False,
+            capture_output=True,
+            text=True,
+            input=input_text,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ReleaseVerificationError("PostgreSQL release fixture command failed.") from None
+    if completed.returncode:
+        raise ReleaseVerificationError("PostgreSQL release fixture command failed.")
+    return completed.stdout
+
+
+def _release_loopback_port(value: str) -> int:
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise ReleaseVerificationError("PostgreSQL release fixture returned an invalid port.")
+    matched = _LOOPBACK_PORT.fullmatch(lines[0])
+    if matched is None:
+        raise ReleaseVerificationError("PostgreSQL release fixture returned a non-loopback port.")
+    port = int(matched.group("port"))
+    if not 1 <= port <= 65_535:
+        raise ReleaseVerificationError("PostgreSQL release fixture returned an invalid port.")
+    return port
+
+
+class DisposablePostgreSQLRelease:
+    """Create and remove only one exact-id, pinned, loopback PostgreSQL container."""
+
+    def __init__(self, major: str, *, runner: object = _container_command) -> None:
+        image = _POSTGRES_RELEASE_IMAGES.get(major)
+        if image is None:
+            raise ReleaseVerificationError("Unsupported PostgreSQL release matrix entry.")
+        if not callable(runner):
+            raise ReleaseVerificationError("PostgreSQL release fixture is unavailable.")
+        self._image = image
+        self._runner = runner
+        self._container_id: str | None = None
+
+    def __enter__(self) -> PostgreSQLReleaseTarget:
+        return self.start()
+
+    def __exit__(self, error_type: object, _value: object, _traceback: object) -> None:
+        self.close(suppress_failure=error_type is not None)
+
+    def start(self) -> PostgreSQLReleaseTarget:
+        if self._container_id is not None:
+            raise ReleaseVerificationError("PostgreSQL release fixture was already started.")
+        self._run(("docker", "image", "inspect", "--format", "{{.Id}}", self._image))
+        run_id = secrets.token_hex(16)
+        username = f"aipcs_init_{run_id[:12]}"
+        database = f"aipcs_{run_id[:12]}"
+        password = secrets.token_urlsafe(32)
+        output = self._run(
+            (
+                "docker",
+                "run",
+                "--detach",
+                "--rm",
+                "--pull=never",
+                "--label",
+                "com.aipcs.release.fixture=postgresql",
+                "--label",
+                f"com.aipcs.release.run_id={run_id}",
+                "--publish",
+                "127.0.0.1::5432",
+                "--env",
+                f"POSTGRES_USER={username}",
+                "--env",
+                f"POSTGRES_DB={database}",
+                "--env",
+                f"POSTGRES_PASSWORD={password}",
+                "--env",
+                "PGDATA=/tmp/aipcs-postgresql",
+                self._image,
+            )
+        )
+        container_id = output.strip()
+        if _CONTAINER_ID.fullmatch(container_id) is None:
+            raise ReleaseVerificationError("PostgreSQL release fixture returned an invalid container id.")
+        self._container_id = container_id
+        try:
+            port = _release_loopback_port(self._run(("docker", "port", container_id, "5432/tcp")))
+            initial = PostgreSQLReleaseTarget("127.0.0.1", port, database, username, password)
+            self._wait_ready(initial)
+            return self._provision_runtime_role(initial, run_id)
+        except Exception:
+            self.close(suppress_failure=True)
+            raise
+
+    def close(self, *, suppress_failure: bool = False) -> None:
+        container_id, self._container_id = self._container_id, None
+        if container_id is None:
+            return
+        try:
+            self._run(("docker", "container", "rm", "--force", container_id))
+        except ReleaseVerificationError:
+            if not suppress_failure:
+                raise
+
+    def _run(self, command: Sequence[str], *, input_text: str | None = None) -> str:
+        return self._runner(command, input_text=input_text)  # type: ignore[operator]
+
+    def _wait_ready(self, target: PostgreSQLReleaseTarget) -> None:
+        container_id = self._container_id
+        if container_id is None:
+            raise ReleaseVerificationError("PostgreSQL release fixture was not started.")
+        command = (
+            "docker",
+            "exec",
+            container_id,
+            "pg_isready",
+            "--quiet",
+            "--host=127.0.0.1",
+            f"--username={target.username}",
+            f"--dbname={target.database}",
+        )
+        for attempt in range(40):
+            try:
+                self._run(command)
+                return
+            except ReleaseVerificationError:
+                if attempt == 39:
+                    raise ReleaseVerificationError("PostgreSQL release fixture did not become ready.") from None
+                time.sleep(0.25)
+
+    def _provision_runtime_role(
+        self, initial: PostgreSQLReleaseTarget, run_id: str
+    ) -> PostgreSQLReleaseTarget:
+        container_id = self._container_id
+        if container_id is None:
+            raise ReleaseVerificationError("PostgreSQL release fixture was not started.")
+        username = f"aipcs_runtime_{run_id[:12]}"
+        password = secrets.token_urlsafe(32)
+        sql = (
+            f"CREATE ROLE {username} LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n"
+            f"REVOKE ALL ON DATABASE {initial.database} FROM PUBLIC;\n"
+            "REVOKE ALL ON SCHEMA public FROM PUBLIC;\n"
+            f"GRANT CONNECT, CREATE ON DATABASE {initial.database} TO {username};\n"
+        )
+        self._run(
+            (
+                "docker",
+                "exec",
+                "--interactive",
+                "--env",
+                f"PGPASSWORD={initial.password}",
+                container_id,
+                "psql",
+                "--no-psqlrc",
+                "--set",
+                "ON_ERROR_STOP=1",
+                f"--username={initial.username}",
+                f"--dbname={initial.database}",
+            ),
+            input_text=sql,
+        )
+        return PostgreSQLReleaseTarget(
+            initial.host, initial.port, initial.database, username, password
+        )
 
 
 def scrubbed_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -660,6 +875,332 @@ def install_distribution(
         redaction_roots=redaction_roots,
     )
     return python
+
+
+def require_postgresql_extra(artifacts: ArtifactSet) -> None:
+    """Prove both built artifacts declare the optional Psycopg runtime dependency."""
+
+    try:
+        with ZipFile(artifacts.wheel) as archive:
+            metadata_names = [
+                name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+            ]
+            if len(metadata_names) != 1:
+                raise ValueError
+            wheel_metadata = archive.read(metadata_names[0]).decode("utf-8")
+        with open_tar(artifacts.sdist, "r:gz") as archive:
+            members = [member for member in archive.getmembers() if member.name.endswith("/pyproject.toml")]
+            if len(members) != 1:
+                raise ValueError
+            stream = archive.extractfile(members[0])
+            if stream is None:
+                raise ValueError
+            sdist_project = stream.read().decode("utf-8")
+    except Exception:
+        raise ReleaseVerificationError("PostgreSQL optional-dependency artifact inspection failed.") from None
+    if (
+        "Provides-Extra: postgresql" not in wheel_metadata
+        or "Requires-Dist: psycopg[binary]" not in wheel_metadata
+        or "postgresql" not in wheel_metadata
+        or "[project.optional-dependencies]" not in sdist_project
+        or "postgresql" not in sdist_project
+        or "psycopg[binary]" not in sdist_project
+    ):
+        raise ReleaseVerificationError("PostgreSQL optional dependency is missing from a release artifact.")
+
+
+def install_postgresql_distribution(
+    artifact: Path,
+    workspace: Path,
+    name: str,
+    *,
+    uv: str,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> Path:
+    """Install one artifact plus its PostgreSQL extra into an independent venv."""
+
+    venv = workspace / f"postgres-{name}-venv"
+    empty_cwd = workspace / f"postgres-{name}-cwd"
+    empty_cwd.mkdir(mode=0o700)
+    run_stage(
+        f"postgres {name} venv",
+        [uv, "venv", "--offline", "--python", sys.executable, venv],
+        cwd=empty_cwd,
+        environment=environment,
+        redaction_roots=redaction_roots,
+    )
+    python = _venv_python(venv)
+    run_stage(
+        f"postgres {name} install",
+        [uv, "pip", "install", "--offline", "--python", python, f"{artifact}[postgresql]"],
+        cwd=empty_cwd,
+        environment=environment,
+        redaction_roots=redaction_roots,
+    )
+    return python
+
+
+def _postgresql_config_probe_program() -> str:
+    """Return an installed-only offline configuration redaction assertion."""
+
+    return r"""
+import os
+import subprocess
+import sys
+
+executable, principal = sys.argv[1:]
+secret = os.environ["AIPCS_RELEASE_POSTGRES_DSN"]
+base = [
+    executable, "--profile", "postgresql", "--principal-id", principal,
+    "--postgres-dsn-env", "AIPCS_RELEASE_POSTGRES_DSN",
+]
+for command in ("show", "validate"):
+    completed = subprocess.run(
+        [*base[:1], "config", command, *base[1:]],
+        check=False, capture_output=True, text=True, env=os.environ.copy(), timeout=20,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert secret not in completed.stdout
+    assert secret not in completed.stderr
+    assert "AIPCS_RELEASE_POSTGRES_DSN" not in completed.stdout
+"""
+
+
+def run_postgresql_config_redaction(
+    python: Path,
+    workspace: Path,
+    executable: Path,
+    principal: str,
+    target: PostgreSQLReleaseTarget,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Check installed offline PostgreSQL config commands without a config file."""
+
+    probe = workspace / "postgres-config-probe.py"
+    probe.write_text(_postgresql_config_probe_program(), encoding="utf-8")
+    child_environment = dict(environment)
+    child_environment[POSTGRES_RELEASE_DSN_ENV] = target.dsn
+    try:
+        run_stage(
+            "installed PostgreSQL config redaction",
+            [python, "-I", probe, executable, principal],
+            cwd=workspace,
+            environment=child_environment,
+            redaction_roots=redaction_roots,
+        )
+    except ReleaseVerificationError:
+        raise ReleaseVerificationError("Installed PostgreSQL config redaction failed.") from None
+
+
+def _postgresql_stdio_probe_program() -> str:
+    """Return the installed real-stdio/restart/isolation capability proof."""
+
+    return r"""
+import json
+import os
+import sys
+
+import anyio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+executable, principal, other_principal = sys.argv[1:]
+expected = [
+    "aipcs_server_info", "aipcs_service_seed", "aipcs_service_list",
+    "aipcs_service_inspect", "aipcs_service_design", "aipcs_service_materialise",
+    "aipcs_service_evolve", "aipcs_record_create", "aipcs_record_get",
+    "aipcs_record_list", "aipcs_record_search", "aipcs_record_update",
+    "aipcs_record_delete", "aipcs_record_history", "aipcs_bootstrap",
+    "aipcs_service_summary", "aipcs_branch_create", "aipcs_branch_list",
+    "aipcs_branch_update", "aipcs_branch_assign_records", "aipcs_maintenance_scan",
+]
+state = {}
+managed = [
+    {"name": "id", "type": "uuid", "required": True, "primary_key": True},
+    {"name": "owner_id", "type": "string", "required": True},
+    {"name": "created_at", "type": "datetime", "required": True},
+    {"name": "updated_at", "type": "datetime", "required": True},
+    {"name": "created_via", "type": "string", "required": True},
+    {"name": "record_version", "type": "integer", "required": True},
+]
+manifest = {
+    "manifest_version": 2, "schema_version": 1,
+    "entities": [{"name": "note", "attributes": managed + [
+        {"name": "title", "type": "string", "required": True},
+        {"name": "category", "type": "string", "required": True},
+        {"name": "tags", "type": "string_list", "retrieval_mode": "membership"},
+        {"name": "status", "type": "string"},
+    ]}],
+    "relationships": [],
+    "indices": [{"name": "note_owner_category_idx", "entity": "note", "fields": ["owner_id", "category"]}],
+    "query_patterns": ["Find synthetic release notes."],
+    "discovery_facets": [{"entity": "note", "field": "category"}, {"entity": "note", "field": "tags"}],
+    "retrieval_guidance": "Use exact category and membership tag filters.", "migration_history": [],
+}
+evolved = json.loads(json.dumps(manifest))
+evolved["schema_version"] = 2
+evolved["migration_history"] = [{"from_schema_version": 1, "to_schema_version": 2, "operations": ["add optional summary"]}]
+evolved["entities"][0]["attributes"].append({"name": "summary", "type": "string"})
+
+def session_for(value):
+    params = StdioServerParameters(
+        command=executable,
+        args=["serve", "--profile", "postgresql", "--principal-id", value,
+              "--postgres-dsn-env", "AIPCS_RELEASE_POSTGRES_DSN"],
+        env=os.environ.copy(),
+    )
+    return stdio_client(params)
+
+async def check(value, *, mode):
+    async with session_for(value) as (reader, writer):
+        async with ClientSession(reader, writer) as session:
+            await session.initialize()
+            tools = await session.list_tools()
+            assert [tool.name for tool in tools.tools] == expected
+            info = await session.call_tool("aipcs_server_info", {})
+            result = info.structuredContent["result"]
+            assert all(result["features"][name] for name in (
+                "registry_lifecycle", "materialisation_lifecycle", "record_runtime", "discovery_topology"
+            ))
+            listed = await session.call_tool("aipcs_service_list", {})
+            listed_value = listed.structuredContent
+            if mode == "initial":
+                assert listed_value["result"]["services"] == []
+                bootstrap = await session.call_tool("aipcs_bootstrap", {})
+                assert bootstrap.structuredContent["result"]["services"] == []
+                seeded = await session.call_tool("aipcs_service_seed", {
+                    "domain_name": "release_postgres", "domain_class": "release",
+                    "intent_description": "installed PostgreSQL verifier", "idempotency_key": "release-seed",
+                })
+                assert seeded.structuredContent["ok"] is True
+                service_id = seeded.structuredContent["result"]["service_id"]
+                designed = await session.call_tool("aipcs_service_design", {
+                    "service_id": service_id, "schema": manifest, "idempotency_key": "release-design",
+                })
+                assert designed.structuredContent["ok"] is True
+                materialised = await session.call_tool("aipcs_service_materialise", {
+                    "service_id": service_id,
+                    "expected_service_revision": designed.structuredContent["result"]["service_revision"],
+                    "expected_schema_version": 1, "idempotency_key": "release-materialise",
+                })
+                assert materialised.structuredContent["ok"] is True
+                primary = await session.call_tool("aipcs_record_create", {
+                    "service_id": service_id, "entity_name": "note",
+                    "record": {"title": "Primary release note", "category": "release", "tags": ["alpha", "shared"], "status": "active"},
+                    "idempotency_key": "release-record-primary",
+                })
+                assert primary.structuredContent["ok"] is True
+                record = primary.structuredContent["result"]["record"]
+                record_id = record["id"]
+                loose = await session.call_tool("aipcs_record_create", {
+                    "service_id": service_id, "entity_name": "note",
+                    "record": {"title": "Loose release note", "category": "release", "tags": ["shared", "loose"], "status": "stale"},
+                    "idempotency_key": "release-record-loose",
+                })
+                assert loose.structuredContent["ok"] is True
+                loose_id = loose.structuredContent["result"]["record"]["id"]
+                fetched = await session.call_tool("aipcs_record_get", {"service_id": service_id, "entity_name": "note", "record_id": record_id})
+                assert fetched.structuredContent["result"]["id"] == record_id
+                listed_records = await session.call_tool("aipcs_record_list", {"service_id": service_id, "entity_name": "note", "limit": 10})
+                assert {item["id"] for item in listed_records.structuredContent["result"]["records"]} == {record_id, loose_id}
+                searched = await session.call_tool("aipcs_record_search", {"service_id": service_id, "entity_name": "note", "filters": {"tags": "alpha"}})
+                assert [item["id"] for item in searched.structuredContent["result"]["records"]] == [record_id]
+                updated = await session.call_tool("aipcs_record_update", {
+                    "service_id": service_id, "entity_name": "note", "record_id": record_id,
+                    "updates": {"title": "Primary release note updated"}, "expected_record_version": record["record_version"],
+                    "idempotency_key": "release-record-update",
+                })
+                assert updated.structuredContent["ok"] is True
+                branch = await session.call_tool("aipcs_branch_create", {
+                    "service_id": service_id, "slug": "release-root", "title": "Release root", "intent": "Bounded release retrieval.",
+                    "branch_type": "release", "idempotency_key": "release-branch-create",
+                })
+                assert branch.structuredContent["ok"] is True
+                branch_value = branch.structuredContent["result"]["branch"]
+                branch_id = branch_value["id"]
+                changed_branch = await session.call_tool("aipcs_branch_update", {
+                    "service_id": service_id, "branch_id": branch_id, "updates": {"title": "Release root updated"},
+                    "expected_branch_revision": branch_value["branch_revision"], "idempotency_key": "release-branch-update",
+                })
+                assert changed_branch.structuredContent["ok"] is True
+                branches = await session.call_tool("aipcs_branch_list", {"service_id": service_id, "limit": 10})
+                assert [item["id"] for item in branches.structuredContent["result"]["branches"]] == [branch_id]
+                assigned = await session.call_tool("aipcs_branch_assign_records", {
+                    "service_id": service_id, "branch_id": branch_id, "role": "primary", "operation": "assign",
+                    "records": [{"entity_name": "note", "record_id": record_id,
+                                 "expected_record_version": updated.structuredContent["result"]["record"]["record_version"]}],
+                    "idempotency_key": "release-branch-assign",
+                })
+                assert assigned.structuredContent["ok"] is True
+                history = await session.call_tool("aipcs_record_history", {"service_id": service_id, "entity_name": "note", "record_id": record_id})
+                assert len(history.structuredContent["result"]["events"]) >= 3
+                summary = await session.call_tool("aipcs_service_summary", {"service_id": service_id, "sample": 1})
+                assert summary.structuredContent["result"]["data_status"] == "ready"
+                assert summary.structuredContent["result"]["facets"] and summary.structuredContent["result"]["samples"]
+                maintenance = await session.call_tool("aipcs_maintenance_scan", {
+                    "service_id": service_id, "entity_name": "note", "scan_types": ["unbranched"], "limit": 10,
+                })
+                assert any(item["record"]["id"] == loose_id for item in maintenance.structuredContent["result"]["candidates"])
+                evolved_result = await session.call_tool("aipcs_service_evolve", {
+                    "service_id": service_id,
+                    "expected_service_revision": materialised.structuredContent["result"]["service_revision"],
+                    "expected_schema_version": 1, "schema": evolved, "idempotency_key": "release-evolve",
+                })
+                assert evolved_result.structuredContent["result"]["schema_version"] == 2
+                state.update(service_id=service_id, record_id=record_id)
+            elif mode == "restart":
+                assert len(listed_value["result"]["services"]) == 1
+                fetched = await session.call_tool("aipcs_record_get", {
+                    "service_id": state["service_id"], "entity_name": "note", "record_id": state["record_id"],
+                })
+                assert fetched.structuredContent["result"]["fields"]["title"] == "Primary release note updated"
+                summary = await session.call_tool("aipcs_service_summary", {"service_id": state["service_id"], "sample": 1})
+                assert summary.structuredContent["result"]["data_status"] == "ready"
+            else:
+                assert listed_value["result"]["services"] == []
+                bootstrap = await session.call_tool("aipcs_bootstrap", {})
+                assert bootstrap.structuredContent["result"]["services"] == []
+
+async def main():
+    await check(principal, mode="initial")
+    await check(principal, mode="restart")
+    await check(other_principal, mode="isolation")
+
+anyio.run(main)
+"""
+
+
+def run_postgresql_stdio_probe(
+    python: Path,
+    workspace: Path,
+    executable: Path,
+    principal: str,
+    target: PostgreSQLReleaseTarget,
+    *,
+    name: str,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Run the real installed PostgreSQL stdio capability/restart/isolation proof."""
+
+    probe = workspace / f"postgres-{name}-stdio-probe.py"
+    probe.write_text(_postgresql_stdio_probe_program(), encoding="utf-8")
+    child_environment = dict(environment)
+    child_environment[POSTGRES_RELEASE_DSN_ENV] = target.dsn
+    try:
+        run_stage(
+            f"installed PostgreSQL {name} stdio",
+            [python, "-I", probe, executable, principal, f"{principal}-isolation"],
+            cwd=workspace,
+            environment=child_environment,
+            timeout=POSTGRES_SMOKE_TIMEOUT_SECONDS,
+            redaction_roots=redaction_roots,
+        )
+    except ReleaseVerificationError:
+        raise ReleaseVerificationError("Installed PostgreSQL stdio verification failed.") from None
 
 
 def _origin_probe(source_root: Path, copy_root: Path) -> str:
@@ -3875,6 +4416,99 @@ def create_workspace() -> Path:
         raise ReleaseVerificationError("release workspace creation failed.") from None
 
 
+def verify_postgresql_integration(
+    root: Path = ROOT,
+    *,
+    postgres_major: str = "16",
+    keep_failed_workdir: bool = False,
+) -> None:
+    """Verify one installed PostgreSQL candidate against only a fresh pinned container.
+
+    This is deliberately separate from the normal SQLite release rehearsal.
+    It neither accepts a DSN nor searches for a database, Compose project,
+    configuration file, dotenv file, image tag, or existing container.
+    """
+
+    root = root.resolve()
+    environment = postgresql_release_environment()
+    uv = require_local_preconditions(root)
+    require_clean_checkout_artifacts(root)
+    workspace = create_workspace()
+    failed = True
+    try:
+        redaction_roots = (root, workspace)
+        source_environment = stage_environment(environment, workspace / "postgres-source-uv")
+        snapshot = make_clean_copy(root, workspace / "postgres-source-snapshot", environment=environment)
+        run_source_gates(
+            snapshot.root,
+            uv=uv,
+            environment=source_environment,
+            redaction_roots=redaction_roots,
+        )
+        artifacts = build_and_guard(
+            snapshot.root,
+            workspace / "postgres-dist",
+            uv=uv,
+            environment=source_environment,
+            redaction_roots=redaction_roots,
+        )
+        require_postgresql_extra(artifacts)
+        with DisposablePostgreSQLRelease(postgres_major) as target:
+            for name, artifact in (("wheel", artifacts.wheel), ("sdist", artifacts.sdist)):
+                python = install_postgresql_distribution(
+                    artifact,
+                    workspace,
+                    name,
+                    uv=uv,
+                    environment=environment,
+                    redaction_roots=redaction_roots,
+                )
+                prove_site_packages_import(
+                    python,
+                    workspace,
+                    root,
+                    snapshot.root,
+                    name=f"postgres-{name}",
+                    environment=environment,
+                    redaction_roots=redaction_roots,
+                )
+                principal = f"release_{name}"
+                executable = python.parent / "aipcs"
+                run_postgresql_config_redaction(
+                    python,
+                    workspace,
+                    executable,
+                    principal,
+                    target,
+                    environment=environment,
+                    redaction_roots=redaction_roots,
+                )
+                run_postgresql_stdio_probe(
+                    python,
+                    workspace,
+                    executable,
+                    principal,
+                    target,
+                    name=name,
+                    environment=environment,
+                    redaction_roots=redaction_roots,
+                )
+        require_clean_checkout_artifacts(root)
+        failed = False
+    finally:
+        retained = not cleanup_workspace(
+            workspace,
+            failed=failed,
+            keep_failed_workdir=keep_failed_workdir,
+        )
+        if retained:
+            print(
+                "PostgreSQL release verification failed; retained private diagnostic workspace.",
+                file=sys.stderr,
+            )
+    print(f"PostgreSQL release verification passed for pinned major {postgres_major}.")
+
+
 def verify_release(
     root: Path = ROOT,
     *,
@@ -4145,12 +4779,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="require the candidate to be exactly the clean checked-out HEAD commit",
     )
+    parser.add_argument(
+        "--postgres-integration",
+        action="store_true",
+        help="run the isolated pinned-image PostgreSQL installed-artifact verifier",
+    )
+    parser.add_argument(
+        "--postgres-major",
+        choices=tuple(sorted(_POSTGRES_RELEASE_IMAGES)),
+        default="16",
+        help="pinned PostgreSQL major used only with --postgres-integration",
+    )
     args = parser.parse_args(argv)
     try:
-        verify_release(
-            keep_failed_workdir=args.keep_failed_workdir,
-            exact_tip=args.exact_tip,
-        )
+        if args.postgres_integration:
+            if args.exact_tip:
+                raise ReleaseVerificationError("--exact-tip is unavailable with --postgres-integration.")
+            verify_postgresql_integration(
+                postgres_major=args.postgres_major,
+                keep_failed_workdir=args.keep_failed_workdir,
+            )
+        else:
+            verify_release(
+                keep_failed_workdir=args.keep_failed_workdir,
+                exact_tip=args.exact_tip,
+            )
     except ReleaseVerificationError as error:
         print(f"release verification failed: {_bounded(str(error))}", file=sys.stderr)
         return 1

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -17,6 +19,14 @@ from .lifecycle_coordinator import LifecycleCoordinator
 from .mcp_server import create_server
 from .records import DataFailure, RecordSpecification
 from .storage.contracts import MigrationState, ServiceStoreLocator
+from .storage.postgresql import (
+    PostgreSQLConnectionPolicy,
+    PostgreSQLDomainSchemaStore,
+    PostgreSQLMaterialisedDataStore,
+    PostgreSQLRegistryAdapter,
+    PostgreSQLServiceStoreCatalog,
+    resolve_postgresql_dsn_for_serve,
+)
 from .storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter, SQLiteServiceStoreCatalog
 from .storage.sqlite.data_store import SQLiteMaterialisedDataStore
 from .storage.sqlite.domain_schema import SQLiteDomainSchemaStore
@@ -54,6 +64,38 @@ class SQLiteAdmittedDataStore:
             return DataFailure("internal_error")
 
 
+class PostgreSQLAdmittedDataStore:
+    """Production bridge from a detached materialisation allocation to PostgreSQL.
+
+    As with the SQLite bridge, registry admission remains complete before this
+    bridge opens a service-local connection.  The opaque locator prevents the
+    data adapter from accepting a cross-backend allocation.
+    """
+
+    def __init__(self, store: PostgreSQLMaterialisedDataStore) -> None:
+        self._store = store
+
+    def execute(
+        self,
+        operation: str,
+        storage: MaterialisationStorage,
+        principal_id: str,
+        created_via: str,
+        specification: RecordSpecification,
+        value: object,
+    ) -> object:
+        if type(storage) is not MaterialisationStorage or storage.backend != "postgresql":
+            return DataFailure("storage_unavailable")
+        try:
+            locator = ServiceStoreLocator("postgresql", storage.namespace)
+            method = getattr(self._store, operation, None)
+            if not callable(method):
+                return DataFailure("internal_error")
+            return method(locator, principal_id, created_via, specification, value)
+        except Exception:
+            return DataFailure("internal_error")
+
+
 class SystemUtcClock(Clock):
     """Production clock with timezone-aware UTC values only."""
 
@@ -68,7 +110,9 @@ class Uuid4ServiceIds(IdProvider):
         return uuid4()
 
 
-def compose_server(config: ResolvedConfiguration) -> Server:
+def compose_server(
+    config: ResolvedConfiguration, *, environ: Mapping[str, str] | None = None
+) -> Server:
     """Compose a finite server from one resolved snapshot and one ready registry."""
 
     if config.profile == "stateless":
@@ -77,6 +121,8 @@ def compose_server(config: ResolvedConfiguration) -> Server:
         not is_supported_sqlite_platform() or not is_supported_sqlite_runtime()
     ):
         raise RuntimeError("Unsupported runtime profile.")
+    if config.profile == "postgresql":
+        return _compose_postgresql(config, environ=os.environ if environ is None else environ)
     if config.profile != "sqlite" or config.principal_id is None or config.sqlite_data_root is None:
         raise RuntimeError("Unsupported runtime profile.")
     location = SQLiteLocationPolicy.from_resolved(
@@ -106,6 +152,64 @@ def compose_server(config: ResolvedConfiguration) -> Server:
         lifecycle_executor=coordinator,
         data_application=data_application,
     )
+
+
+def _compose_postgresql(config: ResolvedConfiguration, *, environ: Mapping[str, str]) -> Server:
+    """Compose one homogeneous, ready PostgreSQL runtime without exposing its DSN.
+
+    This is intentionally the only production boundary that resolves the
+    environment-variable reference.  All child adapters receive the same
+    redacted in-memory descriptor, but retain their own connections.
+    """
+
+    if config.principal_id is None:
+        raise RuntimeError("Unsupported runtime profile.")
+    try:
+        dsn = resolve_postgresql_dsn_for_serve(config, environ)
+        policy = PostgreSQLConnectionPolicy.from_configuration(config)
+        adapter = PostgreSQLRegistryAdapter(dsn, policy)
+        state = adapter.migrate()
+        if not _ready_registry(state):
+            raise ValueError("registry is not ready")
+        clock = SystemUtcClock()
+        application = ServiceApplication(adapter.open_uow, clock, Uuid4ServiceIds())
+        catalog = PostgreSQLServiceStoreCatalog(
+            dsn,
+            connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+            lock_timeout_ms=config.postgres_lock_timeout_ms,
+            statement_timeout_ms=config.postgres_statement_timeout_ms,
+        )
+        domain = PostgreSQLDomainSchemaStore(
+            dsn,
+            connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+            lock_timeout_ms=config.postgres_lock_timeout_ms,
+            statement_timeout_ms=config.postgres_statement_timeout_ms,
+            service_store_catalog=catalog,
+        )
+        coordinator = LifecycleCoordinator(adapter.open_uow, clock, catalog, domain)
+        data_store = PostgreSQLMaterialisedDataStore(
+            dsn,
+            connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+            lock_timeout_ms=config.postgres_lock_timeout_ms,
+            statement_timeout_ms=config.postgres_statement_timeout_ms,
+            service_store_catalog=catalog,
+            domain_schema_store=domain,
+            clock=clock.now,
+            record_ids=uuid4,
+            branch_ids=uuid4,
+        )
+        data_application = DataApplication(adapter.open_uow, PostgreSQLAdmittedDataStore(data_store))
+        return create_server(
+            application=application,
+            principal_id=config.principal_id,
+            registry_lifecycle=True,
+            lifecycle_executor=coordinator,
+            data_application=data_application,
+        )
+    except Exception:
+        # Driver and connection details, including any DSN content, never
+        # escape composition.  The CLI renders one fixed public envelope.
+        raise RuntimeError("PostgreSQL runtime could not be composed.") from None
 
 
 def _ready_registry(state: MigrationState) -> bool:

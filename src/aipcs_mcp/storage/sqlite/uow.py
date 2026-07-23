@@ -39,13 +39,7 @@ from aipcs_mcp.lifecycle import (
     prepare_intent,
 )
 from aipcs_mcp.relational import RelationalContractError, classify_transition, compile_manifest
-from aipcs_mcp.storage.errors import (
-    StorageBusy,
-    StorageMigrationError,
-    StorageUnavailable,
-)
-
-from .codecs import (
+from aipcs_mcp.storage.codecs import (
     decode_legacy_result,
     decode_lifecycle_intent,
     decode_result,
@@ -55,6 +49,12 @@ from .codecs import (
     encode_service_values,
     encode_time,
 )
+from aipcs_mcp.storage.errors import (
+    StorageBusy,
+    StorageMigrationError,
+    StorageUnavailable,
+)
+
 from .connection import set_query_only
 from .location import AnchoredLocation
 from .result_codes import is_sqlite_busy

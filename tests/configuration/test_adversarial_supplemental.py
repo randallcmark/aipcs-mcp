@@ -89,6 +89,9 @@ def test_each_field_proves_environment_over_file_and_file_over_default(tmp_path:
         "sqlite_data_root": "default",
         "sqlite_busy_timeout_ms": "default",
         "postgres_dsn_env": "default",
+        "postgres_connect_timeout_seconds": "default",
+        "postgres_lock_timeout_ms": "default",
+        "postgres_statement_timeout_ms": "default",
         "log_level": "default",
     }
 

@@ -35,7 +35,16 @@ def _add_configuration_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sqlite-busy-timeout-ms", help="SQLite busy-handler timeout in milliseconds."
     )
-    parser.add_argument("--postgres-dsn-env", help="Future PostgreSQL DSN environment reference.")
+    parser.add_argument("--postgres-dsn-env", help="PostgreSQL DSN environment reference.")
+    parser.add_argument(
+        "--postgres-connect-timeout-seconds", help="PostgreSQL connect timeout in seconds."
+    )
+    parser.add_argument(
+        "--postgres-lock-timeout-ms", help="PostgreSQL lock timeout in milliseconds."
+    )
+    parser.add_argument(
+        "--postgres-statement-timeout-ms", help="PostgreSQL statement timeout in milliseconds."
+    )
     parser.add_argument("--log-level", help="Stderr logging level override.")
 
 
@@ -74,6 +83,9 @@ def _overrides_from_args(args: argparse.Namespace) -> ConfigOverrides:
         sqlite_data_root=args.sqlite_data_root,
         sqlite_busy_timeout_ms=args.sqlite_busy_timeout_ms,
         postgres_dsn_env=args.postgres_dsn_env,
+        postgres_connect_timeout_seconds=args.postgres_connect_timeout_seconds,
+        postgres_lock_timeout_ms=args.postgres_lock_timeout_ms,
+        postgres_statement_timeout_ms=args.postgres_statement_timeout_ms,
         log_level=args.log_level,
     )
 

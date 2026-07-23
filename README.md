@@ -14,11 +14,15 @@ The current source runtime supports:
 - memory branches with primary and related record membership;
 - shape-only bootstrap plus bounded service summaries, facets, and samples;
 - read-only mechanical maintenance candidate discovery; and
-- a local SQLite implementation over stdio.
+- a local SQLite implementation over stdio; and
+- a generic PostgreSQL reference implementation over stdio when installed with
+  the `postgresql` optional dependency.
 
-This repository does not yet claim a supported release installation. The
-commands below are checkout/development invocations. PostgreSQL, `uvx`
-distribution, an administration CLI, remote MCP, export/import/purge, hosted
+SQLite is the default local reference backend. PostgreSQL is a supported
+generic public-v1 stdio reference backend when the package is installed with
+its `[postgresql]` extra and an operator provides a database. The commands
+below are checkout/development invocations; a supported `uvx` distribution,
+an administration CLI, remote MCP, physical export/import/purge, hosted
 tenancy, and semantic or fuzzy search remain deferred.
 
 ## Documentation
@@ -283,7 +287,7 @@ The current source contract deliberately excludes:
 
 - generated schema-specific tools and per-domain services;
 - semantic, fuzzy, embedding, or cross-service search;
-- PostgreSQL and third-party storage adapters;
+- third-party storage adapters or mixed-backend runtime composition;
 - online export/import/restore, backup, repair, archive/resume, and purge;
 - an administration CLI and supported `uvx` installation;
 - remote MCP, authentication, hosted tenancy, and multi-host SQLite; and

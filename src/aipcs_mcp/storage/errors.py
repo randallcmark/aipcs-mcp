@@ -30,7 +30,7 @@ class StorageTransientJournal(StorageUnavailable):
 
 
 class StorageBusy(StorageError):
-    """SQLite reported bounded, retryable cross-process contention."""
+    """The adapter reported bounded, retryable storage contention."""
 
     message = "The requested storage is busy."
 

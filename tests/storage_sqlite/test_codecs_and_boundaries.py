@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -11,15 +12,17 @@ from fixtures import valid_manifest
 
 from aipcs_mcp.application.models import Service
 from aipcs_mcp.manifest_v2 import ManifestV2
-from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
-from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
-from aipcs_mcp.storage.sqlite import adapter as adapter_module
-from aipcs_mcp.storage.sqlite.codecs import (
+from aipcs_mcp.storage import codecs as storage_codecs
+from aipcs_mcp.storage.codecs import (
     decode_result,
     decode_time,
     encode_result,
     validate_service,
 )
+from aipcs_mcp.storage.errors import StorageMigrationError, StorageUnavailable
+from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
+from aipcs_mcp.storage.sqlite import adapter as adapter_module
+from aipcs_mcp.storage.sqlite import codecs as sqlite_codecs
 from aipcs_mcp.storage.sqlite.connection import set_query_only
 from aipcs_mcp.storage.sqlite.location import AnchoredLocation
 from aipcs_mcp.storage.sqlite.uow import SQLiteRegistryUnitOfWork
@@ -43,6 +46,47 @@ def _assert_bounded(error: BaseException) -> None:
     assert error.__cause__ is None
     assert error.__context__ is None
     assert "secret" not in str(error)
+
+
+def test_sqlite_codec_module_reexports_every_canonical_storage_codec() -> None:
+    exported = {
+        "decode_legacy_result",
+        "decode_lifecycle_intent",
+        "decode_r1_service",
+        "decode_result",
+        "decode_service",
+        "decode_time",
+        "encode_manifest",
+        "encode_result",
+        "encode_service_values",
+        "encode_time",
+        "validate_audit_row",
+        "validate_r1_audit_row",
+        "validate_r1_mutation_row",
+        "validate_r2_mutation_row",
+        "validate_service",
+    }
+    assert set(sqlite_codecs.__all__) == exported
+    assert all(
+        getattr(sqlite_codecs, name) is getattr(storage_codecs, name)
+        for name in exported
+    )
+
+
+def test_backend_neutral_codec_module_has_no_sqlite_dependency() -> None:
+    tree = ast.parse(Path(storage_codecs.__file__).read_text(encoding="utf-8"))
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert not any(name.startswith("aipcs_mcp.storage.sqlite") for name in imported)
+    assert "sqlite3" not in imported
 
 
 def test_service_id_must_be_an_actual_uuid_object() -> None:

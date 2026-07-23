@@ -21,6 +21,9 @@ class ConfigOverrides:
     sqlite_data_root: str | None = field(default=None, repr=False)
     sqlite_busy_timeout_ms: str | None = None
     postgres_dsn_env: str | None = field(default=None, repr=False)
+    postgres_connect_timeout_seconds: str | None = None
+    postgres_lock_timeout_ms: str | None = None
+    postgres_statement_timeout_ms: str | None = None
     log_level: str | None = None
 
 
@@ -34,6 +37,9 @@ class ResolvedConfiguration:
     log_level: LogLevel
     sources: Mapping[str, Source]
     sqlite_busy_timeout_ms: int = 5000
+    postgres_connect_timeout_seconds: int = 10
+    postgres_lock_timeout_ms: int = 5000
+    postgres_statement_timeout_ms: int = 30000
 
     def __post_init__(self) -> None:
         """Copy source metadata so direct construction cannot retain mutable state."""

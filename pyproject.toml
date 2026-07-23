@@ -28,6 +28,9 @@ dev = [
   "pytest>=8",
   "ruff>=0.8,<1",
 ]
+postgresql = [
+  "psycopg[binary]>=3.2,<4",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

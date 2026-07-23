@@ -151,12 +151,36 @@ paths, storage roots, DSN-reference names, raw environment/TOML, endpoints, and
 secrets. Configuration has no dotenv loading, implicit file discovery, include
 mechanism, literal credential field, or remote listener setting.
 
+## PostgreSQL trust boundary
+
+PostgreSQL is a reference adapter for an operator-provisioned database, not a
+hosted service or tenancy boundary. It uses one dedicated non-superuser role
+and creates only the fixed `aipcs_registry` schema plus exact private
+`svc_<uuid hex>` schemas. It does not create databases, roles, extensions, or
+grant elevated capabilities. Public schema access must be revoked.
+
+Configuration stores only the name of an environment variable containing the
+DSN. Offline configuration commands do not read that variable. `serve` reads
+the selected secret once during runtime construction; reports, exceptions,
+logs, representations, and public failures never disclose the DSN-reference
+name, DSN, credentials, host, port, database, schema identifiers, driver text,
+or SQLSTATE. libpq TLS and certificate verification settings are operator
+controlled through the DSN and are not weakened or inferred by AIPCS.
+
+PostgreSQL tests may connect only to an exact disposable fixture that they
+created with synthetic credentials, loopback-only random port publication, no
+host mounts, and fixture labels. Cleanup targets that exact fixture. Tests do
+not fall back to an ambient DSN, inspect or mutate unrelated containers, or
+connect to an operator's running PostgreSQL server.
+
 ## Repository boundary
 
 Repository tests and examples are synthetic contract fixtures. Do not commit
 operational databases, snapshots, transcripts, credentials, personal context,
 or agent-specific operating instructions to the public repository.
 
-PostgreSQL, remote MCP, authentication, hosted tenancy, export/import/purge,
-repair, and administration workflows are deferred and must define their own
-trust boundaries before release.
+PostgreSQL is a supported generic public-v1 stdio reference backend when the
+package is installed with its `[postgresql]` extra. Remote MCP,
+authentication, hosted tenancy, physical export/import/purge, repair, and
+administration workflows remain deferred and must define their own trust
+boundaries before release.

@@ -16,6 +16,7 @@ from mcp import types
 import aipcs_mcp.runtime as runtime
 from aipcs_mcp.configuration.models import ResolvedConfiguration
 from aipcs_mcp.storage.contracts import MigrationState
+from aipcs_mcp.storage.postgresql import PostgreSQLDsn
 from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,32 @@ def _config(
 
 def _secure_parent(root: Path) -> None:
     os.chmod(root.parent, 0o700)
+
+
+def _postgres_config() -> ResolvedConfiguration:
+    return ResolvedConfiguration(
+        profile="postgresql",
+        transport="stdio",
+        principal_id="configured-principal",
+        sqlite_data_root=None,
+        postgres_dsn_env="AIPCS_SYNTHETIC_DSN",
+        log_level="warning",
+        sources={
+            "profile": "cli",
+            "transport": "default",
+            "principal_id": "cli",
+            "sqlite_data_root": "default",
+            "sqlite_busy_timeout_ms": "default",
+            "postgres_dsn_env": "cli",
+            "postgres_connect_timeout_seconds": "cli",
+            "postgres_lock_timeout_ms": "cli",
+            "postgres_statement_timeout_ms": "cli",
+            "log_level": "default",
+        },
+        postgres_connect_timeout_seconds=7,
+        postgres_lock_timeout_ms=321,
+        postgres_statement_timeout_ms=6543,
+    )
 
 
 async def _tool_names(server: object) -> list[str]:
@@ -157,6 +184,243 @@ def test_ready_sqlite_migrates_once_before_mcp_construction(
     assert calls == [
         "location", "adapter", "migrate", "catalog", "domain", "coordinator", "data_store", "server"
     ]
+
+
+def test_ready_postgresql_resolves_the_dsn_once_and_composes_one_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    descriptor: PostgreSQLDsn | None = None
+    policy = object()
+    catalog: object | None = None
+    domain: object | None = None
+    coordinator: object | None = None
+    clock: object | None = None
+
+    class Environment(dict[str, str]):
+        reads = 0
+
+        def get(self, key: str, default: object = None) -> str | object:  # type: ignore[override]
+            self.reads += 1
+            assert key == "AIPCS_SYNTHETIC_DSN"
+            return super().get(key, default)
+
+    environment = Environment(AIPCS_SYNTHETIC_DSN="postgresql://synthetic-secret")
+
+    class Policy:
+        @classmethod
+        def from_configuration(cls, config: ResolvedConfiguration) -> object:
+            assert config is _postgres_config_value
+            calls.append("policy")
+            return policy
+
+    class Adapter:
+        def __init__(self, received_dsn: object, received_policy: object) -> None:
+            nonlocal descriptor
+            assert isinstance(received_dsn, PostgreSQLDsn)
+            assert received_policy is policy
+            descriptor = received_dsn
+            calls.append("adapter")
+
+        def migrate(self) -> MigrationState:
+            calls.append("migrate")
+            return MigrationState("registry", 1, 1, "ready")
+
+        def open_uow(self) -> object:
+            raise AssertionError("composition must not open a registry unit of work")
+
+    class Catalog:
+        def __init__(self, received_dsn: object, **kwargs: object) -> None:
+            nonlocal catalog
+            assert received_dsn is descriptor
+            assert kwargs == {
+                "connect_timeout_seconds": 7,
+                "lock_timeout_ms": 321,
+                "statement_timeout_ms": 6543,
+            }
+            catalog = self
+            calls.append("catalog")
+
+    class Domain:
+        def __init__(self, received_dsn: object, **kwargs: object) -> None:
+            nonlocal domain
+            assert received_dsn is descriptor
+            assert kwargs == {
+                "connect_timeout_seconds": 7,
+                "lock_timeout_ms": 321,
+                "statement_timeout_ms": 6543,
+                "service_store_catalog": catalog,
+            }
+            domain = self
+            calls.append("domain")
+
+    class Coordinator:
+        def __init__(
+            self,
+            uows: object,
+            received_clock: object,
+            received_catalog: object,
+            received_domain: object,
+        ) -> None:
+            nonlocal coordinator, clock
+            assert callable(uows)
+            assert isinstance(received_clock, runtime.SystemUtcClock)
+            assert received_catalog is catalog
+            assert received_domain is domain
+            coordinator, clock = self, received_clock
+            calls.append("coordinator")
+
+        def execute(self, command: object) -> object:
+            raise AssertionError(f"tool registration must not execute {command!r}")
+
+    class DataStore:
+        def __init__(self, received_dsn: object, **kwargs: object) -> None:
+            assert received_dsn is descriptor
+            assert kwargs["connect_timeout_seconds"] == 7
+            assert kwargs["lock_timeout_ms"] == 321
+            assert kwargs["statement_timeout_ms"] == 6543
+            assert kwargs["service_store_catalog"] is catalog
+            assert kwargs["domain_schema_store"] is domain
+            assert callable(kwargs["clock"])
+            assert callable(kwargs["record_ids"])
+            assert callable(kwargs["branch_ids"])
+            calls.append("data_store")
+
+    real_create_server = runtime.create_server
+    server: object | None = None
+
+    def create(**kwargs: object) -> object:
+        nonlocal server
+        application = kwargs["application"]
+        assert isinstance(application, runtime.ServiceApplication)
+        assert application._clock is clock
+        assert kwargs["principal_id"] == "configured-principal"
+        assert kwargs["registry_lifecycle"] is True
+        assert kwargs["lifecycle_executor"] is coordinator
+        assert isinstance(kwargs["data_application"], runtime.DataApplication)
+        calls.append("server")
+        server = real_create_server(**kwargs)
+        return server
+
+    _postgres_config_value = _postgres_config()
+    monkeypatch.setattr(runtime, "PostgreSQLConnectionPolicy", Policy)
+    monkeypatch.setattr(runtime, "PostgreSQLRegistryAdapter", Adapter)
+    monkeypatch.setattr(runtime, "PostgreSQLServiceStoreCatalog", Catalog)
+    monkeypatch.setattr(runtime, "PostgreSQLDomainSchemaStore", Domain)
+    monkeypatch.setattr(runtime, "LifecycleCoordinator", Coordinator)
+    monkeypatch.setattr(runtime, "PostgreSQLMaterialisedDataStore", DataStore)
+    monkeypatch.setattr(runtime, "create_server", create)
+
+    composed = runtime.compose_server(_postgres_config_value, environ=environment)
+    assert composed is server
+    assert environment.reads == 1
+    assert calls == [
+        "policy",
+        "adapter",
+        "migrate",
+        "catalog",
+        "domain",
+        "coordinator",
+        "data_store",
+        "server",
+    ]
+    assert anyio.run(_tool_names, composed) == [
+        "aipcs_server_info",
+        "aipcs_service_seed",
+        "aipcs_service_list",
+        "aipcs_service_inspect",
+        "aipcs_service_design",
+        "aipcs_service_materialise",
+        "aipcs_service_evolve",
+        "aipcs_record_create",
+        "aipcs_record_get",
+        "aipcs_record_list",
+        "aipcs_record_search",
+        "aipcs_record_update",
+        "aipcs_record_delete",
+        "aipcs_record_history",
+        "aipcs_bootstrap",
+        "aipcs_service_summary",
+        "aipcs_branch_create",
+        "aipcs_branch_list",
+        "aipcs_branch_update",
+        "aipcs_branch_assign_records",
+        "aipcs_maintenance_scan",
+    ]
+
+
+@pytest.mark.parametrize("secret", [None, "\x00invalid"])
+def test_postgresql_secret_failures_are_bounded_before_adapter_construction(
+    monkeypatch: pytest.MonkeyPatch, secret: str | None
+) -> None:
+    config = _postgres_config()
+    monkeypatch.setattr(
+        runtime,
+        "PostgreSQLRegistryAdapter",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid secret must not construct an adapter")
+        ),
+    )
+    with pytest.raises(RuntimeError) as raised:
+        runtime.compose_server(config, environ={"AIPCS_SYNTHETIC_DSN": secret} if secret else {})
+    rendered = str(raised.value)
+    assert rendered == "PostgreSQL runtime could not be composed."
+    assert "AIPCS_SYNTHETIC_DSN" not in rendered
+    assert "invalid" not in rendered
+
+
+def test_postgresql_composition_bounds_lower_layer_runtime_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _postgres_config()
+    synthetic_dsn = "postgresql://synthetic-secret"
+    monkeypatch.setattr(runtime, "resolve_postgresql_dsn_for_serve", lambda *_: object())
+    monkeypatch.setattr(
+        runtime,
+        "PostgreSQLConnectionPolicy",
+        type("Policy", (), {"from_configuration": classmethod(lambda cls, _: object())}),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "PostgreSQLRegistryAdapter",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError(synthetic_dsn)),
+    )
+    with pytest.raises(RuntimeError) as raised:
+        runtime.compose_server(config, environ={"AIPCS_SYNTHETIC_DSN": synthetic_dsn})
+    assert str(raised.value) == "PostgreSQL runtime could not be composed."
+    assert synthetic_dsn not in str(raised.value)
+
+
+@pytest.mark.parametrize("state", ["uninitialised", "incompatible"])
+def test_non_ready_postgresql_fails_before_service_store_construction(
+    monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    descriptor = object()
+
+    class Policy:
+        @classmethod
+        def from_configuration(cls, config: ResolvedConfiguration) -> object:
+            return object()
+
+    class Adapter:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def migrate(self) -> MigrationState:
+            return MigrationState("registry", 0 if state == "uninitialised" else 1, 1, state)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runtime, "resolve_postgresql_dsn_for_serve", lambda *_: descriptor)
+    monkeypatch.setattr(runtime, "PostgreSQLConnectionPolicy", Policy)
+    monkeypatch.setattr(runtime, "PostgreSQLRegistryAdapter", Adapter)
+    monkeypatch.setattr(
+        runtime,
+        "PostgreSQLServiceStoreCatalog",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-ready registry must not construct service stores")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="PostgreSQL runtime could not be composed"):
+        runtime.compose_server(_postgres_config(), environ={"AIPCS_SYNTHETIC_DSN": "ignored"})
 
 
 def test_ready_sqlite_server_info_does_not_allocate_or_migrate_a_service_store(tmp_path: Path) -> None:

@@ -139,8 +139,11 @@ still never upgrade it. Altered, generic dirty, partial, unknown, or future
 foundations remain fail-closed.
 
 The application layer never creates tables itself, discovers storage plugins,
-or exposes concrete adapters. SQLite catalog, relational, record, topology,
-and discovery implementations remain private compositions behind the ports.
+or exposes concrete adapters. A persistent process selects one homogeneous
+backend for both registry and service stores; mixing SQLite and PostgreSQL
+within one process is not a supported runtime shape. Concrete catalog,
+relational, record, topology, and discovery implementations remain private
+compositions behind the ports.
 
 See [storage contracts](storage-contracts.md),
 [security](security.md), and [compatibility](compatibility.md).
