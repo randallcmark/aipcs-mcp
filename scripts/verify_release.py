@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -541,6 +542,17 @@ def require_local_preconditions(root: Path, uv: str | None = None) -> str:
     return resolved_uv
 
 
+def require_uvx(uvx: str | None = None) -> str:
+    """Resolve the uvx executable used for the isolated distribution proof."""
+
+    resolved = uvx or shutil.which("uvx")
+    if resolved is None:
+        raise ReleaseVerificationError(
+            "uvx is required for the isolated package invocation gate."
+        )
+    return resolved
+
+
 def generated_checkout_artifacts(root: Path) -> tuple[Path, ...]:
     """Find denied private/generated material without entering .git or the development venv."""
 
@@ -789,7 +801,7 @@ def run_source_gates(
                 "sync",
                 "--locked",
                 "--offline",
-                "--extra",
+                "--group",
                 "dev",
                 "--no-install-project",
             ],
@@ -877,8 +889,8 @@ def install_distribution(
     return python
 
 
-def require_postgresql_extra(artifacts: ArtifactSet) -> None:
-    """Prove both built artifacts declare the optional Psycopg runtime dependency."""
+def require_distribution_contract(artifacts: ArtifactSet) -> None:
+    """Prove version, command, dependency-group, and PostgreSQL-extra metadata."""
 
     try:
         with ZipFile(artifacts.wheel) as archive:
@@ -888,25 +900,74 @@ def require_postgresql_extra(artifacts: ArtifactSet) -> None:
             if len(metadata_names) != 1:
                 raise ValueError
             wheel_metadata = archive.read(metadata_names[0]).decode("utf-8")
+            entry_names = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/entry_points.txt")
+            ]
+            if len(entry_names) != 1:
+                raise ValueError
+            wheel_entry_points = archive.read(entry_names[0]).decode("utf-8")
+            wheel_init = archive.read("aipcs_mcp/__init__.py").decode("utf-8")
         with open_tar(artifacts.sdist, "r:gz") as archive:
-            members = [member for member in archive.getmembers() if member.name.endswith("/pyproject.toml")]
-            if len(members) != 1:
+            projects = [
+                member
+                for member in archive.getmembers()
+                if member.name.endswith("/pyproject.toml")
+            ]
+            inits = [
+                member
+                for member in archive.getmembers()
+                if member.name.endswith("/src/aipcs_mcp/__init__.py")
+            ]
+            if len(projects) != 1 or len(inits) != 1:
                 raise ValueError
-            stream = archive.extractfile(members[0])
-            if stream is None:
+            project_stream = archive.extractfile(projects[0])
+            init_stream = archive.extractfile(inits[0])
+            if project_stream is None or init_stream is None:
                 raise ValueError
-            sdist_project = stream.read().decode("utf-8")
+            sdist_project = tomllib.loads(project_stream.read().decode("utf-8"))
+            sdist_init = init_stream.read().decode("utf-8")
     except Exception:
-        raise ReleaseVerificationError("PostgreSQL optional-dependency artifact inspection failed.") from None
+        raise ReleaseVerificationError(
+            "Distribution metadata inspection failed."
+        ) from None
+    version = re.search(r"^Version: (?P<value>\S+)$", wheel_metadata, re.MULTILINE)
+    source_versions = [
+        re.search(
+            r'^__version__ = "(?P<value>[^"]+)"$',
+            source,
+            re.MULTILINE,
+        )
+        for source in (wheel_init, sdist_init)
+    ]
     if (
-        "Provides-Extra: postgresql" not in wheel_metadata
+        version is None
+        or any(match is None for match in source_versions)
+        or any(
+            match is not None and match.group("value") != version.group("value")
+            for match in source_versions
+        )
+        or "Name: aipcs-mcp" not in wheel_metadata
+        or "Requires-Python: >=3.12" not in wheel_metadata
+        or "aipcs = aipcs_mcp.cli:main" not in wheel_entry_points
+        or "Provides-Extra: postgresql" not in wheel_metadata
+        or "Provides-Extra: dev" in wheel_metadata
         or "Requires-Dist: psycopg[binary]" not in wheel_metadata
-        or "postgresql" not in wheel_metadata
-        or "[project.optional-dependencies]" not in sdist_project
-        or "postgresql" not in sdist_project
-        or "psycopg[binary]" not in sdist_project
+        or sdist_project.get("project", {}).get("version") is not None
+        or sdist_project.get("project", {}).get("dynamic") != ["version"]
+        or set(sdist_project.get("project", {}).get("optional-dependencies", {}))
+        != {"postgresql"}
+        or set(sdist_project.get("dependency-groups", {})) != {"dev"}
+        or sdist_project.get("tool", {})
+        .get("setuptools", {})
+        .get("dynamic", {})
+        .get("version")
+        != {"attr": "aipcs_mcp.__version__"}
     ):
-        raise ReleaseVerificationError("PostgreSQL optional dependency is missing from a release artifact.")
+        raise ReleaseVerificationError(
+            "Distribution metadata does not match the frozen packaging contract."
+        )
 
 
 def install_postgresql_distribution(
@@ -5281,6 +5342,151 @@ def run_installed_admin_cli_smoke(
     )
 
 
+def _uvx_smoke_program() -> str:
+    """Return an isolated uvx help, MCP, and SQLite administration workflow."""
+
+    return r"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import anyio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+uvx, artifact_text, workspace_text = sys.argv[1:]
+artifact = Path(artifact_text)
+workspace = Path(workspace_text)
+principal = "uvx-release-principal"
+missing_root = workspace / "missing"
+data_root = workspace / "data"
+base = [uvx, "--offline", "--isolated", "--from", str(artifact), "aipcs"]
+environment = dict(os.environ)
+
+
+def invoke(arguments):
+    completed = subprocess.run(
+        [*base, *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=45,
+    )
+    assert completed.returncode == 0, (
+        completed.returncode,
+        completed.stdout,
+        completed.stderr,
+    )
+    return json.loads(completed.stdout)
+
+
+help_result = subprocess.run(
+    [*base, "--help"],
+    check=False,
+    capture_output=True,
+    text=True,
+    env=environment,
+    timeout=45,
+)
+assert help_result.returncode == 0
+assert "serve" in help_result.stdout
+assert "status" in help_result.stdout
+assert "service" in help_result.stdout
+
+missing = invoke([
+    "status",
+    "--profile", "sqlite",
+    "--principal-id", principal,
+    "--sqlite-data-root", str(missing_root),
+])
+assert missing["result"]["registry"]["status"] == "uninitialised"
+assert not missing_root.exists()
+
+
+async def seed_through_mcp():
+    parameters = StdioServerParameters(
+        command=uvx,
+        args=[
+            "--offline", "--isolated", "--from", str(artifact), "aipcs",
+            "serve",
+            "--profile", "sqlite",
+            "--principal-id", principal,
+            "--sqlite-data-root", str(data_root),
+        ],
+        env=environment,
+    )
+    async with stdio_client(parameters) as (reader, writer):
+        async with ClientSession(reader, writer) as session:
+            await session.initialize()
+            seeded = await session.call_tool(
+                "aipcs_service_seed",
+                {
+                    "domain_name": "uvx_notes",
+                    "domain_class": "release",
+                    "intent_description": "Isolated uvx release smoke.",
+                    "idempotency_key": "uvx-seed",
+                },
+            )
+            assert seeded.structuredContent["ok"] is True
+            service_id = seeded.structuredContent["result"]["service_id"]
+            listed = await session.call_tool("aipcs_service_list", {})
+            assert [
+                item["service_id"]
+                for item in listed.structuredContent["result"]["services"]
+            ] == [service_id]
+            return service_id
+
+
+service_id = anyio.run(seed_through_mcp)
+status = invoke([
+    "status",
+    "--profile", "sqlite",
+    "--principal-id", principal,
+    "--sqlite-data-root", str(data_root),
+])
+assert status["result"]["overall"] == "ready"
+listed = invoke([
+    "service", "list",
+    "--profile", "sqlite",
+    "--principal-id", principal,
+    "--sqlite-data-root", str(data_root),
+])
+assert [item["service_id"] for item in listed["result"]["services"]] == [service_id]
+assert data_root.joinpath("registry.sqlite").is_file()
+
+print("UVX_SMOKE_OK", flush=True)
+"""
+
+
+def run_uvx_smoke(
+    python: Path,
+    uvx: str,
+    artifact: Path,
+    workspace: Path,
+    name: str,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Exercise one wheel or sdist only through an isolated uvx command."""
+
+    client = workspace / f"{name}-uvx-smoke.py"
+    client.write_text(_uvx_smoke_program(), encoding="utf-8")
+    root = workspace / f"{name}-uvx"
+    root.mkdir(mode=0o700)
+    run_stage(
+        f"isolated uvx {name}",
+        [python, "-I", client, uvx, artifact, root],
+        cwd=root,
+        environment=environment,
+        timeout=POSTGRES_SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+
+
 def run_sdist_startup_smoke(
     python: Path,
     workspace: Path,
@@ -5481,7 +5687,7 @@ def verify_postgresql_integration(
             environment=source_environment,
             redaction_roots=redaction_roots,
         )
-        require_postgresql_extra(artifacts)
+        require_distribution_contract(artifacts)
         with DisposablePostgreSQLRelease(postgres_major) as target:
             for name, artifact in (("wheel", artifacts.wheel), ("sdist", artifacts.sdist)):
                 python = install_postgresql_distribution(
@@ -5567,6 +5773,7 @@ def verify_release(
     root = root.resolve()
     environment = scrubbed_environment()
     uv = require_local_preconditions(root)
+    uvx = require_uvx()
     require_clean_checkout_artifacts(root)
     exact_commit = (
         require_exact_tip(root, environment=environment)
@@ -5610,6 +5817,7 @@ def verify_release(
             environment=source_environment,
             redaction_roots=redaction_roots,
         )
+        require_distribution_contract(source_artifacts)
         clean_copy = make_clean_copy(root, workspace, environment=environment)
         if exact_commit is not None:
             require_same_exact_tip(clean_copy.root, exact_commit, environment=environment)
@@ -5633,6 +5841,7 @@ def verify_release(
             environment=copy_environment,
             redaction_roots=redaction_roots,
         )
+        require_distribution_contract(copy_artifacts)
         wheel_python = install_distribution(
             source_artifacts.wheel,
             workspace,
@@ -5709,6 +5918,15 @@ def verify_release(
         )
         run_installed_admin_cli_smoke(
             wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_uvx_smoke(
+            wheel_python,
+            uvx,
+            source_artifacts.wheel,
             workspace,
             "wheel",
             environment=environment,
@@ -5797,6 +6015,15 @@ def verify_release(
         )
         run_installed_admin_cli_smoke(
             sdist_python,
+            workspace,
+            "sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_uvx_smoke(
+            sdist_python,
+            uvx,
+            source_artifacts.sdist,
             workspace,
             "sdist",
             environment=environment,

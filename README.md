@@ -22,9 +22,31 @@ The current source runtime supports:
 SQLite is the default local reference backend. PostgreSQL is a supported
 generic public-v1 stdio reference backend when the package is installed with
 its `[postgresql]` extra and an operator provides a database. The commands
-below are checkout/development invocations; a supported `uvx` distribution,
-remote MCP, physical backup/restore, hosted tenancy, and semantic or fuzzy
+below distinguish isolated package invocation from checkout development.
+Remote MCP, physical backup/restore, hosted tenancy, and semantic or fuzzy
 search remain deferred.
+
+## Installation and isolated invocation
+
+Run the packaged command in an isolated environment:
+
+```text
+uvx --from aipcs-mcp aipcs --help
+```
+
+The PostgreSQL adapter is an explicit optional dependency:
+
+```text
+uvx --from 'aipcs-mcp[postgresql]' aipcs config validate \
+  --profile postgresql \
+  --principal-id local-agent \
+  --postgres-dsn-env AIPCS_POSTGRES_DSN
+```
+
+`uvx` isolates Python packages, not persistent AIPCS data. Supply the same
+operator-owned SQLite data root or PostgreSQL DSN reference on subsequent
+invocations. The package requires Python 3.12 or newer. Source checkouts use
+the locked development environment described below.
 
 ## Documentation
 
@@ -355,7 +377,6 @@ The current source contract deliberately excludes:
 - semantic, fuzzy, embedding, or cross-service search;
 - third-party storage adapters or mixed-backend runtime composition;
 - physical backup/restore and arbitrary repair;
-- a supported `uvx` installation;
 - remote MCP, authentication, hosted tenancy, and multi-host SQLite; and
 - automatic truth resolution, merge, archival, deletion, or schema invention.
 

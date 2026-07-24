@@ -1,12 +1,13 @@
 # Compatibility and release boundary
 
 `aipcs-mcp` remains pre-release (`0.0.0.dev0`). The source tree implements the
-public-v1 contract below. A supported distribution channel, release window,
-deprecation policy, and security-fix commitment remain to be defined.
+public-v1 contract below and its wheel, sdist, and isolated `uvx` invocation
+are release-verified. Publication, a release window, deprecation policy, and
+security-fix commitment remain to be defined.
 
 | Layer | Identifier | Current source contract |
 | --- | --- | --- |
-| Distribution | `aipcs-mcp` SemVer | Development package and `aipcs` command; no supported distribution channel yet. |
+| Distribution | `aipcs-mcp` SemVer | Single-sourced pre-release version, wheel/sdist, `aipcs` command, and verified `uvx --from aipcs-mcp aipcs …` invocation. |
 | MCP capability | `aipcs_mcp_contract` | `1.2.0`; 21-tool SQLite or PostgreSQL surface when the selected persistent profile is ready. |
 | Schema | `manifest_version` | Manifest v2 is normal design input. |
 | Configuration | `config_version` | Strict configuration v1 with documented precedence. |
@@ -162,7 +163,8 @@ matrix through the existing coordinator with stable retry and recovery exits.
 C4 adds logical file export/import and dry-run validation. Cross-backend
 transfer remains two separately configured commands rather than a mixed
 runtime. C5 adds archived-only, authority-bound purge with terminal replay.
-The supported distribution workflow remains V1-12.
+V1-12 defines the supported isolated distribution workflow. Publication is a
+separate deliberate release action.
 
 ## Error and retry compatibility
 
@@ -187,7 +189,7 @@ No compatibility commitment yet exists for:
 - third-party adapters or mixed-backend runtime composition;
 - semantic, fuzzy, embedding, or cross-service search;
 - online physical backup/restore or arbitrary repair;
-- supported `uvx` packaging;
+- package-index publication and general-availability versioning;
 - remote MCP, authentication, hosted tenancy, or multi-host deployment; or
 - support windows, security-fix windows, or deprecation periods.
 

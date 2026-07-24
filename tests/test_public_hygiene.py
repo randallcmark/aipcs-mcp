@@ -6,6 +6,8 @@ import sys
 import tomllib
 from pathlib import Path, PurePosixPath
 
+from aipcs_mcp import __version__
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "public_hygiene", ROOT / "scripts/check_public_hygiene.py"
@@ -22,7 +24,13 @@ def reasons(path: str, data: bytes = b"safe", *, symlink: bool = False) -> list[
 def test_package_metadata_and_normal_tree() -> None:
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert metadata["project"]["name"] == "aipcs-mcp"
-    assert metadata["project"]["version"] == "0.0.0.dev0"
+    assert metadata["project"]["dynamic"] == ["version"]
+    assert metadata["tool"]["setuptools"]["dynamic"]["version"] == {
+        "attr": "aipcs_mcp.__version__"
+    }
+    assert __version__ == "0.0.0.dev0"
+    assert set(metadata["project"]["optional-dependencies"]) == {"postgresql"}
+    assert set(metadata["dependency-groups"]) == {"dev"}
     result = subprocess.run(
         [sys.executable, "scripts/check_public_hygiene.py"],
         cwd=ROOT,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aipcs-mcp"
-version = "0.0.0.dev0"
+dynamic = ["version"]
 description = "Contract-first MCP server for agent-defined persistent context services."
 readme = "README.md"
 requires-python = ">=3.12" # Matches the current reference implementation floor.
@@ -24,13 +24,18 @@ dependencies = [
 aipcs = "aipcs_mcp.cli:main"
 
 [project.optional-dependencies]
+postgresql = [
+  "psycopg[binary]>=3.2,<4",
+]
+
+[dependency-groups]
 dev = [
   "pytest>=8",
   "ruff>=0.8,<1",
 ]
-postgresql = [
-  "psycopg[binary]>=3.2,<4",
-]
+
+[tool.setuptools.dynamic]
+version = { attr = "aipcs_mcp.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

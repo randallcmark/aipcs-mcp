@@ -55,6 +55,6 @@ The current implementation remains local-first and pre-release. PostgreSQL is
 a supported generic public-v1 stdio reference backend when installed with its
 `[postgresql]` extra. V1-11 exposes the backend-neutral operational lifecycle
 and portable data seams through a bounded administration CLI. Semantic search,
-supported `uvx` installation, remote MCP, hosted identity, and
+package-index publication, remote MCP, hosted identity, and
 maintenance/deprecation policy remain separate future work. Their absence is
 deliberate and is not filled by examples or research artifacts.

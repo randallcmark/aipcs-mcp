@@ -498,6 +498,7 @@ def test_exact_tip_rejects_mutation_during_source_gates(
     workspace.mkdir(mode=0o700)
 
     monkeypatch.setattr(verifier, "require_local_preconditions", lambda _root: "uv")
+    monkeypatch.setattr(verifier, "require_uvx", lambda: "uvx")
     monkeypatch.setattr(verifier, "require_clean_checkout_artifacts", lambda _root: None)
     monkeypatch.setattr(verifier, "create_workspace", lambda: workspace)
 
@@ -803,6 +804,18 @@ def test_embedded_admin_cli_client_covers_the_installed_v1_11_surface(verifier) 
     assert "ADMIN_CLI_OK" in program
     assert "postgresql://" not in program
     assert "AIPCS_RELEASE_POSTGRES_DSN" not in program
+
+
+def test_embedded_uvx_client_is_isolated_and_runs_a_sqlite_workflow(verifier) -> None:
+    program = verifier._uvx_smoke_program()
+    compile(program, "uvx_smoke.py", "exec")
+    assert '"--offline", "--isolated", "--from"' in program
+    assert '"aipcs_service_seed"' in program
+    assert '"aipcs_service_list"' in program
+    assert '"status"' in program
+    assert '"service", "list"' in program
+    assert "UVX_SMOKE_OK" in program
+    assert "postgresql://" not in program
 
 
 def test_embedded_registry_r2_client_exercises_the_source_contract(
@@ -1243,6 +1256,37 @@ def test_admin_cli_smoke_uses_the_installed_console_command(
     assert calls[1][2] == tmp_path / "sdist-admin-cli"
 
 
+def test_uvx_smoke_runs_each_artifact_from_an_isolated_empty_directory(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name, suffix in (("wheel", ".whl"), ("sdist", ".tar.gz")):
+        verifier.run_uvx_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python",
+            "/synthetic/bin/uvx",
+            tmp_path / f"aipcs_mcp-0.0.0.dev0{suffix}",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [label for label, _, _ in calls] == [
+        "isolated uvx wheel",
+        "isolated uvx sdist",
+    ]
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert all(args[3] == "/synthetic/bin/uvx" for _, args, _ in calls)
+    assert calls[0][2] == tmp_path / "wheel-uvx"
+    assert calls[1][2] == tmp_path / "sdist-uvx"
+
+
 def test_postgresql_portable_lifecycle_smoke_covers_both_cross_backend_directions(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -1384,6 +1428,8 @@ def test_copy_side_gates_are_direct_and_never_reinvoke_verifier(
     )
     pytest_call = next(arguments for label, arguments, _ in calls if label == "pytest")
     ruff_call = next(arguments for label, arguments, _ in calls if label == "ruff")
+    group_index = sync_call.index("--group")
+    assert sync_call[group_index : group_index + 2] == ("--group", "dev")
     assert sync_call[-1] == "--no-install-project"
     assert boundary_call[-2:] == ("python", "scripts/check_application_boundaries.py")
     assert "--no-sync" in boundary_call

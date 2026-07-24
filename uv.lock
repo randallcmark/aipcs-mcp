@@ -10,7 +10,6 @@ resolution-markers = [
 
 [[package]]
 name = "aipcs-mcp"
-version = "0.0.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -18,12 +17,14 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+postgresql = [
+    { name = "psycopg", extra = ["binary"] },
+]
+
+[package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
-]
-postgresql = [
-    { name = "psycopg", extra = ["binary"] },
 ]
 
 [package.metadata]
@@ -31,10 +32,14 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.28.1,<2" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgresql'", specifier = ">=3.2,<4" },
     { name = "pydantic", specifier = ">=2.11,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
 ]
-provides-extras = ["dev", "postgresql"]
+provides-extras = ["postgresql"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "ruff", specifier = ">=0.8,<1" },
+]
 
 [[package]]
 name = "annotated-types"
