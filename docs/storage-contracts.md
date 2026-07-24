@@ -143,6 +143,14 @@ binds operation kind plus canonical payload fingerprint. Same-key/same-request
 returns the stored result; changed content fails. It has no prepared phase and
 is not lifecycle, schema, or cross-store authority.
 
+The `__aipcs_` idempotency-key prefix is reserved for service-local control
+evidence and is rejected by record and topology request contracts. The
+portable lifecycle seam uses one exact control row in the existing internal
+ledger for a monotonic write-admission fence. An exact legacy store with no
+control row is interpreted as generation 1/open; closing or reopening the
+fence writes a later generation atomically. This does not change the immutable
+R1–R3 migration history or make mutation replay rows portable.
+
 ### Retrieval
 
 Record get/list/search/history are read-only and principal-scoped. List,
@@ -274,11 +282,40 @@ SQLSTATE outcomes map into the existing bounded storage failure categories
 without exposing SQLSTATE, driver text, identifiers, endpoints, or
 credentials.
 
+## Internal portable service-store seam
+
+The application owns backend-neutral immutable values for record, history,
+branch, and branch-membership members plus a closeable snapshot-reader port.
+Members have one canonical cross-adapter order. The port accepts a detached
+logical `Service` allocation and never accepts a path, DSN, connection,
+schema object, SQL identifier, or adapter instance.
+
+Both reference adapters implement:
+
+- a stable read-only snapshot that requires an exact closed fence;
+- local transactional staging into an unpublished service allocation;
+- exact typed re-observation for safe retry;
+- monotonic compare-and-change write admission; and
+- an admission check inside every record/topology mutation transaction.
+
+SQLite uses its anchored location policy, WAL snapshot, and immediate writer
+transaction. PostgreSQL uses schema-qualified statements, repeatable-read
+snapshots, and one transaction-scoped service advisory lock shared by data
+mutations and fence transitions. Logical staging never copies SQLite database,
+WAL, or SHM files and never exports PostgreSQL DDL, catalog state, roles,
+schemas, endpoints, or migration history.
+
+This seam is intentionally not composed into the MCP server, configuration,
+CLI, or filesystem artifact workflow yet. Registry preparation/publication,
+bundle orchestration, operator paths, and recovery UX remain later portable
+lifecycle slices.
+
 ## Deferred adapter work
 
 PostgreSQL is a supported generic public-v1 stdio reference adapter when the
 package is installed with its `[postgresql]` extra. Third-party adapters,
-mixed-backend composition, physical export/import, online backup, repair,
-archive/resume, purge, an administration CLI, and cross-store transactions
-remain deferred. Those features require explicit contracts and validation
-rather than exposure of either reference adapter's private modules.
+mixed-backend runtime composition, physical export/import, online backup,
+repair, operator-facing archive/resume/purge, an administration CLI, and
+cross-store transactions remain deferred. Those features require explicit
+contracts and validation rather than exposure of either reference adapter's
+private modules.

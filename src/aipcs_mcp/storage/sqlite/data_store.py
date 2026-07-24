@@ -63,6 +63,13 @@ from aipcs_mcp.storage.errors import (
     StorageMigrationError,
     StorageUnavailable,
 )
+from aipcs_mcp.storage.write_admission import (
+    FENCE_FINGERPRINT,
+    FENCE_IDEMPOTENCY_KEY,
+    FENCE_OPERATION_KIND,
+    INITIAL_FENCE,
+    decode_fence,
+)
 
 from . import discovery, service_store_inspection
 from .connection import (
@@ -867,6 +874,9 @@ class SQLiteMaterialisedDataStore:
             _begin_immediate(connection, anchored)
             _require_ready(connection, namespace)
             _require_domain(connection, specification)
+            if not _write_admission_open(connection):
+                connection.rollback()
+                return DataFailure("write_admission_closed")
             result = operation(connection)
             if type(result) is DataFailure:
                 connection.rollback()
@@ -1361,6 +1371,22 @@ def _require_ready(connection: sqlite3.Connection, namespace: str) -> None:
         != "ready"
     ):
         raise StorageMigrationError()
+
+
+def _write_admission_open(connection: sqlite3.Connection) -> bool:
+    rows = connection.execute(
+        f'SELECT "idempotency_key","fingerprint","result_json" '
+        f'FROM "{R3_MUTATION_TABLE}" WHERE "operation_kind"=?',
+        (FENCE_OPERATION_KIND,),
+    ).fetchall()
+    if not rows:
+        return INITIAL_FENCE.state == "open"
+    if len(rows) != 1 or tuple(rows[0][:2]) != (
+        FENCE_IDEMPOTENCY_KEY,
+        FENCE_FINGERPRINT,
+    ):
+        raise StorageMigrationError()
+    return decode_fence(rows[0][2]).state == "open"
 
 
 def _require_domain(

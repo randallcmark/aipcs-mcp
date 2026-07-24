@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from typing import Literal, Protocol
 from uuid import UUID
@@ -22,6 +22,12 @@ from .models import (
     RecoveryRequiredLifecycleClaim,
     Service,
     ServiceSaveResult,
+)
+from .portable_store import (
+    FenceTransitionResult,
+    PortableStoreMember,
+    StageResult,
+    WriteAdmissionFence,
 )
 from .registry_authority import (
     RegistryAuthorityCommand,
@@ -156,3 +162,46 @@ class RegistryUnitOfWork(Protocol):
 
 
 UowFactory = Callable[[], RegistryUnitOfWork]
+
+
+class StoreSnapshotReader(Protocol):
+    """One stable, closeable backend snapshot in canonical member order."""
+
+    @property
+    def fence(self) -> WriteAdmissionFence: ...
+
+    def __iter__(self) -> Iterator[PortableStoreMember]: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> StoreSnapshotReader: ...
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None: ...
+
+
+class PortableServiceStore(Protocol):
+    """Logical snapshot/staging and service-local write-admission boundary."""
+
+    def open_snapshot(
+        self, service: Service, expected_fence: WriteAdmissionFence
+    ) -> StoreSnapshotReader: ...
+
+    def stage(
+        self,
+        service: Service,
+        members: Iterable[PortableStoreMember],
+        initial_fence: WriteAdmissionFence,
+    ) -> StageResult: ...
+
+    def observe(
+        self,
+        service: Service,
+        expected_fence: WriteAdmissionFence,
+        members: Iterable[PortableStoreMember],
+    ) -> bool: ...
+
+    def read_fence(self, service: Service) -> WriteAdmissionFence: ...
+
+    def transition_fence(
+        self,
+        service: Service,
+        expected: WriteAdmissionFence,
+        target_state: Literal["open", "closed"],
+    ) -> FenceTransitionResult: ...

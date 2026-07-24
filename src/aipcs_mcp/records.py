@@ -57,6 +57,7 @@ _FAILURE_CODES = frozenset(
         "storage_busy",
         "operation_uncertain",
         "storage_unavailable",
+        "write_admission_closed",
         "internal_error",
     }
 )
@@ -92,6 +93,7 @@ DataFailureCode = Literal[
     "storage_busy",
     "operation_uncertain",
     "storage_unavailable",
+    "write_admission_closed",
     "internal_error",
 ]
 
@@ -1295,7 +1297,12 @@ def _require_revision(value: object) -> None:
 
 
 def _require_idempotency_key(value: object) -> None:
-    if type(value) is not str or not 1 <= len(value) <= MAX_IDEMPOTENCY_KEY_LENGTH or "\x00" in value:
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= MAX_IDEMPOTENCY_KEY_LENGTH
+        or "\x00" in value
+        or value.startswith("__aipcs_")
+    ):
         raise RecordContractError()
 
 
