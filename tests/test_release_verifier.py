@@ -395,6 +395,30 @@ def test_postgresql_stdio_probe_covers_public_workflow_without_embedded_dsn(veri
     assert "AIPCS_RELEASE_POSTGRES_DSN" in program
 
 
+def test_postgresql_admin_cli_probe_covers_both_transfer_directions(verifier) -> None:
+    program = verifier._postgresql_admin_cli_smoke_program()
+    compile(program, "postgresql_admin_cli_smoke.py", "exec")
+    for command in (
+        '"status"',
+        '"doctor"',
+        '"storage"',
+        '"maintenance"',
+        '"suspend"',
+        '"archive"',
+        '"purge"',
+        '"export"',
+        '"import"',
+    ):
+        assert command in program
+    assert '"source_backend"] == "postgresql"' in program
+    assert '"source_backend"] == "sqlite"' in program
+    assert '"--dry-run"' in program
+    assert '"--confirm-service-id"' in program
+    assert "POSTGRES_ADMIN_CLI_OK" in program
+    assert "postgresql://" not in program
+    assert "AIPCS_RELEASE_POSTGRES_DSN" in program
+
+
 def test_cleanup_failure_blocks_success_without_masking_an_existing_failure(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -756,6 +780,29 @@ def test_embedded_portable_lifecycle_client_uses_private_streams_and_restarts(
     assert (root / "source" / "registry.sqlite").is_file()
     assert (root / "destination" / "registry.sqlite").is_file()
     assert tuple((root / "destination" / "services").glob("*.sqlite")) == ()
+
+
+def test_embedded_admin_cli_client_covers_the_installed_v1_11_surface(verifier) -> None:
+    program = verifier._admin_cli_smoke_program()
+    compile(program, "installed_admin_cli_smoke.py", "exec")
+    for command in (
+        '"status"',
+        '"doctor"',
+        '"storage"',
+        '"service"',
+        '"export"',
+        '"import"',
+        '"maintenance"',
+    ):
+        assert command in program
+    assert '"--dry-run"' in program
+    assert '"--confirm-service-id"' in program
+    assert '"verified_receipt"' in program
+    assert '"already_exists"' in program
+    assert '"validation_failed"' in program
+    assert "ADMIN_CLI_OK" in program
+    assert "postgresql://" not in program
+    assert "AIPCS_RELEASE_POSTGRES_DSN" not in program
 
 
 def test_embedded_registry_r2_client_exercises_the_source_contract(
@@ -1163,6 +1210,39 @@ def test_portable_lifecycle_smoke_uses_installed_interpreter_streams_and_restart
     assert calls[0][2] != calls[2][2]
 
 
+def test_admin_cli_smoke_uses_the_installed_console_command(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name in ("wheel", "sdist"):
+        executable = tmp_path / f"{name}-venv" / "bin" / "aipcs"
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        verifier.run_installed_admin_cli_smoke(
+            executable.parent / "python",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [label for label, _, _ in calls] == [
+        "installed wheel administration CLI",
+        "installed sdist administration CLI",
+    ]
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][1][3] == str(tmp_path / "wheel-venv" / "bin" / "aipcs")
+    assert calls[1][1][3] == str(tmp_path / "sdist-venv" / "bin" / "aipcs")
+    assert calls[0][2] == tmp_path / "wheel-admin-cli"
+    assert calls[1][2] == tmp_path / "sdist-admin-cli"
+
+
 def test_postgresql_portable_lifecycle_smoke_covers_both_cross_backend_directions(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -1211,6 +1291,47 @@ def test_postgresql_portable_lifecycle_smoke_covers_both_cross_backend_direction
         cwd == tmp_path / "postgres-wheel-portable-lifecycle-cwd"
         for _, _, cwd, _ in calls
     )
+
+
+def test_postgresql_admin_cli_smoke_passes_dsn_only_through_the_environment(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path, dict[str, str]]] = []
+
+    def fake_stage(label, args, *, cwd, environment, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd, dict(environment)))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    target = verifier.PostgreSQLReleaseTarget(
+        "127.0.0.1",
+        5432,
+        "installed_fixture",
+        "installed_runtime",
+        "synthetic-secret",
+    )
+    python = tmp_path / "wheel-venv" / "bin" / "python"
+    executable = python.parent / "aipcs"
+    verifier.run_postgresql_admin_cli_smoke(
+        python,
+        tmp_path,
+        executable,
+        "release_wheel",
+        target,
+        name="wheel",
+        environment={"KEEP": "yes"},
+        redaction_roots=(),
+    )
+
+    assert len(calls) == 1
+    label, args, cwd, environment = calls[0]
+    assert label == "installed PostgreSQL wheel administration CLI"
+    assert args[1] == "-I"
+    assert args[3:5] == (str(executable), "release_wheel")
+    assert cwd == tmp_path / "postgres-wheel-admin-cli"
+    assert environment["KEEP"] == "yes"
+    assert environment[verifier.POSTGRES_RELEASE_DSN_ENV] == target.dsn
+    assert target.dsn not in " ".join(args)
 
 
 def test_main_hides_unexpected_exception_details(monkeypatch, capsys, verifier) -> None:

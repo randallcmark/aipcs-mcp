@@ -711,6 +711,12 @@ def _validate_registry_rows(connection: object) -> None:
     claims_by_key: dict[tuple[str, str], tuple[dict[str, Any], object]] = {}
     for row in canonical_rows(claims, claims.fetchall()):
         claim = _validated_claim(row)
+        key = (row["principal_id"], row["idempotency_key"])
+        if key in claims_by_key:
+            raise StorageMigrationError()
+        if row["phase"] == "tombstoned":
+            claims_by_key[key] = (row, claim)
+            continue
         if row["operation_kind"] in {"legacy", "seed", "design", "materialise", "evolve"}:
             intent, completion = validate_r2_mutation_row(_legacy_claim_row(row))
             if intent is not None:
@@ -749,9 +755,6 @@ def _validate_registry_rows(connection: object) -> None:
                     )
                 ):
                     raise StorageMigrationError()
-        key = (row["principal_id"], row["idempotency_key"])
-        if key in claims_by_key:
-            raise StorageMigrationError()
         if type(claim) is Service:
             current = service_values.get(str(claim.service_id))
             if (

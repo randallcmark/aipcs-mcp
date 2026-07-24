@@ -79,8 +79,31 @@ def _service() -> Service:
     )
 
 
-def _members() -> tuple[PortableStoreMember, ...]:
-    fields = FrozenJsonObject.from_mapping({"body": "remember"})
+def _evolved_service() -> Service:
+    document = _manifest().model_dump(mode="json")
+    document["schema_version"] = 2
+    document["migration_history"] = [
+        {
+            "from_schema_version": 1,
+            "to_schema_version": 2,
+            "operations": ["add optional note summary"],
+        }
+    ]
+    document["entities"][0]["attributes"].append(
+        {"name": "summary", "type": "string"}
+    )
+    return replace(
+        _service(),
+        manifest=ManifestV2.model_validate(document),
+        schema_version=2,
+        service_revision=4,
+    )
+
+
+def _members(*, evolved: bool = False) -> tuple[PortableStoreMember, ...]:
+    fields = FrozenJsonObject.from_mapping(
+        {"body": "remember", **({"summary": None} if evolved else {})}
+    )
     return (
         PortableStoreMember(
             "record", RecordValue("note", RECORD_ID, 1, AT, AT, "import", fields)
@@ -123,6 +146,18 @@ def test_stage_snapshot_observe_and_exact_replay(tmp_path) -> None:  # type: ign
     assert adapter.stage(_service(), _members(), fence).status == "already_staged"
     changed = _members()[:-1]
     assert adapter.stage(_service(), changed, fence).status == "different"
+
+
+def test_stage_materialises_a_validated_evolved_snapshot_directly(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    adapter = SQLitePortableServiceStore(
+        SQLiteLocationPolicy(tmp_path / "data"), clock=lambda: AT
+    )
+    service = _evolved_service()
+    fence = WriteAdmissionFence(1, "closed")
+    members = _members(evolved=True)
+
+    assert adapter.stage(service, members, fence).status == "staged"
+    assert adapter.observe(service, fence, members)
 
 
 def test_archived_purge_removes_exact_store_and_reobserves_absence(

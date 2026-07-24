@@ -172,7 +172,12 @@ class PostgreSQLPortableServiceStore:
             raise StorageMigrationError()
         if service.manifest is None:
             raise StorageContractError()
-        if self._domain.materialise(locator, compile_manifest(service.manifest)).status != "ready":
+        if (
+            self._domain.materialise_snapshot(
+                locator, compile_manifest(service.manifest)
+            ).status
+            != "ready"
+        ):
             raise StorageMigrationError()
 
         connection: object | None = None

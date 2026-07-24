@@ -106,7 +106,25 @@ class SQLiteDomainSchemaStore:
         layout = build_domain_schema_layout(specification)
         if layout.schema_version != 1:
             raise StorageContractError()
+        return self._materialise_layout(namespace, layout)
 
+    @_bounded
+    def materialise_snapshot(
+        self,
+        locator: ServiceStoreLocator,
+        specification: RelationalSpecification,
+    ) -> DomainSchemaState:
+        """Materialise one validated portable snapshot at its current schema version."""
+
+        namespace = _namespace(locator)
+        layout = build_domain_schema_layout(specification)
+        return self._materialise_layout(namespace, layout)
+
+    def _materialise_layout(
+        self,
+        namespace: str,
+        layout: SQLiteDomainSchemaLayout,
+    ) -> DomainSchemaState:
         anchored: AnchoredLocation | None = None
         connection: sqlite3.Connection | None = None
         try:

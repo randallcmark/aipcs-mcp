@@ -135,7 +135,9 @@ class SQLitePortableServiceStore:
             raise StorageMigrationError()
         if service.manifest is None:
             raise StorageContractError()
-        domain = self._domain.materialise(locator, compile_manifest(service.manifest))
+        domain = self._domain.materialise_snapshot(
+            locator, compile_manifest(service.manifest)
+        )
         if domain.status != "ready":
             raise StorageMigrationError()
 

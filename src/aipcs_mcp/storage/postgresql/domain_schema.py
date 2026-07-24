@@ -130,6 +130,13 @@ class PostgreSQLDomainSchemaStore:
             _close(connection)
         return self.inspect(locator, specification)
 
+    def materialise_snapshot(
+        self, locator: ServiceStoreLocator, specification: RelationalSpecification
+    ) -> DomainSchemaState:
+        """Materialise one validated portable snapshot at its current schema version."""
+
+        return self.materialise(locator, specification)
+
     def evolve(
         self, locator: ServiceStoreLocator, transition: RelationalTransition
     ) -> DomainSchemaState:

@@ -1203,6 +1203,320 @@ def run_postgresql_stdio_probe(
         raise ReleaseVerificationError("Installed PostgreSQL stdio verification failed.") from None
 
 
+def _postgresql_admin_cli_smoke_program() -> str:
+    """Return the installed PostgreSQL and cross-backend CLI workflow."""
+
+    return r"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from aipcs_mcp.application.models import ApplicationContext, SeedCommand
+from aipcs_mcp.application.portable import decode_bundle_content
+from aipcs_mcp.application.portable_store import validate_portable_members
+from aipcs_mcp.application.registry_authority import StorageBackend
+from aipcs_mcp.application.services import ServiceApplication
+from aipcs_mcp.portable_io import validate_and_spool_bundle
+from aipcs_mcp.records import compile_record_specification
+from aipcs_mcp.runtime import SystemUtcClock, Uuid4ServiceIds
+from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
+from aipcs_mcp.storage.sqlite.portable import SQLitePortableServiceStore
+
+executable = Path(sys.argv[1])
+principal = sys.argv[2]
+workspace = Path(sys.argv[3])
+secret = os.environ["AIPCS_RELEASE_POSTGRES_DSN"]
+sqlite_principal = f"{principal}-sqlite"
+roundtrip_principal = f"{principal}-roundtrip"
+sqlite_root = workspace / "sqlite-destination"
+postgres_bundle = workspace / "postgres-export.jsonl"
+archive_bundle = workspace / "postgres-archive.jsonl"
+sqlite_bundle = workspace / "sqlite-export.jsonl"
+
+
+def invoke(arguments, expected=0, retry_uncertain=False):
+    for attempt in range(2 if retry_uncertain else 1):
+        completed = subprocess.run(
+            [str(executable), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=dict(os.environ),
+            timeout=45,
+        )
+        assert secret not in completed.stdout
+        assert secret not in completed.stderr
+        if completed.returncode == expected:
+            stream = completed.stdout if expected == 0 else completed.stderr
+            return json.loads(stream)
+        try:
+            failure = json.loads(completed.stderr)
+            code = failure["error"]["code"]
+        except Exception:
+            code = "unparseable"
+        if retry_uncertain and attempt == 0 and code == "operation_uncertain":
+            print("POSTGRES_ADMIN_RETRY_OPERATION_UNCERTAIN", flush=True)
+            continue
+        safe_code = "".join(character for character in code.upper() if character.isalpha() or character == "_")
+        print(f"POSTGRES_ADMIN_ERROR_{safe_code or 'UNKNOWN'}", flush=True)
+        assert completed.returncode == expected, (
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        )
+    raise AssertionError("The retryable operation did not converge.")
+
+
+def postgresql_config(value):
+    return [
+        "--profile", "postgresql",
+        "--principal-id", value,
+        "--postgres-dsn-env", "AIPCS_RELEASE_POSTGRES_DSN",
+    ]
+
+
+def sqlite_config():
+    return [
+        "--profile", "sqlite",
+        "--principal-id", sqlite_principal,
+        "--sqlite-data-root", str(sqlite_root),
+    ]
+
+
+source_config = postgresql_config(principal)
+print("POSTGRES_ADMIN_START", flush=True)
+assert invoke(["status", *source_config])["result"]["overall"] == "ready"
+print("POSTGRES_ADMIN_STATUS", flush=True)
+listed = invoke(["service", "list", *source_config])["result"]["services"]
+assert len(listed) == 1
+service = listed[0]
+service_id = service["service_id"]
+revision = service["service_revision"]
+assert service["operational_status"] == "active"
+print("POSTGRES_ADMIN_LIST", flush=True)
+assert invoke(["service", "inspect", service_id, *source_config])["result"]["service_id"] == service_id
+print("POSTGRES_ADMIN_INSPECT", flush=True)
+assert invoke(["storage", "status", "--service", service_id, *source_config])["result"]["status"] == "ready"
+print("POSTGRES_ADMIN_STORAGE", flush=True)
+assert invoke(["doctor", "--service", service_id, *source_config])["result"]["overall"] in {
+    "pass",
+    "warning",
+}
+print("POSTGRES_ADMIN_DOCTOR", flush=True)
+assert "candidates" in invoke(
+    ["maintenance", "scan", "--service", service_id, *source_config]
+)["result"]
+print("POSTGRES_ADMIN_READ", flush=True)
+
+suspended = invoke([
+    "service", "suspend", service_id,
+    "--expected-revision", str(revision),
+    "--operation-id", "81111111-1111-4111-8111-111111111111",
+    *source_config,
+])
+suspended_revision = suspended["result"]["service"]["service_revision"]
+assert suspended["result"]["service"]["operational_status"] == "suspended"
+print("POSTGRES_ADMIN_SUSPENDED", flush=True)
+
+exported = invoke([
+    "export", service_id,
+    "--output", str(postgres_bundle),
+    "--expected-revision", str(suspended_revision),
+    "--operation-id", "82222222-2222-4222-8222-222222222222",
+    *source_config,
+])
+assert exported["result"]["summary"]["source_backend"] == "postgresql"
+assert postgres_bundle.is_file()
+assert postgres_bundle.stat().st_mode & 0o777 == 0o600
+print("POSTGRES_ADMIN_POSTGRES_EXPORTED", flush=True)
+
+diagnostic_root = workspace / "sqlite-stage-diagnostic"
+with postgres_bundle.open("rb") as diagnostic_source:
+    with validate_and_spool_bundle(diagnostic_source) as diagnostic_bundle:
+        diagnostic_content = decode_bundle_content(
+            diagnostic_bundle.iter_lines(),
+            principal_id=sqlite_principal,
+            destination_backend=StorageBackend.SQLITE,
+        )
+checked_members = validate_portable_members(
+    diagnostic_content.members,
+    compile_record_specification(diagnostic_content.service.manifest),
+)
+print("POSTGRES_ADMIN_MEMBERS_VALID", flush=True)
+diagnostic_store = SQLitePortableServiceStore(
+    SQLiteLocationPolicy.from_resolved(diagnostic_root, "cli")
+)
+diagnostic_stage = diagnostic_store.stage(
+    diagnostic_content.service,
+    checked_members,
+    diagnostic_content.export_fence,
+)
+assert diagnostic_stage.status == "staged"
+assert diagnostic_store.observe(
+    diagnostic_content.service,
+    diagnostic_content.export_fence,
+    checked_members,
+)
+print("POSTGRES_ADMIN_SQLITE_STAGE_VALID", flush=True)
+
+dry = invoke([
+    "import", "--input", str(postgres_bundle), "--dry-run", *sqlite_config()
+])
+assert dry["result"]["service"]["service_id"] == service_id
+assert not sqlite_root.exists()
+print("POSTGRES_ADMIN_SQLITE_DRY_RUN", flush=True)
+sqlite_registry = SQLiteRegistryAdapter(
+    SQLiteLocationPolicy.from_resolved(sqlite_root, "cli")
+)
+assert sqlite_registry.migrate().status == "ready"
+print("POSTGRES_ADMIN_SQLITE_READY", flush=True)
+imported = invoke([
+    "import", "--input", str(postgres_bundle),
+    "--operation-id", "83333333-3333-4333-8333-333333333333",
+    "--yes",
+    *sqlite_config(),
+], retry_uncertain=True)
+assert imported["result"]["service"]["service_id"] == service_id
+assert imported["result"]["service"]["operational_status"] == "suspended"
+print("POSTGRES_ADMIN_POSTGRES_TO_SQLITE", flush=True)
+assert invoke(["status", *source_config])["result"]["registry"]["status"] == "ready"
+print("POSTGRES_ADMIN_SOURCE_STILL_READY", flush=True)
+
+archived = invoke([
+    "service", "archive", service_id,
+    "--expected-revision", str(suspended_revision),
+    "--operation-id", "84444444-4444-4444-8444-444444444444",
+    "--yes",
+    *source_config,
+])
+archived_revision = archived["result"]["service"]["service_revision"]
+assert archived["result"]["service"]["operational_status"] == "archived"
+print("POSTGRES_ADMIN_ARCHIVED", flush=True)
+archived_export = invoke([
+    "export", service_id,
+    "--output", str(archive_bundle),
+    "--expected-revision", str(archived_revision),
+    "--operation-id", "85555555-5555-4555-8555-555555555555",
+    *source_config,
+])
+receipt_id = archived_export["result"]["receipt"]["receipt_id"]
+print("POSTGRES_ADMIN_ARCHIVE_EXPORTED", flush=True)
+assert invoke(["status", *source_config])["result"]["registry"]["status"] == "ready"
+print("POSTGRES_ADMIN_PRE_PURGE_READY", flush=True)
+purge_command = [
+    "service", "purge", service_id,
+    "--expected-revision", str(archived_revision),
+    "--operation-id", "86666666-6666-4666-8666-666666666666",
+    "--receipt", receipt_id,
+    "--confirm-service-id", service_id,
+    "--yes",
+    *source_config,
+]
+purged = invoke(purge_command)
+assert purged["result"]["tombstone"]["service_id"] == service_id
+print("POSTGRES_ADMIN_PURGED_ONCE", flush=True)
+assert invoke(purge_command)["result"] == purged["result"]
+print("POSTGRES_ADMIN_PURGED", flush=True)
+
+sqlite_service = ServiceApplication(
+    sqlite_registry.open_uow,
+    SystemUtcClock(),
+    Uuid4ServiceIds(),
+).seed(
+    ApplicationContext(sqlite_principal, "cli"),
+    SeedCommand(
+        "sqlite_roundtrip",
+        "release",
+        "Installed SQLite to PostgreSQL CLI proof.",
+        "sqlite-roundtrip-seed",
+    ),
+)
+sqlite_service_id = str(sqlite_service.service_id)
+sqlite_suspended = invoke([
+    "service", "suspend", sqlite_service_id,
+    "--expected-revision", "1",
+    "--operation-id", "87000000-0000-4000-8000-000000000001",
+    *sqlite_config(),
+])
+assert sqlite_suspended["result"]["service"]["operational_status"] == "suspended"
+sqlite_export = invoke([
+    "export", sqlite_service_id,
+    "--output", str(sqlite_bundle),
+    "--expected-revision", "2",
+    "--operation-id", "87777777-7777-4777-8777-777777777777",
+    *sqlite_config(),
+])
+assert sqlite_export["result"]["summary"]["source_backend"] == "sqlite"
+print("POSTGRES_ADMIN_SQLITE_EXPORTED", flush=True)
+roundtrip = invoke([
+    "import", "--input", str(sqlite_bundle),
+    "--operation-id", "88888888-8888-4888-8888-888888888888",
+    "--yes",
+    *postgresql_config(roundtrip_principal),
+], retry_uncertain=True)
+assert roundtrip["result"]["service"]["service_id"] == sqlite_service_id
+assert roundtrip["result"]["service"]["operational_status"] == "suspended"
+assert len(
+    invoke(["service", "list", *postgresql_config(roundtrip_principal)])["result"]["services"]
+) == 1
+
+print("POSTGRES_ADMIN_SQLITE_TO_POSTGRES", flush=True)
+print("POSTGRES_ADMIN_CLI_OK", flush=True)
+"""
+
+
+def run_postgresql_admin_cli_smoke(
+    python: Path,
+    workspace: Path,
+    executable: Path,
+    principal: str,
+    target: PostgreSQLReleaseTarget,
+    *,
+    name: str,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Exercise installed V1-11 CLI and both transfer directions on PostgreSQL."""
+
+    probe = workspace / f"postgres-{name}-admin-cli-smoke.py"
+    probe.write_text(_postgresql_admin_cli_smoke_program(), encoding="utf-8")
+    root = workspace / f"postgres-{name}-admin-cli"
+    root.mkdir(mode=0o700)
+    child_environment = dict(environment)
+    child_environment[POSTGRES_RELEASE_DSN_ENV] = target.dsn
+    try:
+        run_stage(
+            f"installed PostgreSQL {name} administration CLI",
+            [python, "-I", probe, executable, principal, root],
+            cwd=root,
+            environment=child_environment,
+            timeout=POSTGRES_SMOKE_TIMEOUT_SECONDS,
+            redaction_roots=redaction_roots,
+        )
+    except ReleaseVerificationError as error:
+        checkpoints = re.findall(r"POSTGRES_ADMIN_[A-Z_]+", str(error))
+        phases = [
+            value
+            for value in checkpoints
+            if not value.startswith(
+                ("POSTGRES_ADMIN_ERROR_", "POSTGRES_ADMIN_RETRY_")
+            )
+        ]
+        errors = [
+            value.removeprefix("POSTGRES_ADMIN_ERROR_")
+            for value in checkpoints
+            if value.startswith("POSTGRES_ADMIN_ERROR_")
+        ]
+        checkpoint = phases[-1] if phases else "POSTGRES_ADMIN_START"
+        suffix = f" with {errors[-1]}" if errors else ""
+        raise ReleaseVerificationError(
+            "Installed PostgreSQL administration CLI verification failed "
+            f"after {checkpoint}{suffix}."
+        ) from None
+
+
 def _origin_probe(source_root: Path, copy_root: Path) -> str:
     return (
         "import pathlib,site,sys,aipcs_mcp;"
@@ -4754,6 +5068,219 @@ def run_installed_public_lifecycle_smoke(
     )
 
 
+def _admin_cli_smoke_program() -> str:
+    """Return an installed-only SQLite administration CLI workflow."""
+
+    return r"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from aipcs_mcp.application.models import ApplicationContext, SeedCommand
+from aipcs_mcp.application.services import ServiceApplication
+from aipcs_mcp.runtime import SystemUtcClock, Uuid4ServiceIds
+from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
+
+executable = Path(sys.argv[1])
+workspace = Path(sys.argv[2])
+principal = "installed-admin-principal"
+source_root = workspace / "source"
+destination_root = workspace / "destination"
+missing_root = workspace / "missing"
+bundle = workspace / "bundle.jsonl"
+archive_bundle = workspace / "archive.jsonl"
+
+
+def invoke(arguments, expected=0):
+    completed = subprocess.run(
+        [str(executable), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=dict(os.environ),
+        timeout=30,
+    )
+    assert completed.returncode == expected, (completed.returncode, completed.stdout, completed.stderr)
+    stream = completed.stdout if expected == 0 else completed.stderr
+    return json.loads(stream)
+
+
+def config(root):
+    return [
+        "--profile", "sqlite",
+        "--principal-id", principal,
+        "--sqlite-data-root", str(root),
+    ]
+
+
+def ready(root):
+    adapter = SQLiteRegistryAdapter(SQLiteLocationPolicy.from_resolved(root, "cli"))
+    assert adapter.migrate().status == "ready"
+    return adapter
+
+
+help_result = subprocess.run(
+    [str(executable), "--help"],
+    check=False,
+    capture_output=True,
+    text=True,
+    env=dict(os.environ),
+    timeout=30,
+)
+assert help_result.returncode == 0
+for command in ("status", "doctor", "storage", "service", "export", "import", "maintenance"):
+    assert command in help_result.stdout
+
+missing = invoke(["status", *config(missing_root)])
+assert missing["result"]["registry"]["status"] == "uninitialised"
+assert not missing_root.exists()
+
+source = ready(source_root)
+application = ServiceApplication(source.open_uow, SystemUtcClock(), Uuid4ServiceIds())
+service = application.seed(
+    ApplicationContext(principal, "cli"),
+    SeedCommand("release_notes", "knowledge", "Installed admin smoke.", "seed-admin"),
+)
+service_id = str(service.service_id)
+
+assert invoke(["status", *config(source_root)])["result"]["overall"] == "ready"
+assert invoke(["doctor", "--service", service_id, *config(source_root)])["result"]["overall"] == "warning"
+assert len(invoke(["service", "list", *config(source_root)])["result"]["services"]) == 1
+assert invoke(["service", "inspect", service_id, *config(source_root)])["result"]["service_id"] == service_id
+assert invoke(["storage", "status", "--service", service_id, *config(source_root)])["result"]["status"] == "uninitialised"
+
+suspend_id = "11111111-1111-4111-8111-111111111111"
+suspended = invoke([
+    "service", "suspend", service_id,
+    "--expected-revision", "1",
+    "--operation-id", suspend_id,
+    *config(source_root),
+])
+assert suspended["result"]["service"]["operational_status"] == "suspended"
+
+export_id = "22222222-2222-4222-8222-222222222222"
+exported = invoke([
+    "export", service_id,
+    "--output", str(bundle),
+    "--expected-revision", "2",
+    "--operation-id", export_id,
+    *config(source_root),
+])
+assert exported["result"]["summary"]["source_backend"] == "sqlite"
+assert bundle.is_file()
+assert bundle.stat().st_mode & 0o777 == 0o600
+already = invoke([
+    "export", service_id,
+    "--output", str(bundle),
+    "--expected-revision", "2",
+    "--operation-id", export_id,
+    *config(source_root),
+], expected=3)
+assert already["error"]["code"] == "already_exists"
+assert str(bundle) not in json.dumps(already)
+
+dry = invoke(["import", "--input", str(bundle), "--dry-run", *config(destination_root)])
+assert dry["result"]["service"]["service_id"] == service_id
+assert not destination_root.exists()
+ready(destination_root)
+import_id = "33333333-3333-4333-8333-333333333333"
+imported = invoke([
+    "import", "--input", str(bundle),
+    "--operation-id", import_id,
+    "--yes",
+    *config(destination_root),
+])
+assert imported["result"]["service"]["service_id"] == service_id
+assert invoke([
+    "import", "--input", str(bundle),
+    "--operation-id", import_id,
+    "--yes",
+    *config(destination_root),
+])["result"] == imported["result"]
+
+tampered = workspace / "tampered.jsonl"
+payload = bytearray(bundle.read_bytes())
+payload[len(payload) // 2] ^= 1
+tampered.write_bytes(payload)
+tamper_root = workspace / "tamper-destination"
+tamper_adapter = ready(tamper_root)
+invalid = invoke([
+    "import", "--input", str(tampered),
+    "--operation-id", "44444444-4444-4444-8444-444444444444",
+    "--yes",
+    *config(tamper_root),
+], expected=2)
+assert invalid["error"]["code"] == "validation_failed"
+uow = tamper_adapter.open_uow()
+assert uow.services.count(principal) == 0
+uow.close()
+
+archived = invoke([
+    "service", "archive", service_id,
+    "--expected-revision", "2",
+    "--operation-id", "55555555-5555-4555-8555-555555555555",
+    "--yes",
+    *config(source_root),
+])
+assert archived["result"]["service"]["operational_status"] == "archived"
+archive_export = invoke([
+    "export", service_id,
+    "--output", str(archive_bundle),
+    "--expected-revision", "3",
+    "--operation-id", "66666666-6666-4666-8666-666666666666",
+    *config(source_root),
+])
+receipt_id = archive_export["result"]["receipt"]["receipt_id"]
+purge = [
+    "service", "purge", service_id,
+    "--expected-revision", "3",
+    "--operation-id", "77777777-7777-4777-8777-777777777777",
+    "--receipt", receipt_id,
+    "--confirm-service-id", service_id,
+    "--yes",
+    *config(source_root),
+]
+purged = invoke(purge)
+assert purged["result"]["tombstone"]["service_id"] == service_id
+assert purged["result"]["tombstone"]["authority"] == "verified_receipt"
+assert invoke(purge)["result"] == purged["result"]
+assert invoke(["service", "inspect", service_id, *config(source_root)], expected=3)["error"]["code"] == "not_found"
+
+print("ADMIN_CLI_OK", flush=True)
+"""
+
+
+def run_installed_admin_cli_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Exercise the installed V1-11 command surface outside the checkout."""
+
+    executable = python.parent / "aipcs"
+    if not executable.is_file():
+        raise ReleaseVerificationError(
+            f"installed {name} did not provide the aipcs console command."
+        )
+    client = workspace / f"{name}-admin-cli-smoke.py"
+    client.write_text(_admin_cli_smoke_program(), encoding="utf-8")
+    root = workspace / f"{name}-admin-cli"
+    root.mkdir(mode=0o700)
+    run_stage(
+        f"installed {name} administration CLI",
+        [python, "-I", client, executable, root],
+        cwd=root,
+        environment=environment,
+        timeout=SMOKE_TIMEOUT_SECONDS,
+        redaction_roots=redaction_roots,
+    )
+
+
 def run_sdist_startup_smoke(
     python: Path,
     workspace: Path,
@@ -4995,6 +5522,16 @@ def verify_postgresql_integration(
                     environment=environment,
                     redaction_roots=redaction_roots,
                 )
+                run_postgresql_admin_cli_smoke(
+                    python,
+                    workspace,
+                    executable,
+                    principal,
+                    target,
+                    name=name,
+                    environment=environment,
+                    redaction_roots=redaction_roots,
+                )
                 run_postgresql_portable_lifecycle_smoke(
                     python,
                     workspace,
@@ -5170,6 +5707,13 @@ def verify_release(
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_admin_cli_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_installed_public_lifecycle_smoke(
             wheel_python,
             workspace,
@@ -5245,6 +5789,13 @@ def verify_release(
             redaction_roots=redaction_roots,
         )
         run_installed_portable_lifecycle_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_admin_cli_smoke(
             sdist_python,
             workspace,
             "sdist",

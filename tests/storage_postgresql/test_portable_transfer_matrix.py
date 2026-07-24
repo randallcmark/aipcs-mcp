@@ -223,6 +223,12 @@ def test_installed_shape_sqlite_to_postgresql_lifecycle_purge_and_restart(
     assert purged.category is PortableResultCategory.COMPLETED
     assert purged.tombstone is not None
 
+    inspected = PostgreSQLRegistryAdapter(
+        PostgreSQLDsn(postgres_test_target.dsn),
+        PostgreSQLConnectionPolicy(SCHEMA, 5, 1_000, 10_000),
+    )
+    assert inspected.inspect_migration().status == "ready"
+
     restarted = _postgres(postgres_test_target, destination.principal)
     replay = restarted.coordinator.purge(
         PurgeCommand(
