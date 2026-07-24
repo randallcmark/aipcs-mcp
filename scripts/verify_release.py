@@ -212,6 +212,9 @@ _PRIVATE_FILE_NAMES = frozenset(
 _PRIVATE_FILE_SUFFIXES = frozenset(
     {".cer", ".crt", ".key", ".p12", ".pem", ".pfx"}
 )
+_PUBLIC_AGENT_EXAMPLES = frozenset(
+    {PurePosixPath("examples/agent-instructions/AGENTS.md")}
+)
 _PRIVATE_TRANSCRIPT = re.compile(
     r"(?:^|/)(?:20\d{2}-\d{2}-\d{2}-.+|[^/]*(?:transcript|session)[^/]*)"
     r"\.(?:txt|md|json)$",
@@ -577,7 +580,10 @@ def generated_checkout_artifacts(root: Path) -> tuple[Path, ...]:
             relative = path.relative_to(root).as_posix()
             if (
                 folded in _GENERATED_FILE_NAMES
-                or folded in _PRIVATE_FILE_NAMES
+                or (
+                    folded in _PRIVATE_FILE_NAMES
+                    and PurePosixPath(relative) not in _PUBLIC_AGENT_EXAMPLES
+                )
                 or folded.startswith(".data")
                 or (folded.startswith(".env") and folded != ".env.example")
                 or path.suffix.casefold() in _GENERATED_FILE_SUFFIXES

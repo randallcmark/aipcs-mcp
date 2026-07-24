@@ -358,10 +358,10 @@ registry audit, replay claims, and purge tombstones remain installation-local
 control evidence and are never copied into a bundle as source authority.
 
 The composition root selects one closed `sqlite | postgresql` implementation
-for this internal coordinator. V1-10 adds no MCP tool or configuration key.
-V1-11 C2 adds read-only CLI inspection only; operator-selected transfer paths
-arrive in C4, but only the CLI owns them: storage and portable application
-ports still receive logical locators and already-open private streams.
+for the coordinator. Portable lifecycle adds no MCP tool or configuration key.
+Only the CLI owns operator-selected transfer paths: storage and portable
+application ports still receive logical locators and already-open private
+streams.
 
 ## Deferred adapter work
 

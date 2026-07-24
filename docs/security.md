@@ -104,14 +104,14 @@ filesystems, multi-host access, Windows SQLite, and hostile same-user workloads
 are unsupported.
 
 Do not copy, delete, edit, or repair live WAL/SHM files and do not treat the
-main `.sqlite` file alone as an online backup. No supported online backup or
-operator export command exists yet. The private V1-10 logical stream does not
-copy or restore SQLite physical state.
+main `.sqlite` file alone as an online backup. AIPCS does not supply an online
+physical backup command. The administration CLI's logical export does not copy
+or restore SQLite physical state.
 
 ## Portable artifact boundary
 
-Portable bundles are untrusted binary input. The private coordinator accepts a
-stream, not a caller path. It incrementally enforces exact canonical JSONL,
+Portable bundles are untrusted binary input. The application coordinator
+accepts a stream, not a caller path. It incrementally enforces exact canonical JSONL,
 closed frame shapes, a 1 MiB frame limit, 256 MiB default/1 GiB absolute total
 limit, 64-level nesting limit, 1,000,000-frame limit, ordered digests, manifest
 and lifecycle rules, and every logical cross-reference before any registry or
@@ -122,8 +122,8 @@ file, never followed through a caller-controlled symlink, and removed on
 success or failure. Fixed failures do not echo payloads, paths, principals,
 keys, fingerprints, DSNs, endpoints, SQL, or driver text. Bundles exclude
 credentials and physical database facts, but may contain the logical memory
-content being transferred and must be protected accordingly by the operator
-surface that V1-11 defines. C4 export uses a same-directory owner-private
+content being transferred and must be protected accordingly by the operator.
+CLI export uses a same-directory owner-private
 temporary regular file, fsyncs content, and publishes atomically without
 replacement. Import opens read-only without following the final symlink and
 requires a regular file. Paths are never passed to the coordinator or returned
@@ -135,7 +135,7 @@ terminal tombstone.
 SHA-256 frame, section, and root digests detect accidental tamper, truncation,
 substitution, duplication, and reordering. They are not signatures,
 encryption, authentication, hostile-author authenticity, replay protection
-between installations, replication, or backup retention. V1-10 does not
+between installations, replication, or backup retention. The format does not
 authenticate a remote sender or define network transport.
 
 Suspend/archive close a service-local monotonic write fence before registry
@@ -215,7 +215,9 @@ connect to an operator's running PostgreSQL server.
 
 Repository tests and examples are synthetic contract fixtures. Do not commit
 operational databases, snapshots, transcripts, credentials, personal context,
-or agent-specific operating instructions to the public repository.
+or private maintainer-specific operating instructions to the public repository.
+Vendor-neutral agent-integration examples must remain explicitly scoped under
+`examples/`.
 
 PostgreSQL is a supported generic public-v1 stdio reference backend when the
 package is installed with its `[postgresql]` extra. Remote MCP,

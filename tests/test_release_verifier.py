@@ -87,6 +87,10 @@ def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
     (root / ".netrc").write_text("private", encoding="utf-8")
     (root / "credentials.yaml").write_text("private", encoding="utf-8")
     (root / "id_ed25519").write_text("private", encoding="utf-8")
+    (root / "AGENTS.md").write_text("private", encoding="utf-8")
+    public_example = root / "examples" / "agent-instructions" / "AGENTS.md"
+    public_example.parent.mkdir(parents=True)
+    public_example.write_text("public example", encoding="utf-8")
 
     relative = {
         path.relative_to(root).as_posix() for path in verifier.generated_checkout_artifacts(root)
@@ -96,6 +100,7 @@ def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
         ".env.local",
         ".netrc",
         ".mypy_cache",
+        "AGENTS.md",
         "coverage.xml",
         "credentials.yaml",
         "id_ed25519",

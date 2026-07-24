@@ -50,15 +50,28 @@ the locked development environment described below.
 
 ## Documentation
 
+- [Quickstart](docs/quickstart.md)
+- [Concepts and lifecycle](docs/concepts.md)
+- [Capabilities and limits](docs/capabilities.md)
 - [Configuration](docs/configuration.md)
+- [Storage and deployment](docs/storage.md)
+- [Administration CLI](docs/administration.md)
+- [Export, import, and migration](docs/backup-and-migration.md)
+- [Agent integration](docs/agent-integration.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture.md)
 - [Manifest v2](docs/manifest-v2.md)
 - [Application boundary](docs/application-boundary.md)
 - [Storage contracts](docs/storage-contracts.md)
 - [Security and trust boundary](docs/security.md)
 - [Compatibility](docs/compatibility.md)
 - [Design evolution](docs/design-evolution.md)
+- [Contributing](CONTRIBUTING.md)
 
-## Development startup
+Start with the [quickstart](docs/quickstart.md) to reach a first persisted
+memory using only the installed package and public MCP tools.
+
+## Checkout development
 
 Run the stateless capability server:
 
@@ -227,23 +240,19 @@ above. Maintenance returns at most 100 deterministic candidates.
 
 ## Administration and portable lifecycle
 
-The source tree implements the V1-10 backend-neutral application and storage
-seams for logical export/import, suspend/resume/archive/restore, and deliberate
-purge. V1-11 C2 exposes read-only `status`, `doctor`, `storage status`,
-`service list`, `service inspect`, and `maintenance scan` commands through an
-application-owned inspection seam. They inspect configured SQLite or
-PostgreSQL state without migration, repair, DDL, or hidden lifecycle actions.
-V1-11 C3 additionally exposes revision-bound
-`service suspend|resume|archive|restore` through the existing portable
-coordinator. Machine mode requires an explicit operation UUID and revision;
-interactive human mode displays any generated values before confirmation.
-V1-11 C4 exposes logical `export` and `import` through exclusive mode-`0600`
-files. Export never overwrites; import rejects symlinks and non-regular files;
-dry run validates the complete bundle before any destination write. C5
-exposes archived-only purge with either a verified export receipt or an
-explicit override and exact service-identity confirmation. The 21-tool stdio
-contract, configuration keys, and single-backend runtime profiles are
-unchanged.
+The `aipcs` administration CLI exposes read-only `status`, `doctor`,
+`storage status`, `service list`, `service inspect`, and `maintenance scan`
+commands. These inspect configured SQLite or PostgreSQL state without
+migration, repair, DDL, or hidden lifecycle actions.
+
+Revision-bound `service suspend|resume|archive|restore` commands operate
+through the same portable application boundary as logical export, import, and
+purge. Machine mode requires explicit recovery-critical values. Interactive
+mode displays generated values before confirmation. Export publishes an
+exclusive mode-`0600` file; import rejects symlinks and non-regular files and
+supports a complete zero-write dry run. Purge is archived-only and requires a
+verified receipt or an explicit override plus exact service identity
+confirmation.
 
 The administration command tree is:
 
@@ -291,83 +300,12 @@ SQLite↔PostgreSQL directions for pinned PostgreSQL 16 and 18.
 
 ## Agent-use examples
 
-Use bootstrap, then inspect one service's retrieval contract:
-
-```json
-{"limit": 100}
-```
-
-```json
-{"service_id": "11111111-2222-4333-8444-555555555555", "sample": 0}
-```
-
-Follow the summary's declared filter modes. This example combines scalar
-equality with one membership value:
-
-```json
-{
-  "service_id": "11111111-2222-4333-8444-555555555555",
-  "entity_name": "project",
-  "filters": {"status": "active", "tags": "release"},
-  "limit": 50
-}
-```
-
-Create a record and safely replay the identical call if the transport outcome
-is uncertain:
-
-```json
-{
-  "service_id": "11111111-2222-4333-8444-555555555555",
-  "entity_name": "project",
-  "record": {"title": "Publish v1", "status": "active", "tags": ["release"]},
-  "idempotency_key": "create-project-001"
-}
-```
-
-Update using the returned record identity and revision:
-
-```json
-{
-  "service_id": "11111111-2222-4333-8444-555555555555",
-  "entity_name": "project",
-  "record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-  "updates": {"status": "completed"},
-  "expected_record_version": 1,
-  "idempotency_key": "complete-project-001"
-}
-```
-
-Create a branch, then assign the record as its primary member using the latest
-record revision:
-
-```json
-{
-  "service_id": "11111111-2222-4333-8444-555555555555",
-  "slug": "release-work",
-  "title": "Release work",
-  "intent": "Keep current release decisions together.",
-  "branch_type": "topic",
-  "idempotency_key": "create-release-branch-001"
-}
-```
-
-```json
-{
-  "service_id": "11111111-2222-4333-8444-555555555555",
-  "branch_id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
-  "role": "primary",
-  "operation": "assign",
-  "records": [
-    {
-      "entity_name": "project",
-      "record_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-      "expected_record_version": 2
-    }
-  ],
-  "idempotency_key": "assign-release-project-001"
-}
-```
+The [agent integration guide](docs/agent-integration.md) contains
+vendor-adaptable stdio configuration and public-tool workflows for bootstrap,
+retrieval, persistence, schema evolution, maintenance, and pre-compaction
+persistence. A copyable, deliberately non-operative
+[AGENTS.md example](examples/agent-instructions/AGENTS.md) is kept under
+`examples/`; it is not a maintainer instruction file for this repository.
 
 ## Current exclusions
 

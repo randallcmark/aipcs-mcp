@@ -67,6 +67,7 @@ def test_sdist_content_guard_accepts_production_and_rejects_private_material(
         (
             "aipcs_mcp-0/src/aipcs_mcp/storage/contracts.py",
             "aipcs_mcp-0/src/aipcs_mcp.egg-info/SOURCES.txt",
+            "aipcs_mcp-0/examples/agent-instructions/AGENTS.md",
             "aipcs_mcp-0/pyproject.toml",
         ),
     )

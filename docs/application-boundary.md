@@ -31,25 +31,23 @@ It prepares registry intent, closes the registry unit of work, performs exact
 service-store and domain actions, re-observes state, then finalises through a
 fresh registry unit of work.
 
-The private portable coordinator applies the same finite pattern to
+The portable coordinator applies the same finite pattern to
 suspend/resume/archive/restore, logical export/import, and admitted purge. It
 accepts only typed commands and private binary streams. Bundle parsing and
 logical payload values remain storage-independent; the top-level coordinator
 alone maps bounded storage failures and invokes the selected portable-store
-port. It is not reachable from the V1-10 MCP contract or configuration
-surface. V1-11 C2 composes the frozen read-only administration commands
-through an application-owned inspection port. The runtime composition root
-translates concrete migration and domain inspection into bounded application
-facts; application and CLI modules do not import adapters. These commands do
-not migrate, repair, or execute DDL. V1-11 C3 composes operational
-suspend/resume/archive/restore through the existing `PortableCoordinator`
-only after exact registry readiness. It preserves revision and idempotency
-preconditions and performs no hidden compound transition. Later V1-11 slices
-must use the same application and coordinator boundaries. C4 passes only
-already-open private binary streams to the coordinator. CLI file handling owns
-exclusive publication and safe read-only opening; the coordinator retains
-canonical validation, spooling, limits, and validation-before-write.
-V1-11 C5 similarly passes one typed purge command through the coordinator.
+port. It is not reachable from the MCP contract or configuration surface.
+Administration composes read-only commands through an application-owned
+inspection port. The runtime composition root translates concrete migration
+and domain inspection into bounded application facts; application and CLI
+modules do not import adapters. These commands do not migrate, repair, or
+execute DDL. Operational suspend/resume/archive/restore use the same
+`PortableCoordinator` only after exact registry readiness. They preserve
+revision and idempotency preconditions and perform no hidden compound
+transition. Export/import pass only already-open private binary streams to the
+coordinator. CLI file handling owns exclusive publication and safe read-only
+opening; the coordinator retains canonical validation, spooling, limits, and
+validation-before-write. Purge similarly passes one typed command through the coordinator.
 Archived state, exact revision, authority, physical absence, and terminal
 tombstone publication remain coordinator/registry responsibilities; the CLI
 owns only strong confirmation and safe projection.

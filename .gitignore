@@ -37,6 +37,9 @@ CLAUDE.md
 .codex/
 .cursor/
 .vscode/
+!examples/
+!examples/agent-instructions/
+!examples/agent-instructions/AGENTS.md
 
 # Credentials and local configuration
 .env

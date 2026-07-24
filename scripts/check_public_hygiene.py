@@ -31,6 +31,9 @@ PRIVATE_NAMES = {
     "secrets.json",
     "source-sha256.tsv",
 }
+PUBLIC_AGENT_EXAMPLES = {
+    PurePosixPath("examples/agent-instructions/AGENTS.md"),
+}
 CREDENTIAL_NAMES = {
     ".netrc",
     ".npmrc",
@@ -94,7 +97,9 @@ def path_violations(relative: PurePosixPath) -> list[str]:
     problems: list[str] = []
     if any(part.startswith(".data") for part in normalised_parts):
         problems.append("local data path")
-    if set(normalised_parts) & PRIVATE_PARTS or normalised_name in PRIVATE_NAMES:
+    if set(normalised_parts) & PRIVATE_PARTS or (
+        normalised_name in PRIVATE_NAMES and relative not in PUBLIC_AGENT_EXAMPLES
+    ):
         problems.append("private agent/archive/plan path")
     if normalised_name in CREDENTIAL_NAMES:
         problems.append("likely credential filename")

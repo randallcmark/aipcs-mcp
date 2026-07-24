@@ -83,6 +83,8 @@ def test_exact_credential_filenames_are_ignored_and_rejected_from_tracked_blobs(
 
 def test_private_filename_and_path_checks_are_case_insensitive_and_report_original_path() -> None:
     assert "private agent/archive/plan path" in reasons("Agents.md")
+    assert reasons("examples/agent-instructions/AGENTS.md") == []
+    assert "private agent/archive/plan path" in reasons("examples/other/AGENTS.md")
     assert "likely credential filename" in reasons("examples/CREDENTIALS.YAML")
     assert "private agent/archive/plan path" in reasons("Docs/EXEC-PLANS/plan.md")
     assert "private agent/archive/plan path" in reasons("RESEARCH/note.md")

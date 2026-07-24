@@ -13,7 +13,7 @@ security-fix commitment remain to be defined.
 | Configuration | `config_version` | Strict configuration v1 with documented precedence. |
 | Registry storage | adapter revision | SQLite registry R4; PostgreSQL fixed-schema R2. |
 | Service storage | adapter revision | SQLite service store R3; PostgreSQL schema-isolated R1 foundation, including record/topology storage. |
-| Export bundle | `export_format_version` | Internal logical format v1; no public MCP/CLI/path surface in V1-10. |
+| Export bundle | `export_format_version` | Logical format v1, exposed only through bounded administration CLI export/import commands; never through MCP. |
 
 These identifiers are independent. `schema_version`, server-owned
 `service_revision`, per-record `record_version`, per-branch
@@ -121,7 +121,7 @@ SQLite registry R4 and PostgreSQL registry R2 add equivalent portable
 lifecycle claims, identity reservations/tombstones, and transfer receipts.
 They do not change the public 21-tool MCP surface.
 
-## Internal portable lifecycle compatibility
+## Portable lifecycle compatibility
 
 `export_format_version: 1` is an internal, backend-neutral logical recovery
 and transfer contract. It is strict canonical UTF-8 JSON Lines under
@@ -154,17 +154,16 @@ directions on pinned PostgreSQL 16 and 18, including tamper-before-write,
 redaction, restart replay, purge, physical absence, and exact container
 cleanup.
 
-V1-10 intentionally exposes none of this through MCP or mixed-backend runtime
-composition. V1-11 C2 recognizes the complete operator command grammar and
-implements the read-only status, doctor, storage, service, and maintenance
-commands for the configured homogeneous backend. These inspection paths do
-not migrate or repair storage. C3 implements the exact operational transition
-matrix through the existing coordinator with stable retry and recovery exits.
-C4 adds logical file export/import and dry-run validation. Cross-backend
+The format is not exposed through MCP or mixed-backend runtime composition.
+The administration CLI implements read-only status, doctor, storage, service,
+and maintenance commands for one configured backend. Inspection does not
+migrate or repair storage. Revision-bound lifecycle commands use the exact
+operational transition matrix with stable retry and recovery exits. Logical
+file export/import includes zero-write dry-run validation. Cross-backend
 transfer remains two separately configured commands rather than a mixed
-runtime. C5 adds archived-only, authority-bound purge with terminal replay.
-V1-12 defines the supported isolated distribution workflow. Publication is a
-separate deliberate release action.
+runtime. Purge is archived-only, authority-bound, and terminal. The package
+supports isolated `uvx` invocation; publication is a separate deliberate
+release action.
 
 ## Error and retry compatibility
 

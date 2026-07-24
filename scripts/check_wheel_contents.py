@@ -37,6 +37,7 @@ DENIED_RESIDUE_SUFFIXES = frozenset(
 )
 DENIED_PRIVATE_NAMES = frozenset({"agents.md", "claude.md"})
 DENIED_RESIDUE_NAMES = frozenset({".coverage", ".ds_store", "coverage.xml"})
+PUBLIC_AGENT_EXAMPLE_SUFFIX = ("examples", "agent-instructions", "AGENTS.md")
 
 
 def _is_editor_residue(name: str) -> bool:
@@ -55,7 +56,8 @@ def member_violation(name: str, *, allow_egg_info: bool) -> str | None:
     folded_name = relative.name.casefold()
     if folded_parts & DENIED_PARTS:
         return "test, private, or local-state path"
-    if folded_name in DENIED_PRIVATE_NAMES:
+    is_public_agent_example = relative.parts[-3:] == PUBLIC_AGENT_EXAMPLE_SUFFIX
+    if folded_name in DENIED_PRIVATE_NAMES and not is_public_agent_example:
         return "private operating instruction"
     if folded_name in DENIED_RESIDUE_NAMES:
         return "coverage or platform residue"
