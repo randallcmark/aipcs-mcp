@@ -173,6 +173,33 @@ class AnchoredLocation:
         )
         self._live_sidecars = None
 
+    def remove_database(self) -> bool:
+        """Unlink one identity-verified closed database and its safe sidecars."""
+
+        sidecars = _sidecars(
+            self._root_fd,
+            self._database_name,
+            self._database_stat,
+            allow_journal=False,
+        )
+        if self._database_stat is None:
+            return False
+        self.verify_database_identity()
+        for suffix, identity in sidecars.items():
+            _unlink_if_identity(
+                self._root_fd, self._database_name + suffix, identity, missing_ok=True
+            )
+        self.verify_database_identity()
+        _unlink_if_identity(
+            self._root_fd,
+            self._database_name,
+            (self._database_stat.st_dev, self._database_stat.st_ino),
+            missing_ok=False,
+        )
+        os.fsync(self._root_fd)
+        self._database_stat = None
+        return True
+
 
 class SQLiteLocationPolicy:
     """Validate one resolver-selected root without reading configuration/environment."""
@@ -300,6 +327,28 @@ class SQLiteLocationPolicy:
                 with suppress(OSError):
                     os.close(root_fd)
         raise failure from None
+
+    def remove_service_store(self, namespace: str) -> bool:
+        anchored = self.acquire_service_store(
+            namespace, create=False, allow_journal=False
+        )
+        if anchored is None:
+            return False
+        try:
+            return anchored.remove_database()
+        finally:
+            anchored.close()
+
+    def service_store_absent(self, namespace: str) -> bool:
+        anchored = self.acquire_service_store(
+            namespace, create=False, allow_journal=False
+        )
+        if anchored is None:
+            return True
+        try:
+            return anchored._database_stat is None
+        finally:
+            anchored.close()
 
     def _acquire_root(self, *, create: bool) -> int | None:
         if self._mode == "explicit":
@@ -434,6 +483,7 @@ def _require_posix() -> None:
         os.open not in os.supports_dir_fd
         or os.mkdir not in os.supports_dir_fd
         or os.stat not in os.supports_dir_fd
+        or os.unlink not in os.supports_dir_fd
         or os.stat not in os.supports_follow_symlinks
     ):
         raise StorageUnavailable()
@@ -524,6 +574,28 @@ def _validate_file_stat(value: os.stat_result) -> None:
         or value.st_nlink != 1
     ):
         raise StorageUnavailable()
+
+
+def _unlink_if_identity(
+    root_fd: int,
+    name: str,
+    identity: _FileIdentity,
+    *,
+    missing_ok: bool,
+) -> None:
+    try:
+        current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        _validate_file_stat(current)
+        if (current.st_dev, current.st_ino) != identity:
+            raise StorageUnavailable()
+        os.unlink(name, dir_fd=root_fd)
+    except FileNotFoundError:
+        if not missing_ok:
+            raise StorageUnavailable() from None
+    except StorageUnavailable:
+        raise
+    except Exception:
+        raise StorageUnavailable() from None
 
 
 def _header_mode(header: bytes, size: int) -> SQLiteHeaderMode:

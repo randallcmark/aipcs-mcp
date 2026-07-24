@@ -27,7 +27,7 @@ from .portable_store import (
     WriteAdmissionFence,
     validate_portable_members,
 )
-from .registry_authority import StorageBackend, TransferReceipt
+from .registry_authority import PurgeTombstone, StorageBackend, TransferReceipt
 
 _DOMAIN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _UTC_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -79,12 +79,17 @@ class PortableExecutionResult:
     receipt: TransferReceipt | None = None
     summary: PortableBundleSummary | None = None
     artifact_written: bool = False
+    tombstone: PurgeTombstone | None = None
 
     def __post_init__(self) -> None:
         if (
             type(self.category) is not PortableResultCategory
             or (self.service is not None and type(self.service) is not Service)
             or (self.receipt is not None and type(self.receipt) is not TransferReceipt)
+            or (
+                self.tombstone is not None
+                and type(self.tombstone) is not PurgeTombstone
+            )
             or (self.summary is not None and type(self.summary) is not PortableBundleSummary)
             or type(self.artifact_written) is not bool
         ):

@@ -295,7 +295,8 @@ Both reference adapters implement:
 - a stable read-only snapshot that requires an exact closed fence;
 - local transactional staging into an unpublished service allocation;
 - exact typed re-observation for safe retry;
-- monotonic compare-and-change write admission; and
+- monotonic compare-and-change write admission;
+- exact archived-allocation purge with independent absence observation; and
 - an admission check inside every record/topology mutation transaction.
 
 SQLite uses its anchored location policy, WAL snapshot, and immediate writer
@@ -324,6 +325,16 @@ the private stream. Suspend/archive close the fence before registry state
 changes; resume opens it before the registry becomes active. Registry
 admission remains the lifecycle authority, while the service-local fence
 prevents an already-admitted mutation from crossing that transition.
+
+Purge is never inferred from archival alone. Registry admission first requires
+an archived service and either its verified export receipt or an explicit
+override. SQLite then removes only identity-verified service database and
+sidecar files through the anchored location policy. PostgreSQL drops only the
+known tables in the exact service schema and the empty schema, all with
+`RESTRICT`; it never cascades into an external object. The coordinator
+independently re-observes absence before a fresh registry transaction records
+the tombstone. Failure or uncertain observation leaves the prepared claim for
+bounded reconciliation rather than publishing a false purge.
 
 The composition root selects one closed `sqlite | postgresql` implementation
 for this internal coordinator. V1-10 still adds no MCP tool, CLI command,

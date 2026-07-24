@@ -32,11 +32,11 @@ service-store and domain actions, re-observes state, then finalises through a
 fresh registry unit of work.
 
 The private portable coordinator applies the same finite pattern to
-suspend/resume/archive/restore and logical export/import. It accepts only typed
-commands and private binary streams. Bundle parsing and logical payload values
-remain storage-independent; the top-level coordinator alone maps bounded
-storage failures and invokes the selected portable-store port. It is not
-reachable from the V1-10 MCP contract.
+suspend/resume/archive/restore, logical export/import, and admitted purge. It
+accepts only typed commands and private binary streams. Bundle parsing and
+logical payload values remain storage-independent; the top-level coordinator
+alone maps bounded storage failures and invokes the selected portable-store
+port. It is not reachable from the V1-10 MCP contract.
 
 The data application owns generic record, branch, discovery, and maintenance
 use cases. It receives the registry-authoritative materialised service and a
@@ -62,6 +62,12 @@ the exact re-observed store and verified receipt are published together in a
 fresh registry transaction. Operational transitions commit the service-local
 write fence before their registry status/revision update; a prepared shared
 claim blocks competing lifecycle work during that bounded window.
+
+Purge also remains registry-first. The registry validates the archived state
+and verified export receipt or explicit override before the adapter may remove
+the exact service allocation. The coordinator re-observes physical absence and
+only then finalises the registry tombstone in a fresh unit of work. A partial
+or uncertain delete never becomes completed evidence.
 
 Record and topology mutations are different. Their service-local R3 mutation
 ledger stores only completed outcomes and commits atomically with the record,

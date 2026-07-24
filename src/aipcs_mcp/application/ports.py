@@ -26,6 +26,7 @@ from .models import (
 from .portable_store import (
     FenceTransitionResult,
     PortableStoreMember,
+    PurgeStoreResult,
     StageResult,
     WriteAdmissionFence,
 )
@@ -209,3 +210,7 @@ class PortableServiceStore(Protocol):
         expected: WriteAdmissionFence,
         target_state: Literal["open", "closed"],
     ) -> FenceTransitionResult: ...
+
+    def purge(self, service: Service) -> PurgeStoreResult: ...
+
+    def is_absent(self, service: Service) -> bool: ...

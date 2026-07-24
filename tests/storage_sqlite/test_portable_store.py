@@ -125,6 +125,20 @@ def test_stage_snapshot_observe_and_exact_replay(tmp_path) -> None:  # type: ign
     assert adapter.stage(_service(), changed, fence).status == "different"
 
 
+def test_archived_purge_removes_exact_store_and_reobserves_absence(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    adapter = SQLitePortableServiceStore(
+        SQLiteLocationPolicy(tmp_path / "data"), clock=lambda: AT
+    )
+    service = replace(_service(), operational_status="archived")
+    fence = WriteAdmissionFence(1, "closed")
+    assert adapter.stage(service, _members(), fence).status == "staged"
+    assert adapter.purge(service).status == "purged"
+    assert adapter.is_absent(service)
+    assert adapter.purge(service).status == "already_absent"
+
+
 def test_fence_is_monotonic_and_blocks_every_data_mutation(tmp_path) -> None:  # type: ignore[no-untyped-def]
     location = SQLiteLocationPolicy(tmp_path / "data")
     adapter = SQLitePortableServiceStore(location, clock=lambda: AT)

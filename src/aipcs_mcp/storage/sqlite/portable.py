@@ -13,6 +13,7 @@ from aipcs_mcp.application.portable_store import (
     BranchMembership,
     FenceTransitionResult,
     PortableStoreMember,
+    PurgeStoreResult,
     StageResult,
     WriteAdmissionFence,
     validate_portable_members,
@@ -242,6 +243,23 @@ class SQLitePortableServiceStore:
             return FenceTransitionResult("applied", changed)
         finally:
             _release(connection, anchored)
+
+    def purge(self, service: Service) -> PurgeStoreResult:
+        locator, _ = self._source(service, require_quiesced=True)
+        if service.operational_status != "archived":
+            raise StorageContractError()
+        if self._location.service_store_absent(locator.namespace):
+            return PurgeStoreResult("already_absent")
+        if self.read_fence(service).state != "closed":
+            raise StorageMigrationError()
+        removed = self._location.remove_service_store(locator.namespace)
+        return PurgeStoreResult("purged" if removed else "already_absent")
+
+    def is_absent(self, service: Service) -> bool:
+        locator, _ = self._source(service, require_quiesced=True)
+        if service.operational_status != "archived":
+            raise StorageContractError()
+        return self._location.service_store_absent(locator.namespace)
 
     @staticmethod
     def _source(

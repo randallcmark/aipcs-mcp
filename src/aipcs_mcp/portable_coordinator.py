@@ -52,6 +52,8 @@ from aipcs_mcp.application.registry_authority import (
     ImportIdentity,
     PortableIntent,
     PreparedRegistryClaim,
+    PurgeCommand,
+    PurgeTombstone,
     ReceiptKind,
     ReceiptVerification,
     RecoveryRequiredRegistryClaim,
@@ -109,6 +111,8 @@ class PortableCoordinator:
                     "observe",
                     "read_fence",
                     "transition_fence",
+                    "purge",
+                    "is_absent",
                 )
             )
         ):
@@ -300,6 +304,44 @@ class PortableCoordinator:
             return _result(PortableResultCategory.OPERATION_UNCERTAIN)
         return self._terminal(
             lambda uow: uow.authority.finalize_operational(intent, at),
+            post_physical=service.design_state == "materialised",
+        )
+
+    def purge(self, command: PurgeCommand) -> PortableExecutionResult:
+        if type(command) is not PurgeCommand:
+            return _result(PortableResultCategory.MALFORMED_INPUT)
+        admitted = self._admit(command, require_service=True)
+        if type(admitted) is PortableExecutionResult:
+            return admitted
+        if type(admitted.intent) is not PortableIntent or admitted.service is None:
+            return _result(PortableResultCategory.INTERNAL_FAILURE)
+        intent, service = admitted.intent, admitted.service
+        if service.design_state == "materialised":
+            if (
+                service.storage is None
+                or service.storage.backend != self._backend.value
+                or service.operational_status != "archived"
+            ):
+                return self._recover(intent)
+            try:
+                self._store.purge(service)
+            except Exception as error:
+                try:
+                    if not self._store.is_absent(service):
+                        return _storage_result(error, uncertain=True)
+                except Exception:
+                    return _storage_result(error, uncertain=True)
+            try:
+                if not self._store.is_absent(service):
+                    return _result(PortableResultCategory.OPERATION_UNCERTAIN)
+            except Exception as error:
+                return _storage_result(error, uncertain=True)
+        try:
+            at = self._clock.now()
+        except Exception:
+            return _result(PortableResultCategory.OPERATION_UNCERTAIN)
+        return self._terminal(
+            lambda uow: uow.authority.finalize_purge(intent, at),
             post_physical=service.design_state == "materialised",
         )
 
@@ -538,6 +580,10 @@ def _registry_outcome(outcome: object) -> PortableExecutionResult:
         if type(outcome.result) is TransferReceipt:
             return PortableExecutionResult(
                 PortableResultCategory.COMPLETED, receipt=outcome.result
+            )
+        if type(outcome.result) is PurgeTombstone:
+            return PortableExecutionResult(
+                PortableResultCategory.COMPLETED, tombstone=outcome.result
             )
         return _result(PortableResultCategory.COMPLETED)
     if type(outcome) is RecoveryRequiredRegistryClaim:

@@ -12,6 +12,7 @@ from aipcs_mcp.application.portable_store import (
     BranchMembership,
     FenceTransitionResult,
     PortableStoreMember,
+    PurgeStoreResult,
     StageResult,
     WriteAdmissionFence,
     validate_portable_members,
@@ -55,7 +56,13 @@ from .service_store import (
     PostgreSQLServiceStoreCatalog,
     _acquire_advisory_lock,
 )
-from .service_store_migrations import BRANCH, HISTORY, MUTATION, RECORD_BRANCH
+from .service_store_migrations import (
+    BRANCH,
+    HISTORY,
+    MUTATION,
+    RECORD_BRANCH,
+    quote_identifier,
+)
 from .topology import _decode_branch
 
 
@@ -275,6 +282,69 @@ class PostgreSQLPortableServiceStore:
             raise
         finally:
             _close(connection)
+
+    def purge(self, service: Service) -> PurgeStoreResult:
+        locator, _ = self._source(service, require_quiesced=True)
+        if service.operational_status != "archived":
+            raise StorageContractError()
+        observed = self._catalog.inspect_migration(locator)
+        if observed.status == "uninitialised":
+            return PurgeStoreResult("already_absent")
+        if observed.status != "ready":
+            raise StorageMigrationError()
+        connection: object | None = None
+        try:
+            connection = self._connect(locator.namespace)
+            _execute(connection, "BEGIN")
+            _acquire_advisory_lock(connection, locator.namespace)
+            _require_service_foundation(connection, locator.namespace)
+            if (
+                _read_fence(connection, locator.namespace, service.principal_id).state
+                != "closed"
+            ):
+                raise StorageMigrationError()
+            relations = _rows(
+                _execute(
+                    connection,
+                    """SELECT c.relname AS relation_name
+                         FROM pg_catalog.pg_class AS c
+                         JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                         WHERE n.nspname = %s AND c.relkind IN ('r', 'p')
+                         ORDER BY c.relname""",
+                    (locator.namespace,),
+                )
+            )
+            names = tuple(row.get("relation_name") for row in relations)
+            if not names or any(type(name) is not str for name in names):
+                raise StorageMigrationError()
+            _execute(
+                connection,
+                "DROP TABLE "
+                + ",".join(
+                    f"{quote_identifier(locator.namespace)}.{quote_identifier(name)}"
+                    for name in names
+                )
+                + " RESTRICT",
+            )
+            _execute(
+                connection,
+                f"DROP SCHEMA {quote_identifier(locator.namespace)} RESTRICT",
+            )
+            _commit(connection)
+        except Exception:
+            _rollback(connection)
+            raise
+        finally:
+            _close(connection)
+        if not self.is_absent(service):
+            raise StorageMigrationError()
+        return PurgeStoreResult("purged")
+
+    def is_absent(self, service: Service) -> bool:
+        locator, _ = self._source(service, require_quiesced=True)
+        if service.operational_status != "archived":
+            raise StorageContractError()
+        return self._catalog.inspect_migration(locator).status == "uninitialised"
 
     def _connect(self, namespace: str) -> object:
         connect_timeout, lock_timeout, statement_timeout = self._timeouts

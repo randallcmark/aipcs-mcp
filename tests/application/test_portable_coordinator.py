@@ -24,10 +24,17 @@ from aipcs_mcp.application.portable_store import (
     BranchMembership,
     FenceTransitionResult,
     PortableStoreMember,
+    PurgeStoreResult,
     StageResult,
     WriteAdmissionFence,
 )
-from aipcs_mcp.application.registry_authority import ExportCommand, StorageBackend
+from aipcs_mcp.application.registry_authority import (
+    ExportCommand,
+    PurgeAuthority,
+    PurgeAuthorityKind,
+    PurgeCommand,
+    StorageBackend,
+)
 from aipcs_mcp.manifest_v2 import ManifestV2
 from aipcs_mcp.portable_coordinator import PortableCoordinator
 from aipcs_mcp.records import (
@@ -145,6 +152,8 @@ class FakePortableStore:
         self.fail_after_transition = False
         self.change_after_snapshot = False
         self.registry: FakeRegistry | None = None
+        self.purge_calls = 0
+        self.absent = False
 
     def open_snapshot(self, service, expected_fence):  # type: ignore[no-untyped-def]
         self.calls.append("open_snapshot")
@@ -192,6 +201,20 @@ class FakePortableStore:
         if self.fail_after_transition:
             raise RuntimeError("post-transition fault")
         return FenceTransitionResult("applied", self.fence)
+
+    def purge(self, service):  # type: ignore[no-untyped-def]
+        self.calls.append("purge")
+        self.purge_calls += 1
+        if self.absent:
+            return PurgeStoreResult("already_absent")
+        self.absent = True
+        self.staged = False
+        self.members = ()
+        return PurgeStoreResult("purged")
+
+    def is_absent(self, service):  # type: ignore[no-untyped-def]
+        self.calls.append("is_absent")
+        return self.absent
 
 
 class _Snapshot:
@@ -468,6 +491,41 @@ def test_export_fence_change_never_emits_and_marks_recovery_required() -> None:
     )
     assert result.category is PortableResultCategory.RECOVERY_REQUIRED
     assert destination.getvalue() == b""
+
+
+@pytest.mark.parametrize("use_receipt", [False, True])
+def test_purge_override_or_verified_receipt_removes_store_and_leaves_tombstone(
+    use_receipt: bool,
+) -> None:
+    registry = FakeRegistry()
+    archived = replace(_service(), operational_status="archived")
+    registry.items[SERVICE_ID] = archived
+    store = FakePortableStore(members=_members())
+    if use_receipt:
+        exported = _coordinator(registry, store).export(
+            ExportCommand(PRINCIPAL, "test", SERVICE_ID, 3, "export-for-purge"),
+            BytesIO(),
+        )
+        assert exported.receipt is not None
+        authority = PurgeAuthority(
+            PurgeAuthorityKind.VERIFIED_RECEIPT, exported.receipt.receipt_id
+        )
+    else:
+        authority = PurgeAuthority(PurgeAuthorityKind.EXPLICIT_OVERRIDE)
+    command = PurgeCommand(
+        PRINCIPAL, "test", SERVICE_ID, 3, "purge-1", authority
+    )
+    purged = _coordinator(registry, store, at=LATER).purge(command)
+    assert purged.category is PortableResultCategory.COMPLETED
+    assert purged.tombstone is not None
+    assert SERVICE_ID not in registry.items
+    assert SERVICE_ID in registry.tombstones
+    assert store.absent
+
+    replay = _coordinator(registry, store, at=LATER).purge(command)
+    assert replay.category is PortableResultCategory.COMPLETED
+    assert replay.tombstone == purged.tombstone
+    assert store.purge_calls == 1
 
 
 def test_semantically_unknown_service_field_is_rejected_before_registry_access() -> None:

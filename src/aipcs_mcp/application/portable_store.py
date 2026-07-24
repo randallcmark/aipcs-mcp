@@ -21,6 +21,7 @@ FenceState = Literal["open", "closed"]
 PortableMemberKind = Literal["record", "history", "branch", "branch_membership"]
 StageStatus = Literal["staged", "already_staged", "different"]
 FenceTransitionStatus = Literal["applied", "current", "stale"]
+PurgeStatus = Literal["purged", "already_absent"]
 
 
 class PortableStoreContractError(ValueError):
@@ -119,6 +120,18 @@ class FenceTransitionResult:
             or self.status not in {"applied", "current", "stale"}
             or type(self.fence) is not WriteAdmissionFence
         ):
+            raise PortableStoreContractError()
+
+
+@dataclass(frozen=True, slots=True)
+class PurgeStoreResult:
+    status: PurgeStatus
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not str or self.status not in {
+            "purged",
+            "already_absent",
+        }:
             raise PortableStoreContractError()
 
 

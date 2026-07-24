@@ -166,3 +166,7 @@ def test_postgresql_matches_sqlite_portable_fixture_and_fence(
         monkeypatch.setattr(portable_module, "_write_fence", original)
     assert adapter.stage(fault_service, _members(), closed).status == "staged"
     assert adapter.observe(fault_service, closed, _members())
+    archived = replace(fault_service, operational_status="archived")
+    assert adapter.purge(archived).status == "purged"
+    assert adapter.is_absent(archived)
+    assert adapter.purge(archived).status == "already_absent"
