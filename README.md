@@ -22,8 +22,9 @@ SQLite is the default local reference backend. PostgreSQL is a supported
 generic public-v1 stdio reference backend when the package is installed with
 its `[postgresql]` extra and an operator provides a database. The commands
 below are checkout/development invocations; a supported `uvx` distribution,
-an administration CLI, remote MCP, physical export/import/purge, hosted
-tenancy, and semantic or fuzzy search remain deferred.
+an administration CLI, operator-facing portable lifecycle commands, remote
+MCP, physical backup/restore, hosted tenancy, and semantic or fuzzy search
+remain deferred.
 
 ## Documentation
 
@@ -61,7 +62,8 @@ SQLite support is intentionally bounded to Linux and macOS, SQLite 3.51.3 or
 newer, one host, a local POSIX filesystem, and cooperating processes under the
 same effective user. Persistent WAL allows concurrent readers and serialises
 writers through SQLite's writer slot. Do not use a network filesystem or copy
-only a live database's main `.sqlite` file as a backup.
+only a live database's main `.sqlite` file as a backup. The internal logical
+portable format described below is not an online SQLite backup procedure.
 
 ## MCP contract
 
@@ -201,6 +203,38 @@ merge records, archive, delete, or rewrite memory.
 Bootstrap is bounded to 100 service cards. Summary is bounded as described
 above. Maintenance returns at most 100 deterministic candidates.
 
+## Internal portable lifecycle boundary
+
+The source tree implements the V1-10 backend-neutral application and storage
+seams for logical export/import, suspend/resume/archive/restore, and deliberate
+purge. This is a proven handoff boundary for the future administration CLI,
+not a current MCP or command-line interface. The 21-tool stdio contract,
+configuration keys, and single-backend runtime profiles are unchanged.
+
+The internal `export_format_version: 1` artifact is strict canonical UTF-8
+JSON Lines containing logical service, manifest, record, history, branch, and
+membership state. It never copies SQLite databases/WAL/SHM or PostgreSQL DDL,
+schemas, catalogs, roles, endpoints, credentials, or migration ledgers.
+SHA-256 framing detects accidental tamper, truncation, duplication,
+substitution, and reordering; it does not provide encryption, signatures,
+operator authentication, hostile-author authenticity, replication, or backup
+retention.
+
+Materialised export requires a separately suspended or archived service. A
+service-local monotonic fence prevents an already-admitted mutation from
+committing across suspend/archive. Import validates the complete artifact
+before writes, supports a zero-write dry run, stages an unpublished allocation,
+and publishes only after exact re-observation. Purge is archived-only,
+separately authorised, terminal, and leaves a minimal immutable tombstone.
+There is no remap, clone, merge, overwrite, skip, partial-import, or automatic
+cleanup mode.
+
+Wheel and sdist release verification exercises this internal boundary from
+outside the checkout with private streams on SQLite and both
+SQLite↔PostgreSQL directions for pinned PostgreSQL 16 and 18. V1-11 owns public
+path selection, cross-runtime orchestration, confirmation, recovery UX, and
+admin commands.
+
 ## Agent-use examples
 
 Use bootstrap, then inspect one service's retrieval contract:
@@ -288,7 +322,8 @@ The current source contract deliberately excludes:
 - generated schema-specific tools and per-domain services;
 - semantic, fuzzy, embedding, or cross-service search;
 - third-party storage adapters or mixed-backend runtime composition;
-- online export/import/restore, backup, repair, archive/resume, and purge;
+- operator-facing export/import/restore, backup, repair, archive/resume, and
+  purge workflows;
 - an administration CLI and supported `uvx` installation;
 - remote MCP, authentication, hosted tenancy, and multi-host SQLite; and
 - automatic truth resolution, merge, archival, deletion, or schema invention.

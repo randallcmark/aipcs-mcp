@@ -43,13 +43,15 @@ One registry unit of work atomically owns a registry mutation, its replay
 result, and audit append. Repository values are detached snapshots; they do not
 retain connection state after close.
 
-SQLite registry R3 is the current exact target. It retains immutable
-checksummed migration history and the crash-resumable WAL policy introduced by
-earlier revisions. Migration accepts only exact known predecessor/prepared
-states. Unknown, altered, partial, dirty, substituted, or future storage fails
-closed. The metadata-only audit retains the newest 1,000 rows per principal;
-that cap never prunes mutation or lifecycle evidence and has no public query or
-configuration surface.
+SQLite registry R4 and PostgreSQL registry R2 are the current exact targets.
+They retain immutable checksummed migration history and add the shared
+operational/portable claim authority, live/import-prepared/tombstoned identity
+ledger, and flattened transfer receipts. SQLite R4 preserves the
+crash-resumable WAL policy introduced by R3. Migration accepts only exact known
+predecessor/prepared states. Unknown, altered, partial, dirty, substituted, or
+future storage fails closed. The metadata-only audit retains the newest 1,000
+rows per principal; that cap never prunes live mutation/lifecycle evidence and
+has no public query or configuration surface.
 
 ## Service-store foundation
 
@@ -306,6 +308,16 @@ mutations and fence transitions. Logical staging never copies SQLite database,
 WAL, or SHM files and never exports PostgreSQL DDL, catalog state, roles,
 schemas, endpoints, or migration history.
 
+The private format is `export_format_version: 1` under the exact
+`aipcs-json-c14n-1` and `aipcs-bundle-limits-1` profiles. Frames are at most
+1 MiB including LF; the default total is 256 MiB, the absolute maximum is
+1 GiB, nesting is at most 64 container levels, and the frame count is at most
+1,000,000. Exact canonical re-encoding, ordered section digests, a root
+SHA-256 digest, and trailer counts reject malformed, noncanonical, truncated,
+duplicated, reordered, substituted, or accidentally altered input. Those
+hashes are integrity evidence, not encryption, signatures, authentication,
+hostile-author authenticity, replication, or backup retention.
+
 The private portable coordinator composes this seam with the shared registry
 authority. Import first validates canonical framing, limits, digests, closed
 payload shapes, manifest/state rules, and every logical cross-reference into
@@ -333,8 +345,17 @@ sidecar files through the anchored location policy. PostgreSQL drops only the
 known tables in the exact service schema and the empty schema, all with
 `RESTRICT`; it never cascades into an external object. The coordinator
 independently re-observes absence before a fresh registry transaction records
-the tombstone. Failure or uncertain observation leaves the prepared claim for
+the tombstone. Finalisation deletes obsolete receipts and completed claim
+payloads for the service so the retained tombstone is minimal and self-
+consistent. Failure or uncertain observation leaves the prepared claim for
 bounded reconciliation rather than publishing a false purge.
+
+Receipts remain bound to the exact completed claim, bundle root, backend,
+service identity, revision, and operational status at issuance. They are
+historical evidence rather than current-state replicas: later valid service
+revisions do not make a registry incompatible. Import and export receipts,
+registry audit, replay claims, and purge tombstones remain installation-local
+control evidence and are never copied into a bundle as source authority.
 
 The composition root selects one closed `sqlite | postgresql` implementation
 for this internal coordinator. V1-10 still adds no MCP tool, CLI command,
@@ -346,8 +367,8 @@ remain V1-11 work.
 
 PostgreSQL is a supported generic public-v1 stdio reference adapter when the
 package is installed with its `[postgresql]` extra. Third-party adapters,
-mixed-backend runtime composition, physical export/import, online backup,
-repair, operator-facing archive/resume/purge, an administration CLI, and
-cross-store transactions remain deferred. Those features require explicit
-contracts and validation rather than exposure of either reference adapter's
-private modules.
+mixed-backend runtime composition, operator-facing logical export/import,
+physical backup/restore, repair, operator-facing archive/resume/purge, an
+administration CLI, and cross-store transactions remain deferred. Those
+features require explicit contracts and validation rather than exposure of
+either reference adapter's private modules.

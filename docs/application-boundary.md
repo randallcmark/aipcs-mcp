@@ -36,7 +36,9 @@ suspend/resume/archive/restore, logical export/import, and admitted purge. It
 accepts only typed commands and private binary streams. Bundle parsing and
 logical payload values remain storage-independent; the top-level coordinator
 alone maps bounded storage failures and invokes the selected portable-store
-port. It is not reachable from the V1-10 MCP contract.
+port. It is not reachable from the V1-10 MCP contract, CLI, or configuration
+surface. V1-11 may wrap these application commands but must not bypass them to
+reach adapters directly.
 
 The data application owns generic record, branch, discovery, and maintenance
 use cases. It receives the registry-authoritative materialised service and a
@@ -67,7 +69,16 @@ Purge also remains registry-first. The registry validates the archived state
 and verified export receipt or explicit override before the adapter may remove
 the exact service allocation. The coordinator re-observes physical absence and
 only then finalises the registry tombstone in a fresh unit of work. A partial
-or uncertain delete never becomes completed evidence.
+or uncertain delete never becomes completed evidence. Finalisation removes
+obsolete transfer receipts and completed claim payloads for that service before
+retaining the minimal immutable tombstone and bounded local audit.
+
+Transfer receipts are immutable evidence of the exact completed export/import
+that issued them. They record that completion's service revision and
+operational status; they are not a second current-service projection. A later
+valid operational transition or schema revision therefore does not invalidate
+registry readiness, while altered receipt/claim identity, bundle root,
+backend, or issuance state still fails closed.
 
 Record and topology mutations are different. Their service-local R3 mutation
 ledger stores only completed outcomes and commits atomically with the record,
@@ -101,6 +112,7 @@ The application keeps these dimensions separate:
 - `service_revision`: lifecycle compare-and-swap revision;
 - `record_version`: per-record mutation and topology revision;
 - `branch_revision`: branch metadata compare-and-swap revision;
+- `export_format_version`: interpretation of a logical portable artifact;
 - adapter revision: private physical storage layout; and
 - `aipcs_mcp_contract`: public MCP shape and behavior.
 

@@ -105,7 +105,38 @@ are unsupported.
 
 Do not copy, delete, edit, or repair live WAL/SHM files and do not treat the
 main `.sqlite` file alone as an online backup. No supported online backup or
-export command exists yet.
+operator export command exists yet. The private V1-10 logical stream does not
+copy or restore SQLite physical state.
+
+## Portable artifact boundary
+
+Portable bundles are untrusted binary input. The private coordinator accepts a
+stream, not a caller path. It incrementally enforces exact canonical JSONL,
+closed frame shapes, a 1 MiB frame limit, 256 MiB default/1 GiB absolute total
+limit, 64-level nesting limit, 1,000,000-frame limit, ordered digests, manifest
+and lifecycle rules, and every logical cross-reference before any registry or
+service-store write. Dry run performs zero writes.
+
+Validated input is held only in an owner-private temporary directory and
+file, never followed through a caller-controlled symlink, and removed on
+success or failure. Fixed failures do not echo payloads, paths, principals,
+keys, fingerprints, DSNs, endpoints, SQL, or driver text. Bundles exclude
+credentials and physical database facts, but may contain the logical memory
+content being transferred and must be protected accordingly by the operator
+surface that V1-11 defines.
+
+SHA-256 frame, section, and root digests detect accidental tamper, truncation,
+substitution, duplication, and reordering. They are not signatures,
+encryption, authentication, hostile-author authenticity, replay protection
+between installations, replication, or backup retention. V1-10 does not
+authenticate a remote sender or define network transport.
+
+Suspend/archive close a service-local monotonic write fence before registry
+status changes, preventing an already-admitted mutation from crossing the
+transition. Purge is never inferred from archive, dormancy, a missing store,
+or a bundle. It requires an archived service, exact revision, separate
+authority, and verified receipt or explicit override; completion follows
+independent physical-absence observation and leaves only a minimal tombstone.
 
 ## Migration boundary
 
@@ -181,6 +212,6 @@ or agent-specific operating instructions to the public repository.
 
 PostgreSQL is a supported generic public-v1 stdio reference backend when the
 package is installed with its `[postgresql]` extra. Remote MCP,
-authentication, hosted tenancy, physical export/import/purge, repair, and
-administration workflows remain deferred and must define their own trust
-boundaries before release.
+authentication, hosted tenancy, operator-facing portable lifecycle, physical
+backup/restore, repair, and administration workflows remain deferred and must
+define their own trust boundaries before release.
