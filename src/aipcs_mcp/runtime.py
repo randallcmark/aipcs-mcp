@@ -12,11 +12,13 @@ from mcp.server.lowlevel import Server
 from .application.data import DataApplication
 from .application.models import MaterialisationStorage
 from .application.ports import Clock, IdProvider
+from .application.registry_authority import StorageBackend
 from .application.services import ServiceApplication
 from .configuration.models import ResolvedConfiguration
 from .configuration.resolver import is_supported_sqlite_platform, is_supported_sqlite_runtime
 from .lifecycle_coordinator import LifecycleCoordinator
 from .mcp_server import create_server
+from .portable_coordinator import PortableCoordinator
 from .records import DataFailure, RecordSpecification
 from .storage.contracts import MigrationState, ServiceStoreLocator
 from .storage.postgresql import (
@@ -27,9 +29,11 @@ from .storage.postgresql import (
     PostgreSQLServiceStoreCatalog,
     resolve_postgresql_dsn_for_serve,
 )
+from .storage.postgresql.portable import PostgreSQLPortableServiceStore
 from .storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter, SQLiteServiceStoreCatalog
 from .storage.sqlite.data_store import SQLiteMaterialisedDataStore
 from .storage.sqlite.domain_schema import SQLiteDomainSchemaStore
+from .storage.sqlite.portable import SQLitePortableServiceStore
 
 
 class SQLiteAdmittedDataStore:
@@ -218,3 +222,70 @@ def _ready_registry(state: MigrationState) -> bool:
         and state.status == "ready"
         and state.applied_revision == state.target_revision
     )
+
+
+def _compose_portable_coordinator(
+    config: ResolvedConfiguration, *, environ: Mapping[str, str] | None = None
+) -> PortableCoordinator:
+    """Compose the private V1-10 stream coordinator for exactly one configured backend."""
+
+    clock = SystemUtcClock()
+    if config.profile == "sqlite":
+        if config.sqlite_data_root is None:
+            raise RuntimeError("Unsupported runtime profile.")
+        location = SQLiteLocationPolicy.from_resolved(
+            config.sqlite_data_root, config.sources["sqlite_data_root"]
+        )
+        registry = SQLiteRegistryAdapter(
+            location, busy_timeout_ms=config.sqlite_busy_timeout_ms
+        )
+        if not _ready_registry(registry.migrate()):
+            raise RuntimeError("Registry is not ready.")
+        store = SQLitePortableServiceStore(
+            location, busy_timeout_ms=config.sqlite_busy_timeout_ms, clock=clock.now
+        )
+        return PortableCoordinator(
+            registry.open_uow, clock, uuid4, StorageBackend.SQLITE, store
+        )
+    if config.profile == "postgresql":
+        try:
+            environment = os.environ if environ is None else environ
+            dsn = resolve_postgresql_dsn_for_serve(config, environment)
+            policy = PostgreSQLConnectionPolicy.from_configuration(config)
+            registry = PostgreSQLRegistryAdapter(dsn, policy)
+            if not _ready_registry(registry.migrate()):
+                raise ValueError
+            catalog = PostgreSQLServiceStoreCatalog(
+                dsn,
+                connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+                lock_timeout_ms=config.postgres_lock_timeout_ms,
+                statement_timeout_ms=config.postgres_statement_timeout_ms,
+            )
+            domain = PostgreSQLDomainSchemaStore(
+                dsn,
+                connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+                lock_timeout_ms=config.postgres_lock_timeout_ms,
+                statement_timeout_ms=config.postgres_statement_timeout_ms,
+                service_store_catalog=catalog,
+            )
+            store = PostgreSQLPortableServiceStore(
+                dsn,
+                connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+                lock_timeout_ms=config.postgres_lock_timeout_ms,
+                statement_timeout_ms=config.postgres_statement_timeout_ms,
+                service_store_catalog=catalog,
+                domain_schema_store=domain,
+                clock=clock.now,
+            )
+            return PortableCoordinator(
+                registry.open_uow,
+                clock,
+                uuid4,
+                StorageBackend.POSTGRESQL,
+                store,
+            )
+        except Exception:
+            raise RuntimeError(
+                "PostgreSQL portable runtime could not be composed."
+            ) from None
+    raise RuntimeError("Unsupported runtime profile.")

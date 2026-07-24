@@ -810,6 +810,16 @@ class SQLiteRegistryUnitOfWork:
             raise ValueError
         return self._complete_authority(prepared, tombstone, at)
 
+    @_bounded_uow
+    def mark_recovery_required(
+        self, prepared: RegistryAuthorityIntent, at: datetime
+    ) -> RegistryAuthorityOutcome:
+        self._write()
+        existing = self._authority_prepared_or_terminal(prepared)
+        if type(existing) is not PreparedRegistryClaim:
+            return existing
+        return self._mark_authority_recovery(prepared, at)
+
     def _insert_live_identity(self, service: Service) -> None:
         self._connection.execute(
             'INSERT INTO "aipcs_registry_identity"('

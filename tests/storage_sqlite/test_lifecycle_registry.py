@@ -941,6 +941,16 @@ def test_shared_claim_authority_completes_operational_state_and_reserves_import_
         _write(adapter, lambda uow: uow.authority.resolve_or_prepare(different_key)),
         RegistryIdentityCollision,
     )
+    recovered = _write(
+        adapter,
+        lambda uow: uow.authority.mark_recovery_required(
+            reserved.intent, _START + timedelta(seconds=2)
+        ),
+    )
+    assert isinstance(recovered, RecoveryRequiredRegistryClaim)
+    assert _write(
+        adapter, lambda uow: uow.authority.resolve_or_prepare(import_command)
+    ) == recovered
 
 
 def test_cross_family_active_claims_are_typed_blockers_and_recovery_aggregate(

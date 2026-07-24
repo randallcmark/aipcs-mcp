@@ -305,10 +305,31 @@ mutations and fence transitions. Logical staging never copies SQLite database,
 WAL, or SHM files and never exports PostgreSQL DDL, catalog state, roles,
 schemas, endpoints, or migration history.
 
-This seam is intentionally not composed into the MCP server, configuration,
-CLI, or filesystem artifact workflow yet. Registry preparation/publication,
-bundle orchestration, operator paths, and recovery UX remain later portable
-lifecycle slices.
+The private portable coordinator composes this seam with the shared registry
+authority. Import first validates canonical framing, limits, digests, closed
+payload shapes, manifest/state rules, and every logical cross-reference into
+an application-owned private spool. Dry run stops there with zero registry or
+service-store writes. A committed import then reserves an unpublished
+identity, stages and independently re-observes exact logical state, and
+publishes the service and verified receipt atomically in a fresh registry
+transaction. A restart replays completed evidence, adopts only an exact
+same-root stage, or returns bounded uncertainty/recovery-required; it never
+deletes or guesses at a staged store.
+
+Export emits seeded metadata without opening a service store. A materialised
+service must already be suspended or archived with an exact closed fence. The
+coordinator snapshots logical members, verifies the fence and prepared
+registry claim again, completes a local verified receipt, and only then emits
+the private stream. Suspend/archive close the fence before registry state
+changes; resume opens it before the registry becomes active. Registry
+admission remains the lifecycle authority, while the service-local fence
+prevents an already-admitted mutation from crossing that transition.
+
+The composition root selects one closed `sqlite | postgresql` implementation
+for this internal coordinator. V1-10 still adds no MCP tool, CLI command,
+configuration key, operator-selected path, adapter discovery, or public
+filesystem workflow. Those caller surfaces and confirmation/recovery UX
+remain V1-11 work.
 
 ## Deferred adapter work
 

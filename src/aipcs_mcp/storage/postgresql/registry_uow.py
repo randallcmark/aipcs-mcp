@@ -830,6 +830,18 @@ class PostgreSQLRegistryUnitOfWork:
             raise StorageMigrationError()
         return self._complete_authority(prepared, tombstone, at)
 
+    @_bounded_uow
+    def mark_recovery_required(
+        self, prepared: RegistryAuthorityIntent, at: datetime
+    ) -> RegistryAuthorityOutcome:
+        self._write()
+        self._lock("claim", prepared.principal_id, prepared.idempotency_key)
+        self._lock("service", prepared.principal_id, str(prepared.service_id))
+        existing = self._authority_prepared_or_terminal(prepared)
+        if type(existing) is not PreparedRegistryClaim:
+            return existing
+        return self._mark_authority_recovery(prepared, at)
+
     def _insert_live_identity(self, service: Service) -> None:
         self._execute(
             f'INSERT INTO {_IDENTITY}("service_id","principal_id","domain_name",'

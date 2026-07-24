@@ -522,6 +522,37 @@ def test_registry_authority_restarts_replay_and_import_reservations_are_invisibl
         assert audit_at == (receipt_at,)
     finally:
         connection.close()
+
+    recovery_id = UUID("aaaaaaaa-8888-4888-8888-888888888888")
+    recovery_command = ImportCommand(
+        "authority-principal",
+        "storage-contract",
+        ImportIdentity(
+            "authority-principal",
+            recovery_id,
+            "recovery_import",
+            f"svc_{recovery_id.hex}",
+        ),
+        StorageBackend.POSTGRESQL,
+        "b" * 64,
+        "import-recovery",
+    )
+    recover = adapter.open_uow()
+    try:
+        recovery_prepared = recover.authority.resolve_or_prepare(recovery_command)
+        assert isinstance(recovery_prepared, PreparedRegistryClaim)
+        recover.commit()
+    finally:
+        recover.close()
+    recover = adapter.open_uow()
+    try:
+        recovery_required = recover.authority.mark_recovery_required(
+            recovery_prepared.intent, receipt_at + timedelta(seconds=1)
+        )
+        assert isinstance(recovery_required, RecoveryRequiredRegistryClaim)
+        recover.commit()
+    finally:
+        recover.close()
     assert adapter.inspect_migration().status == "ready"
 
 

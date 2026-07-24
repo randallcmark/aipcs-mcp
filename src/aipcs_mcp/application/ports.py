@@ -149,6 +149,10 @@ class RegistryAuthority(Protocol):
 
     def finalize_purge(self, prepared: RegistryAuthorityIntent, at: datetime) -> RegistryAuthorityOutcome: ...
 
+    def mark_recovery_required(
+        self, prepared: RegistryAuthorityIntent, at: datetime
+    ) -> RegistryAuthorityOutcome: ...
+
 
 class RegistryUnitOfWork(Protocol):
     services: ServiceRepository

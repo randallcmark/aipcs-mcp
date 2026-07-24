@@ -31,6 +31,13 @@ It prepares registry intent, closes the registry unit of work, performs exact
 service-store and domain actions, re-observes state, then finalises through a
 fresh registry unit of work.
 
+The private portable coordinator applies the same finite pattern to
+suspend/resume/archive/restore and logical export/import. It accepts only typed
+commands and private binary streams. Bundle parsing and logical payload values
+remain storage-independent; the top-level coordinator alone maps bounded
+storage failures and invokes the selected portable-store port. It is not
+reachable from the V1-10 MCP contract.
+
 The data application owns generic record, branch, discovery, and maintenance
 use cases. It receives the registry-authoritative materialised service and a
 detached pure `RecordSpecification`, then delegates to a backend-neutral
@@ -47,6 +54,14 @@ the only transition-lock and recovery authority and may be `prepared`,
 `completed`, or `recovery_required`. A prepared intent commits before physical
 service-store I/O. There is deliberately no cross-database transaction, hidden
 process mutex, or second current-manifest ledger.
+
+Import has the same registry-first boundary: the canonical artifact is fully
+validated and privately spooled before admission, a prepared identity
+reservation commits before staging, and the service becomes visible only when
+the exact re-observed store and verified receipt are published together in a
+fresh registry transaction. Operational transitions commit the service-local
+write fence before their registry status/revision update; a prepared shared
+claim blocks competing lifecycle work during that bounded window.
 
 Record and topology mutations are different. Their service-local R3 mutation
 ledger stores only completed outcomes and commits atomically with the record,

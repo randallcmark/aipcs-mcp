@@ -86,6 +86,17 @@ def test_stateless_composition_constructs_no_storage() -> None:
     assert anyio.run(_tool_names, server) == ["aipcs_server_info"]
 
 
+def test_private_portable_composition_selects_the_configured_sqlite_backend(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "portable"
+    _secure_parent(root)
+    coordinator = runtime._compose_portable_coordinator(_config(root))
+    assert isinstance(coordinator, runtime.PortableCoordinator)
+    assert coordinator._backend.value == "sqlite"
+    assert isinstance(coordinator._store, runtime.SQLitePortableServiceStore)
+
+
 def test_ready_sqlite_migrates_once_before_mcp_construction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
