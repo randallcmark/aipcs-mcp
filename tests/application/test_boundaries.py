@@ -322,12 +322,22 @@ def test_application_and_audit_projections_remain_allowlisted() -> None:
     )
 
 
-def test_cli_command_surface_is_serve_and_config_show_validate() -> None:
+def test_cli_command_surface_is_frozen_v1_11_tree() -> None:
     parser = build_parser()
     subparsers = next(
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
-    assert tuple(subparsers.choices) == ("serve", "config")
+    assert tuple(subparsers.choices) == (
+        "serve",
+        "config",
+        "status",
+        "doctor",
+        "storage",
+        "service",
+        "export",
+        "import",
+        "maintenance",
+    )
 
     config_parser = subparsers.choices["config"]
     config_subparsers = next(
@@ -336,5 +346,34 @@ def test_cli_command_surface_is_serve_and_config_show_validate() -> None:
         if isinstance(action, argparse._SubParsersAction)
     )
     assert tuple(config_subparsers.choices) == ("show", "validate")
+
+    storage_subparsers = next(
+        action
+        for action in subparsers.choices["storage"]._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    assert tuple(storage_subparsers.choices) == ("status",)
+
+    service_subparsers = next(
+        action
+        for action in subparsers.choices["service"]._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    assert tuple(service_subparsers.choices) == (
+        "list",
+        "inspect",
+        "suspend",
+        "resume",
+        "archive",
+        "restore",
+        "purge",
+    )
+
+    maintenance_subparsers = next(
+        action
+        for action in subparsers.choices["maintenance"]._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    assert tuple(maintenance_subparsers.choices) == ("scan",)
 
     # The existing real stdio smoke owns the MCP tool-list assertion.

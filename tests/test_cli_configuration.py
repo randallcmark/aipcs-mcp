@@ -92,6 +92,30 @@ def test_config_validate_requires_runnable_profile_without_constructing_server(
     assert json.loads(capsys.readouterr().out)["result"]["runnable"] is True
 
 
+def test_config_show_supports_opt_in_human_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _clear_transport_environment(monkeypatch)
+    monkeypatch.setattr(cli, "resolve_configuration", lambda **_: object())
+    monkeypatch.setattr(
+        cli,
+        "safe_config_report",
+        lambda _: {
+            "profile": "sqlite",
+            "available": True,
+            "sources": {"profile": "default"},
+        },
+    )
+
+    assert cli.main(["config", "show", "--format", "human"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "profile: sqlite",
+        "available: true",
+        "sources.profile: default",
+    ]
+
+
 def test_config_failure_uses_existing_error_envelope(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

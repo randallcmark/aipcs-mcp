@@ -207,9 +207,11 @@ above. Maintenance returns at most 100 deterministic candidates.
 
 The source tree implements the V1-10 backend-neutral application and storage
 seams for logical export/import, suspend/resume/archive/restore, and deliberate
-purge. This is a proven handoff boundary for the future administration CLI,
-not a current MCP or command-line interface. The 21-tool stdio contract,
-configuration keys, and single-backend runtime profiles are unchanged.
+purge. V1-11 C1 freezes the administration command grammar and pure
+validation/output contracts, but every new admin command currently fails
+closed as `unsupported_operation`; no command yet composes storage or invokes
+these operations. The 21-tool stdio contract, configuration keys, and
+single-backend runtime profiles are unchanged.
 
 The internal `export_format_version: 1` artifact is strict canonical UTF-8
 JSON Lines containing logical service, manifest, record, history, branch, and
