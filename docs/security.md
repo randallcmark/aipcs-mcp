@@ -123,9 +123,10 @@ success or failure. Fixed failures do not echo payloads, paths, principals,
 keys, fingerprints, DSNs, endpoints, SQL, or driver text. Bundles exclude
 credentials and physical database facts, but may contain the logical memory
 content being transferred and must be protected accordingly by the operator
-surface that V1-11 defines. C2 still does not open an input/output path or
-compose the portable coordinator: transfer and mutation commands remain
-bounded `unsupported_operation` results.
+surface that V1-11 defines. C3 still does not open an input/output path.
+Operational lifecycle commands compose the portable coordinator only after
+exact registry readiness; transfer and purge commands remain bounded
+`unsupported_operation` results.
 
 SHA-256 frame, section, and root digests detect accidental tamper, truncation,
 substitution, duplication, and reordering. They are not signatures,

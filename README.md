@@ -211,9 +211,12 @@ purge. V1-11 C2 exposes read-only `status`, `doctor`, `storage status`,
 `service list`, `service inspect`, and `maintenance scan` commands through an
 application-owned inspection seam. They inspect configured SQLite or
 PostgreSQL state without migration, repair, DDL, or hidden lifecycle actions.
-Lifecycle, export/import, and purge commands remain fail-closed until their
-later slices. The 21-tool stdio contract, configuration keys, and
-single-backend runtime profiles are unchanged.
+V1-11 C3 additionally exposes revision-bound
+`service suspend|resume|archive|restore` through the existing portable
+coordinator. Machine mode requires an explicit operation UUID and revision;
+interactive human mode displays any generated values before confirmation.
+Export/import and purge remain fail-closed. The 21-tool stdio contract,
+configuration keys, and single-backend runtime profiles are unchanged.
 
 The internal `export_format_version: 1` artifact is strict canonical UTF-8
 JSON Lines containing logical service, manifest, record, history, branch, and

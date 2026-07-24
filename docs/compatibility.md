@@ -157,8 +157,10 @@ V1-10 intentionally exposes none of this through MCP or mixed-backend runtime
 composition. V1-11 C2 recognizes the complete operator command grammar and
 implements the read-only status, doctor, storage, service, and maintenance
 commands for the configured homogeneous backend. These inspection paths do
-not migrate or repair storage. Lifecycle, file transfer, purge, cross-runtime
-orchestration, and the supported distribution workflow remain later slices.
+not migrate or repair storage. C3 implements the exact operational transition
+matrix through the existing coordinator with stable retry and recovery exits.
+File transfer, purge, cross-runtime orchestration, and the supported
+distribution workflow remain later slices.
 
 ## Error and retry compatibility
 

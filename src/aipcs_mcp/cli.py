@@ -7,13 +7,16 @@ import logging
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import anyio
 
 from .admin_cli import (
     AdminInvocation,
+    CliConfirmation,
+    CliExecutionMode,
     CliLifecycleAction,
     DoctorInvocation,
     ExportInvocation,
@@ -25,6 +28,7 @@ from .admin_cli import (
     ServicePurgeInvocation,
     StatusInvocation,
     StorageStatusInvocation,
+    confirmation_for,
     execution_mode,
     exit_for_error,
     parse_canonical_uuid,
@@ -36,6 +40,13 @@ from .admin_cli import (
 )
 from .application.admin import project_doctor, project_migration, project_status
 from .application.errors import ApplicationError
+from .application.operational_lifecycle import (
+    ArchiveCommand,
+    RestoreCommand,
+    ResumeCommand,
+    SuspendCommand,
+)
+from .application.portable import PortableExecutionResult, PortableResultCategory
 from .configuration.errors import to_contract_error
 from .configuration.models import ConfigOverrides, ResolvedConfiguration
 from .configuration.reporting import (
@@ -384,6 +395,7 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
             StorageStatusInvocation,
             ServiceListInvocation,
             ServiceInspectInvocation,
+            ServiceLifecycleInvocation,
             MaintenanceScanInvocation,
         ),
     ):
@@ -432,6 +444,9 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
             result = project_maintenance(value).model_dump(
                 mode="json", warnings="error"
             )
+        elif type(invocation) is ServiceLifecycleInvocation:
+            _require_persistent_admin(resolved.profile)
+            result = _run_lifecycle(runtime, invocation)
         else:
             raise AipcsContractError(
                 ErrorCode.UNSUPPORTED_OPERATION,
@@ -448,6 +463,203 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
         ) from None
     _write_success(result, invocation.output_format.value)
     return 0
+
+
+def _run_lifecycle(runtime: object, invocation: ServiceLifecycleInvocation) -> dict[str, object]:
+    inspection = getattr(runtime, "inspection", None)
+    context = getattr(runtime, "context", None)
+    portable = getattr(runtime, "portable", None)
+    if inspection is None or context is None or not callable(portable):
+        raise AipcsContractError(
+            ErrorCode.INTERNAL_ERROR,
+            "The lifecycle runtime could not be composed safely.",
+        )
+    registry = inspection.registry_status()
+    if registry.status != "ready":
+        code = (
+            ErrorCode.STORAGE_UNAVAILABLE
+            if registry.status == "unavailable"
+            else ErrorCode.STORAGE_MIGRATION_REQUIRED
+        )
+        raise AipcsContractError(code, "The registry is not ready for lifecycle work.")
+
+    completed = _complete_lifecycle_invocation(invocation, inspection, context)
+    assert completed.expected_revision is not None
+    assert completed.operation_id is not None
+    command_type = {
+        CliLifecycleAction.SUSPEND: SuspendCommand,
+        CliLifecycleAction.RESUME: ResumeCommand,
+        CliLifecycleAction.ARCHIVE: ArchiveCommand,
+        CliLifecycleAction.RESTORE: RestoreCommand,
+    }[completed.action]
+    command = command_type(
+        context.principal_id,
+        "cli",
+        completed.service_id,
+        completed.expected_revision,
+        str(completed.operation_id),
+    )
+    outcome = portable().transition(command)
+    if (
+        type(outcome) is not PortableExecutionResult
+        or outcome.category is not PortableResultCategory.COMPLETED
+    ):
+        raise _portable_failure(outcome)
+    service = inspection.service_inspect(context, completed.service_id)
+    return {
+        "operation": completed.action.value,
+        "operation_id": str(completed.operation_id),
+        "service": service.model_dump(
+            mode="json", by_alias=True, warnings="error"
+        ),
+    }
+
+
+def _complete_lifecycle_invocation(
+    invocation: ServiceLifecycleInvocation, inspection: object, context: object
+) -> ServiceLifecycleInvocation:
+    expected_revision = invocation.expected_revision
+    operation_id = invocation.operation_id
+    generated = expected_revision is None or operation_id is None
+    current = None
+    if generated:
+        current = inspection.service_inspect(context, invocation.service_id)
+        if expected_revision is None:
+            expected_revision = current.service_revision
+        if operation_id is None:
+            operation_id = uuid4()
+    completed = replace(
+        invocation,
+        expected_revision=expected_revision,
+        operation_id=operation_id,
+    )
+    confirmation = confirmation_for(invocation)
+    if (
+        invocation.mode is CliExecutionMode.INTERACTIVE
+        and confirmation in {CliConfirmation.GENERATED_VALUES, CliConfirmation.ALWAYS}
+    ):
+        if current is None:
+            current = inspection.service_inspect(context, invocation.service_id)
+        if not _confirm_lifecycle(completed, current.operational_status):
+            raise AipcsContractError(
+                ErrorCode.INVALID_STATE,
+                "The lifecycle operation was not confirmed.",
+            )
+    return completed
+
+
+def _confirm_lifecycle(
+    invocation: ServiceLifecycleInvocation, current_status: str
+) -> bool:
+    target = {
+        CliLifecycleAction.SUSPEND: "suspended",
+        CliLifecycleAction.RESUME: "active",
+        CliLifecycleAction.ARCHIVE: "archived",
+        CliLifecycleAction.RESTORE: "suspended",
+    }[invocation.action]
+    try:
+        with Path("/dev/tty").open("r+", encoding="utf-8", buffering=1) as terminal:
+            terminal.write(
+                "AIPCS lifecycle confirmation\n"
+                f"service_id: {invocation.service_id}\n"
+                f"transition: {current_status} -> {target}\n"
+                f"expected_revision: {invocation.expected_revision}\n"
+                f"operation_id: {invocation.operation_id}\n"
+                "Confirm [y/N]: "
+            )
+            answer = terminal.readline(16)
+    except OSError:
+        raise AipcsContractError(
+            ErrorCode.INVALID_REQUEST,
+            "Interactive confirmation terminal is unavailable.",
+        ) from None
+    return answer.strip().casefold() in {"y", "yes"}
+
+
+_PORTABLE_FAILURES: dict[
+    PortableResultCategory, tuple[ErrorCode, str, bool]
+] = {
+    PortableResultCategory.MALFORMED_INPUT: (
+        ErrorCode.VALIDATION_FAILED,
+        "The lifecycle command is invalid.",
+        False,
+    ),
+    PortableResultCategory.CHANGED_FINGERPRINT: (
+        ErrorCode.CHANGED_FINGERPRINT,
+        "The operation id cannot be reused for a different request.",
+        False,
+    ),
+    PortableResultCategory.STALE_REVISION: (
+        ErrorCode.STALE_REVISION,
+        "The service revision precondition is stale.",
+        False,
+    ),
+    PortableResultCategory.UNSUPPORTED_TRANSITION: (
+        ErrorCode.UNSUPPORTED_TRANSITION,
+        "The lifecycle transition is not supported from the current state.",
+        False,
+    ),
+    PortableResultCategory.OPERATION_IN_PROGRESS: (
+        ErrorCode.OPERATION_IN_PROGRESS,
+        "Another lifecycle operation is in progress.",
+        True,
+    ),
+    PortableResultCategory.IDENTITY_COLLISION: (
+        ErrorCode.ALREADY_EXISTS,
+        "The operation conflicts with an existing identity.",
+        False,
+    ),
+    PortableResultCategory.TOMBSTONED: (
+        ErrorCode.CONFLICT,
+        "The service identity is tombstoned.",
+        False,
+    ),
+    PortableResultCategory.RECOVERY_REQUIRED: (
+        ErrorCode.RECOVERY_REQUIRED,
+        "The service requires recovery before more lifecycle work.",
+        False,
+    ),
+    PortableResultCategory.OPERATION_UNCERTAIN: (
+        ErrorCode.OPERATION_UNCERTAIN,
+        "The operation outcome is uncertain; retry with the same operation id.",
+        True,
+    ),
+    PortableResultCategory.STORAGE_BUSY: (
+        ErrorCode.STORAGE_BUSY,
+        "Storage is temporarily busy.",
+        True,
+    ),
+    PortableResultCategory.STORAGE_UNAVAILABLE: (
+        ErrorCode.STORAGE_UNAVAILABLE,
+        "Storage is unavailable.",
+        False,
+    ),
+    PortableResultCategory.INTERNAL_FAILURE: (
+        ErrorCode.INTERNAL_ERROR,
+        "The lifecycle operation could not be completed safely.",
+        False,
+    ),
+    PortableResultCategory.VALIDATED: (
+        ErrorCode.INTERNAL_ERROR,
+        "The lifecycle operation returned an invalid result.",
+        False,
+    ),
+    PortableResultCategory.COMPLETED: (
+        ErrorCode.INTERNAL_ERROR,
+        "The lifecycle operation returned an invalid result.",
+        False,
+    ),
+}
+
+
+def _portable_failure(value: object) -> AipcsContractError:
+    category = (
+        value.category
+        if type(value) is PortableExecutionResult
+        else PortableResultCategory.INTERNAL_FAILURE
+    )
+    code, message, retryable = _PORTABLE_FAILURES[category]
+    return AipcsContractError(code, message, retryable=retryable)
 
 
 def _require_persistent_admin(profile: str) -> None:

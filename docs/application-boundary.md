@@ -41,8 +41,11 @@ surface. V1-11 C2 composes the frozen read-only administration commands
 through an application-owned inspection port. The runtime composition root
 translates concrete migration and domain inspection into bounded application
 facts; application and CLI modules do not import adapters. These commands do
-not migrate, repair, execute DDL, or perform lifecycle transitions. Later
-V1-11 slices must use the same application and coordinator boundaries.
+not migrate, repair, or execute DDL. V1-11 C3 composes operational
+suspend/resume/archive/restore through the existing `PortableCoordinator`
+only after exact registry readiness. It preserves revision and idempotency
+preconditions and performs no hidden compound transition. Later V1-11 slices
+must use the same application and coordinator boundaries.
 
 The data application owns generic record, branch, discovery, and maintenance
 use cases. It receives the registry-authoritative materialised service and a

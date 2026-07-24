@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -134,6 +134,12 @@ class AdminRuntime:
 
     inspection: AdminInspectionApplication
     context: ApplicationContext
+    _portable_factory: Callable[[], PortableCoordinator] | None = None
+
+    def portable(self) -> PortableCoordinator:
+        if self._portable_factory is None:
+            raise RuntimeError("Portable administration is unavailable.")
+        return self._portable_factory()
 
 
 class AdapterAdminStorageInspector:
@@ -226,6 +232,7 @@ def compose_admin_runtime(
         return AdminRuntime(
             AdminInspectionApplication("stateless", None, None, None),
             ApplicationContext("stateless", "cli"),
+            None,
         )
     if config.principal_id is None:
         raise RuntimeError("Administration principal is unavailable.")
@@ -261,11 +268,21 @@ def compose_admin_runtime(
         inspection = AdapterAdminStorageInspector(
             StorageBackend.SQLITE, registry, catalog, domain
         )
+        portable_store = SQLitePortableServiceStore(
+            location, busy_timeout_ms=config.sqlite_busy_timeout_ms, clock=clock.now
+        )
         return AdminRuntime(
             AdminInspectionApplication(
                 "sqlite", inspection, services, data
             ),
             ApplicationContext(config.principal_id, "cli"),
+            lambda: PortableCoordinator(
+                registry.open_uow,
+                clock,
+                uuid4,
+                StorageBackend.SQLITE,
+                portable_store,
+            ),
         )
     if config.profile == "postgresql":
         try:
@@ -303,11 +320,27 @@ def compose_admin_runtime(
             inspection = AdapterAdminStorageInspector(
                 StorageBackend.POSTGRESQL, registry, catalog, domain
             )
+            portable_store = PostgreSQLPortableServiceStore(
+                dsn,
+                connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+                lock_timeout_ms=config.postgres_lock_timeout_ms,
+                statement_timeout_ms=config.postgres_statement_timeout_ms,
+                service_store_catalog=catalog,
+                domain_schema_store=domain,
+                clock=clock.now,
+            )
             return AdminRuntime(
                 AdminInspectionApplication(
                     "postgresql", inspection, services, data
                 ),
                 ApplicationContext(config.principal_id, "cli"),
+                lambda: PortableCoordinator(
+                    registry.open_uow,
+                    clock,
+                    uuid4,
+                    StorageBackend.POSTGRESQL,
+                    portable_store,
+                ),
             )
         except Exception:
             raise RuntimeError(

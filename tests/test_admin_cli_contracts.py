@@ -463,9 +463,10 @@ def test_unimplemented_mutation_is_validated_then_fails_closed_without_runtime(
     assert (
         cli.main(
             [
-                "service",
-                "suspend",
+                "export",
                 SERVICE_ID,
+                "--output",
+                "bundle.jsonl",
                 "--expected-revision",
                 "1",
                 "--operation-id",
