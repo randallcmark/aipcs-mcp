@@ -360,14 +360,14 @@ control evidence and are never copied into a bundle as source authority.
 The composition root selects one closed `sqlite | postgresql` implementation
 for this internal coordinator. V1-10 adds no MCP tool or configuration key.
 V1-11 C2 adds read-only CLI inspection only; operator-selected transfer paths
-and mutation confirmation/recovery UX remain later V1-11 work.
+arrive in C4, but only the CLI owns them: storage and portable application
+ports still receive logical locators and already-open private streams.
 
 ## Deferred adapter work
 
 PostgreSQL is a supported generic public-v1 stdio reference adapter when the
 package is installed with its `[postgresql]` extra. Third-party adapters,
-mixed-backend runtime composition, operator-facing logical export/import,
-physical backup/restore, repair, operator-facing archive/resume/purge, an
-administration CLI, and cross-store transactions remain deferred. Those
+mixed-backend runtime composition, physical backup/restore, arbitrary repair,
+remote administration, and cross-store transactions remain deferred. Those
 features require explicit contracts and validation rather than exposure of
 either reference adapter's private modules.

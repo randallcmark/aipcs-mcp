@@ -38,6 +38,7 @@ from .admin_cli import (
     render_human_error,
     render_human_result,
 )
+from .admin_files import AdminFileError, ExclusiveExportFile, open_import_file
 from .application.admin import project_doctor, project_migration, project_status
 from .application.errors import ApplicationError
 from .application.operational_lifecycle import (
@@ -46,7 +47,17 @@ from .application.operational_lifecycle import (
     ResumeCommand,
     SuspendCommand,
 )
-from .application.portable import PortableExecutionResult, PortableResultCategory
+from .application.portable import (
+    ImportBundleRequest,
+    PortableExecutionResult,
+    PortableResultCategory,
+)
+from .application.portable_models import PortableBundleSummary
+from .application.registry_authority import (
+    ExportCommand,
+    StorageBackend,
+    TransferReceipt,
+)
 from .configuration.errors import to_contract_error
 from .configuration.models import ConfigOverrides, ResolvedConfiguration
 from .configuration.reporting import (
@@ -396,6 +407,8 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
             ServiceListInvocation,
             ServiceInspectInvocation,
             ServiceLifecycleInvocation,
+            ExportInvocation,
+            ImportInvocation,
             MaintenanceScanInvocation,
         ),
     ):
@@ -447,6 +460,12 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
         elif type(invocation) is ServiceLifecycleInvocation:
             _require_persistent_admin(resolved.profile)
             result = _run_lifecycle(runtime, invocation)
+        elif type(invocation) is ExportInvocation:
+            _require_persistent_admin(resolved.profile)
+            result = _run_export(runtime, invocation)
+        elif type(invocation) is ImportInvocation:
+            _require_persistent_admin(resolved.profile)
+            result = _run_import(runtime, invocation, resolved.profile)
         else:
             raise AipcsContractError(
                 ErrorCode.UNSUPPORTED_OPERATION,
@@ -463,6 +482,306 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
         ) from None
     _write_success(result, invocation.output_format.value)
     return 0
+
+
+def _run_export(runtime: object, invocation: ExportInvocation) -> dict[str, object]:
+    inspection, context, portable = _portable_runtime(runtime)
+    _require_ready_registry(inspection)
+    coordinator = _compose_portable(portable)
+    expected_revision = invocation.expected_revision
+    operation_id = invocation.operation_id
+    current = None
+    if expected_revision is None or operation_id is None:
+        current = inspection.service_inspect(context, invocation.service_id)
+        expected_revision = (
+            current.service_revision
+            if expected_revision is None
+            else expected_revision
+        )
+        operation_id = uuid4() if operation_id is None else operation_id
+    completed = replace(
+        invocation,
+        expected_revision=expected_revision,
+        operation_id=operation_id,
+    )
+    if (
+        invocation.mode is CliExecutionMode.INTERACTIVE
+        and confirmation_for(invocation) is CliConfirmation.GENERATED_VALUES
+    ):
+        if current is None:
+            current = inspection.service_inspect(context, invocation.service_id)
+        if not _confirm_export(completed, current.operational_status):
+            raise AipcsContractError(
+                ErrorCode.INVALID_STATE,
+                "The export operation was not confirmed.",
+            )
+    assert completed.expected_revision is not None
+    assert completed.operation_id is not None
+    command = ExportCommand(
+        context.principal_id,
+        "cli",
+        completed.service_id,
+        completed.expected_revision,
+        str(completed.operation_id),
+    )
+    try:
+        with ExclusiveExportFile(completed.output_path) as output:
+            outcome = coordinator.export(command, output.stream)
+            if (
+                type(outcome) is not PortableExecutionResult
+                or outcome.category is not PortableResultCategory.COMPLETED
+                or not outcome.artifact_written
+                or outcome.summary is None
+                or outcome.receipt is None
+            ):
+                raise _portable_failure(outcome)
+            output.publish()
+    except AdminFileError as error:
+        raise _file_failure(error) from None
+    return {
+        "operation": "export",
+        "operation_id": str(completed.operation_id),
+        "summary": _project_bundle_summary(outcome.summary),
+        "receipt": _project_receipt(outcome.receipt),
+    }
+
+
+def _run_import(
+    runtime: object,
+    invocation: ImportInvocation,
+    profile: str,
+) -> dict[str, object]:
+    inspection, context, portable = _portable_runtime(runtime)
+    coordinator = _compose_portable(portable)
+    backend = _storage_backend(profile)
+    validation_request = ImportBundleRequest(
+        context.principal_id,
+        "cli",
+        backend,
+        "dry-run",
+        True,
+    )
+    try:
+        with open_import_file(invocation.input_path) as source:
+            validated = coordinator.import_bundle(validation_request, source)
+    except AdminFileError as error:
+        raise _file_failure(error) from None
+    if (
+        type(validated) is not PortableExecutionResult
+        or validated.category is not PortableResultCategory.VALIDATED
+        or validated.summary is None
+        or validated.service is None
+    ):
+        raise _portable_failure(validated)
+    validation_result = {
+        "operation": "import_dry_run",
+        "summary": _project_bundle_summary(validated.summary),
+        "service": _project_bundle_service(validated.service),
+    }
+    if invocation.dry_run:
+        return validation_result
+
+    operation_id = invocation.operation_id
+    if operation_id is None:
+        operation_id = uuid4()
+    if invocation.mode is CliExecutionMode.INTERACTIVE and not _confirm_import(
+        validated, backend, operation_id
+    ):
+        raise AipcsContractError(
+            ErrorCode.INVALID_STATE,
+            "The import operation was not confirmed.",
+        )
+    _require_ready_registry(inspection)
+    request = ImportBundleRequest(
+        context.principal_id,
+        "cli",
+        backend,
+        str(operation_id),
+        False,
+    )
+    try:
+        with open_import_file(invocation.input_path) as source:
+            outcome = coordinator.import_bundle(request, source)
+    except AdminFileError as error:
+        raise _file_failure(error) from None
+    if (
+        type(outcome) is not PortableExecutionResult
+        or outcome.category is not PortableResultCategory.COMPLETED
+        or outcome.service is None
+    ):
+        raise _portable_failure(outcome)
+    service = inspection.service_inspect(context, outcome.service.service_id)
+    return {
+        "operation": "import",
+        "operation_id": str(operation_id),
+        "summary": _project_bundle_summary(
+            validated.summary if outcome.summary is None else outcome.summary
+        ),
+        "service": service.model_dump(
+            mode="json", by_alias=True, warnings="error"
+        ),
+    }
+
+
+def _portable_runtime(runtime: object) -> tuple[object, object, object]:
+    inspection = getattr(runtime, "inspection", None)
+    context = getattr(runtime, "context", None)
+    portable = getattr(runtime, "portable", None)
+    if inspection is None or context is None or not callable(portable):
+        raise AipcsContractError(
+            ErrorCode.INTERNAL_ERROR,
+            "The portable runtime could not be composed safely.",
+        )
+    return inspection, context, portable
+
+
+def _compose_portable(portable: object) -> object:
+    if not callable(portable):
+        raise AipcsContractError(
+            ErrorCode.INTERNAL_ERROR,
+            "The portable runtime could not be composed safely.",
+        )
+    try:
+        return portable()
+    except Exception:
+        raise AipcsContractError(
+            ErrorCode.STORAGE_UNAVAILABLE,
+            "The portable runtime is unavailable.",
+        ) from None
+
+
+def _require_ready_registry(inspection: object) -> None:
+    registry = inspection.registry_status()
+    if registry.status == "ready":
+        return
+    code = (
+        ErrorCode.STORAGE_UNAVAILABLE
+        if registry.status == "unavailable"
+        else ErrorCode.STORAGE_MIGRATION_REQUIRED
+    )
+    raise AipcsContractError(code, "The registry is not ready for portable work.")
+
+
+def _storage_backend(profile: str) -> StorageBackend:
+    try:
+        return StorageBackend(profile)
+    except ValueError:
+        raise AipcsContractError(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "Portable operations require persistent storage.",
+        ) from None
+
+
+def _confirm_export(invocation: ExportInvocation, current_status: str) -> bool:
+    return _terminal_confirmation(
+        "AIPCS export confirmation\n"
+        f"service_id: {invocation.service_id}\n"
+        f"operational_status: {current_status}\n"
+        f"expected_revision: {invocation.expected_revision}\n"
+        f"operation_id: {invocation.operation_id}\n"
+        "Confirm [y/N]: "
+    )
+
+
+def _confirm_import(
+    validated: PortableExecutionResult,
+    backend: StorageBackend,
+    operation_id: UUID,
+) -> bool:
+    assert validated.service is not None and validated.summary is not None
+    return _terminal_confirmation(
+        "AIPCS import confirmation\n"
+        f"service_id: {validated.service.service_id}\n"
+        f"domain_name: {validated.service.domain_name}\n"
+        f"source_backend: {validated.summary.header.source_backend}\n"
+        f"destination_backend: {backend.value}\n"
+        f"frame_count: {validated.summary.frame_count}\n"
+        f"root_sha256: {validated.summary.root_sha256}\n"
+        f"operation_id: {operation_id}\n"
+        "Confirm [y/N]: "
+    )
+
+
+def _terminal_confirmation(prompt: str) -> bool:
+    try:
+        with Path("/dev/tty").open("r+", encoding="utf-8", buffering=1) as terminal:
+            terminal.write(prompt)
+            answer = terminal.readline(16)
+    except OSError:
+        raise AipcsContractError(
+            ErrorCode.INVALID_REQUEST,
+            "Interactive confirmation terminal is unavailable.",
+        ) from None
+    return answer.strip().casefold() in {"y", "yes"}
+
+
+def _project_bundle_summary(value: PortableBundleSummary) -> dict[str, object]:
+    return {
+        "export_format_version": value.header.export_format_version,
+        "source_backend": value.header.source_backend,
+        "root_sha256": value.root_sha256,
+        "frame_count": value.frame_count,
+        "total_byte_count": value.total_byte_count,
+        "sections": {
+            section.kind: section.count for section in value.sections
+        },
+    }
+
+
+def _project_receipt(value: TransferReceipt) -> dict[str, object]:
+    return {
+        "receipt_id": str(value.receipt_id),
+        "kind": value.kind.value,
+        "service_id": str(value.service_id),
+        "bundle_root_sha256": value.bundle_root_sha256,
+        "export_format_version": value.export_format_version,
+        "backend": value.storage_backend.value,
+        "service_revision": value.service_revision,
+        "operational_status": value.operational_status,
+        "verification": value.verification.value,
+        "created_at": value.created_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _project_bundle_service(value: object) -> dict[str, object]:
+    return {
+        "service_id": str(value.service_id),
+        "domain_name": value.domain_name,
+        "domain_class": value.domain_class,
+        "intent_description": value.intent_description,
+        "design_state": value.design_state,
+        "operational_status": value.operational_status,
+        "schema_version": value.schema_version,
+        "service_revision": value.service_revision,
+    }
+
+
+def _file_failure(error: AdminFileError) -> AipcsContractError:
+    if error.code == "already_exists":
+        return AipcsContractError(
+            ErrorCode.ALREADY_EXISTS,
+            "The destination file already exists.",
+        )
+    if error.code == "invalid_path":
+        return AipcsContractError(
+            ErrorCode.VALIDATION_FAILED,
+            "The file path is invalid.",
+        )
+    if error.code == "not_regular":
+        return AipcsContractError(
+            ErrorCode.VALIDATION_FAILED,
+            "The import source must be a regular file.",
+        )
+    if error.code == "publication_uncertain":
+        return AipcsContractError(
+            ErrorCode.OPERATION_UNCERTAIN,
+            "Export publication outcome is uncertain.",
+            retryable=True,
+        )
+    return AipcsContractError(
+        ErrorCode.STORAGE_UNAVAILABLE,
+        "The requested file is unavailable.",
+    )
 
 
 def _run_lifecycle(runtime: object, invocation: ServiceLifecycleInvocation) -> dict[str, object]:
@@ -557,23 +876,14 @@ def _confirm_lifecycle(
         CliLifecycleAction.ARCHIVE: "archived",
         CliLifecycleAction.RESTORE: "suspended",
     }[invocation.action]
-    try:
-        with Path("/dev/tty").open("r+", encoding="utf-8", buffering=1) as terminal:
-            terminal.write(
-                "AIPCS lifecycle confirmation\n"
-                f"service_id: {invocation.service_id}\n"
-                f"transition: {current_status} -> {target}\n"
-                f"expected_revision: {invocation.expected_revision}\n"
-                f"operation_id: {invocation.operation_id}\n"
-                "Confirm [y/N]: "
-            )
-            answer = terminal.readline(16)
-    except OSError:
-        raise AipcsContractError(
-            ErrorCode.INVALID_REQUEST,
-            "Interactive confirmation terminal is unavailable.",
-        ) from None
-    return answer.strip().casefold() in {"y", "yes"}
+    return _terminal_confirmation(
+        "AIPCS lifecycle confirmation\n"
+        f"service_id: {invocation.service_id}\n"
+        f"transition: {current_status} -> {target}\n"
+        f"expected_revision: {invocation.expected_revision}\n"
+        f"operation_id: {invocation.operation_id}\n"
+        "Confirm [y/N]: "
+    )
 
 
 _PORTABLE_FAILURES: dict[

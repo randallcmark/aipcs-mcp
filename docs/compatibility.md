@@ -159,8 +159,9 @@ implements the read-only status, doctor, storage, service, and maintenance
 commands for the configured homogeneous backend. These inspection paths do
 not migrate or repair storage. C3 implements the exact operational transition
 matrix through the existing coordinator with stable retry and recovery exits.
-File transfer, purge, cross-runtime orchestration, and the supported
-distribution workflow remain later slices.
+C4 adds logical file export/import and dry-run validation. Cross-backend
+transfer remains two separately configured commands rather than a mixed
+runtime. Purge and the supported distribution workflow remain later slices.
 
 ## Error and retry compatibility
 

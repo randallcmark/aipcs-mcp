@@ -405,6 +405,17 @@ def _render_mapping(
             if len(item) > 100:
                 raise ValueError("Human result is outside the supported projection bounds.")
             sequence = list(item)
+            if all(isinstance(entry, Mapping) for entry in sequence):
+                if not sequence:
+                    lines.append(f"{label}: []")
+                for index, entry in enumerate(sequence):
+                    _render_mapping(
+                        entry,
+                        lines,
+                        prefix=f"{label}[{index}].",
+                        depth=depth + 1,
+                    )
+                continue
             if any(
                 value is not None and type(value) not in {str, int, bool, float}
                 for value in sequence

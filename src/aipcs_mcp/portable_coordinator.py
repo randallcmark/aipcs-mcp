@@ -151,6 +151,13 @@ class PortableCoordinator:
             return _result(PortableResultCategory.MALFORMED_INPUT)
         admitted = self._admit(command, require_service=True)
         if type(admitted) is PortableExecutionResult:
+            if (
+                admitted.category is PortableResultCategory.COMPLETED
+                and admitted.receipt is not None
+            ):
+                return self._replay_export(
+                    command, admitted.receipt, destination, limits=limits
+                )
             return admitted
         if type(admitted.intent) is not PortableIntent or admitted.service is None:
             return _result(PortableResultCategory.INTERNAL_FAILURE)
@@ -210,6 +217,69 @@ class PortableCoordinator:
         return PortableExecutionResult(
             PortableResultCategory.COMPLETED,
             receipt=actual_receipt,
+            summary=summary,
+            artifact_written=True,
+        )
+
+    def _replay_export(
+        self,
+        command: ExportCommand,
+        receipt: TransferReceipt,
+        destination: BinaryIO,
+        *,
+        limits: PortableBundleLimits | None,
+    ) -> PortableExecutionResult:
+        """Re-emit an exact completed export only while its snapshot is unchanged."""
+
+        try:
+            uow = self._uows()
+        except Exception as error:
+            return _registry_error(error, uncertain=False)
+        try:
+            service = uow.services.get(command.principal_id, command.service_id)
+            _rollback_close(uow)
+        except Exception as error:
+            _rollback_close(uow)
+            return _registry_error(error, uncertain=False)
+        if (
+            type(service) is not Service
+            or receipt.kind is not ReceiptKind.EXPORT
+            or receipt.principal_id != command.principal_id
+            or receipt.service_id != command.service_id
+            or receipt.storage_backend is not self._backend
+            or service.service_revision != receipt.service_revision
+            or service.operational_status != receipt.operational_status
+        ):
+            return _result(PortableResultCategory.STALE_REVISION)
+        try:
+            fence: WriteAdmissionFence | None = None
+            members: tuple[PortableStoreMember, ...] = ()
+            if service.design_state == "materialised":
+                if service.storage is None or service.storage.backend != self._backend.value:
+                    return _result(PortableResultCategory.RECOVERY_REQUIRED)
+                fence = self._store.read_fence(service)
+                if fence.state != "closed":
+                    return _result(PortableResultCategory.STALE_REVISION)
+                with self._store.open_snapshot(service, fence) as reader:
+                    members = tuple(reader)
+                if service.manifest is None:
+                    return _result(PortableResultCategory.RECOVERY_REQUIRED)
+                members = validate_portable_members(
+                    members, compile_record_specification(service.manifest)
+                )
+            lines, summary = self._encode(
+                service, fence, members, receipt.created_at, limits
+            )
+            if summary.root_sha256 != receipt.bundle_root_sha256:
+                return _result(PortableResultCategory.STALE_REVISION)
+            _write_lines(destination, lines)
+        except PortableBundleContractError:
+            return _result(PortableResultCategory.INTERNAL_FAILURE)
+        except Exception as error:
+            return _storage_result(error, uncertain=False)
+        return PortableExecutionResult(
+            PortableResultCategory.COMPLETED,
+            receipt=receipt,
             summary=summary,
             artifact_written=True,
         )

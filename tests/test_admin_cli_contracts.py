@@ -433,6 +433,22 @@ def test_human_result_projects_safe_mapping_deterministically() -> None:
     ]
 
 
+def test_human_result_projects_bounded_mapping_sequences_with_indices() -> None:
+    assert render_human_result(
+        {
+            "checks": [
+                {"check_id": "registry", "status": "pass"},
+                {"check_id": "service_store", "status": "warning"},
+            ]
+        }
+    ).splitlines() == [
+        "checks[0].check_id: registry",
+        "checks[0].status: pass",
+        "checks[1].check_id: service_store",
+        "checks[1].status: warning",
+    ]
+
+
 @pytest.mark.parametrize(
     "result",
     [
@@ -463,14 +479,17 @@ def test_unimplemented_mutation_is_validated_then_fails_closed_without_runtime(
     assert (
         cli.main(
             [
-                "export",
+                "service",
+                "purge",
                 SERVICE_ID,
-                "--output",
-                "bundle.jsonl",
                 "--expected-revision",
                 "1",
                 "--operation-id",
                 OPERATION_ID,
+                "--override",
+                "--confirm-service-id",
+                SERVICE_ID,
+                "--yes",
             ]
         )
         == CliExit.REFUSED

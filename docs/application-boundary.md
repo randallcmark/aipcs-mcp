@@ -45,7 +45,10 @@ not migrate, repair, or execute DDL. V1-11 C3 composes operational
 suspend/resume/archive/restore through the existing `PortableCoordinator`
 only after exact registry readiness. It preserves revision and idempotency
 preconditions and performs no hidden compound transition. Later V1-11 slices
-must use the same application and coordinator boundaries.
+must use the same application and coordinator boundaries. C4 passes only
+already-open private binary streams to the coordinator. CLI file handling owns
+exclusive publication and safe read-only opening; the coordinator retains
+canonical validation, spooling, limits, and validation-before-write.
 
 The data application owns generic record, branch, discovery, and maintenance
 use cases. It receives the registry-authoritative materialised service and a

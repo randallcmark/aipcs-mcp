@@ -298,6 +298,32 @@ def test_export_then_dry_run_validates_without_destination_writes() -> None:
     assert store.calls == []
 
 
+def test_completed_export_replay_reemits_only_the_exact_unchanged_snapshot() -> None:
+    registry = FakeRegistry()
+    registry.items[SERVICE_ID] = _service()
+    store = FakePortableStore(members=_members())
+    coordinator = _coordinator(registry, store)
+    command = ExportCommand(PRINCIPAL, "test", SERVICE_ID, 3, "export-replay")
+    first = BytesIO()
+    assert coordinator.export(command, first).artifact_written
+
+    replay = BytesIO()
+    replayed = coordinator.export(command, replay)
+    assert replayed.category is PortableResultCategory.COMPLETED
+    assert replayed.artifact_written
+    assert replay.getvalue() == first.getvalue()
+    assert replayed.receipt is not None
+    assert replayed.receipt.receipt_id == EXPORT_RECEIPT
+
+    registry.items[SERVICE_ID] = replace(
+        registry.items[SERVICE_ID],
+        operational_status="archived",
+        service_revision=4,
+    )
+    changed = coordinator.export(command, BytesIO())
+    assert changed.category is PortableResultCategory.STALE_REVISION
+
+
 def test_seeded_export_and_import_never_open_a_service_store() -> None:
     source_registry = FakeRegistry()
     source_registry.items[SERVICE_ID] = replace(

@@ -180,7 +180,9 @@ secret-file support, remote configuration, profile plugin system, automatic
 reload, database probe by configuration commands, or directory creation by
 `config show`/`config validate`. Administration commands use the same strict
 selectors and redaction rules. There is no database URL, raw SQL, adapter
-plugin, or arbitrary retry/repair command.
+plugin, or arbitrary retry/repair command. Export and import each use only the
+single resolved profile for that invocation; cross-backend transfer therefore
+uses separate source and destination commands.
 
 ## Development use
 
