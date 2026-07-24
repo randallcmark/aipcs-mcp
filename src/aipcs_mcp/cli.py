@@ -55,6 +55,10 @@ from .application.portable import (
 from .application.portable_models import PortableBundleSummary
 from .application.registry_authority import (
     ExportCommand,
+    PurgeAuthority,
+    PurgeAuthorityKind,
+    PurgeCommand,
+    PurgeTombstone,
     StorageBackend,
     TransferReceipt,
 )
@@ -407,6 +411,7 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
             ServiceListInvocation,
             ServiceInspectInvocation,
             ServiceLifecycleInvocation,
+            ServicePurgeInvocation,
             ExportInvocation,
             ImportInvocation,
             MaintenanceScanInvocation,
@@ -466,6 +471,9 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
         elif type(invocation) is ImportInvocation:
             _require_persistent_admin(resolved.profile)
             result = _run_import(runtime, invocation, resolved.profile)
+        elif type(invocation) is ServicePurgeInvocation:
+            _require_persistent_admin(resolved.profile)
+            result = _run_purge(runtime, invocation)
         else:
             raise AipcsContractError(
                 ErrorCode.UNSUPPORTED_OPERATION,
@@ -482,6 +490,76 @@ def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
         ) from None
     _write_success(result, invocation.output_format.value)
     return 0
+
+
+def _run_purge(
+    runtime: object, invocation: ServicePurgeInvocation
+) -> dict[str, object]:
+    inspection, context, portable = _portable_runtime(runtime)
+    _require_ready_registry(inspection)
+    expected_revision = invocation.expected_revision
+    operation_id = invocation.operation_id
+    current = None
+    if expected_revision is None or operation_id is None:
+        current = inspection.service_inspect(context, invocation.service_id)
+        expected_revision = (
+            current.service_revision
+            if expected_revision is None
+            else expected_revision
+        )
+        operation_id = uuid4() if operation_id is None else operation_id
+    completed = replace(
+        invocation,
+        expected_revision=expected_revision,
+        operation_id=operation_id,
+    )
+    if (
+        completed.confirmed_service_id is not None
+        and completed.confirmed_service_id != completed.service_id
+    ):
+        raise AipcsContractError(
+            ErrorCode.VALIDATION_FAILED,
+            "The confirmed service identity does not match.",
+        )
+    if invocation.mode is CliExecutionMode.INTERACTIVE:
+        if current is None:
+            current = inspection.service_inspect(context, invocation.service_id)
+        if not _confirm_purge(completed, current.operational_status):
+            raise AipcsContractError(
+                ErrorCode.INVALID_STATE,
+                "The purge operation was not confirmed.",
+            )
+    assert completed.expected_revision is not None
+    assert completed.operation_id is not None
+    authority = (
+        PurgeAuthority(PurgeAuthorityKind.EXPLICIT_OVERRIDE)
+        if completed.explicit_override
+        else PurgeAuthority(
+            PurgeAuthorityKind.VERIFIED_RECEIPT,
+            completed.receipt_id,
+        )
+    )
+    outcome = _compose_portable(portable).purge(
+        PurgeCommand(
+            context.principal_id,
+            "cli",
+            completed.service_id,
+            completed.expected_revision,
+            str(completed.operation_id),
+            authority,
+        )
+    )
+    if (
+        type(outcome) is not PortableExecutionResult
+        or outcome.category is not PortableResultCategory.COMPLETED
+        or outcome.tombstone is None
+    ):
+        raise _portable_failure(outcome)
+    return {
+        "operation": "purge",
+        "operation_id": str(completed.operation_id),
+        "tombstone": _project_tombstone(outcome.tombstone),
+    }
 
 
 def _run_export(runtime: object, invocation: ExportInvocation) -> dict[str, object]:
@@ -683,6 +761,35 @@ def _confirm_export(invocation: ExportInvocation, current_status: str) -> bool:
     )
 
 
+def _confirm_purge(
+    invocation: ServicePurgeInvocation, current_status: str
+) -> bool:
+    authority = (
+        "explicit_override"
+        if invocation.explicit_override
+        else f"verified_receipt:{invocation.receipt_id}"
+    )
+    prompt = (
+        "AIPCS PURGE confirmation\n"
+        f"service_id: {invocation.service_id}\n"
+        f"operational_status: {current_status}\n"
+        f"expected_revision: {invocation.expected_revision}\n"
+        f"operation_id: {invocation.operation_id}\n"
+        f"authority: {authority}\n"
+        f"Type the service id to purge ({invocation.service_id}): "
+    )
+    try:
+        with Path("/dev/tty").open("r+", encoding="utf-8", buffering=1) as terminal:
+            terminal.write(prompt)
+            answer = terminal.readline(64)
+    except OSError:
+        raise AipcsContractError(
+            ErrorCode.INVALID_REQUEST,
+            "Interactive confirmation terminal is unavailable.",
+        ) from None
+    return answer.strip() == str(invocation.service_id)
+
+
 def _confirm_import(
     validated: PortableExecutionResult,
     backend: StorageBackend,
@@ -740,6 +847,15 @@ def _project_receipt(value: TransferReceipt) -> dict[str, object]:
         "operational_status": value.operational_status,
         "verification": value.verification.value,
         "created_at": value.created_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _project_tombstone(value: PurgeTombstone) -> dict[str, object]:
+    return {
+        "service_id": str(value.service_id),
+        "purged_at": value.purged_at.isoformat().replace("+00:00", "Z"),
+        "authority": value.authority.kind.value,
+        "receipt_id": None if value.receipt_id is None else str(value.receipt_id),
     }
 
 

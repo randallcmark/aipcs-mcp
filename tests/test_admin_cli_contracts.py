@@ -465,40 +465,6 @@ def test_human_result_rejects_unsafe_or_unbounded_values(
         render_human_result(result)
 
 
-def test_unimplemented_mutation_is_validated_then_fails_closed_without_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(
-        cli,
-        "resolve_configuration",
-        lambda **_: (_ for _ in ()).throw(
-            AssertionError("Unimplemented mutations must not compose an admin runtime")
-        ),
-    )
-    assert (
-        cli.main(
-            [
-                "service",
-                "purge",
-                SERVICE_ID,
-                "--expected-revision",
-                "1",
-                "--operation-id",
-                OPERATION_ID,
-                "--override",
-                "--confirm-service-id",
-                SERVICE_ID,
-                "--yes",
-            ]
-        )
-        == CliExit.REFUSED
-    )
-    output = capsys.readouterr()
-    assert output.out == ""
-    assert json.loads(output.err)["error"]["code"] == "unsupported_operation"
-
-
 @pytest.mark.parametrize(
     "argv",
     [
@@ -587,7 +553,7 @@ def test_unimplemented_mutation_is_validated_then_fails_closed_without_runtime(
         ],
     ],
 )
-def test_unimplemented_admin_mutations_parse_to_unavailable_result(
+def test_persistent_admin_mutations_fail_closed_for_stateless_profile(
     argv: list[str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:

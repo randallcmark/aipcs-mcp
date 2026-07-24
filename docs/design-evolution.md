@@ -8,7 +8,7 @@ server, stable generic tools, and schemas that agents can design and evolve.
 | --- | --- |
 | Generate MCP tools from each schema. | One stable 21-tool surface operates over agent-defined schemas. |
 | Generate a web service for every memory domain. | One local-first primitive server manages many services. |
-| Treat undeveloped seeds as abandoned. | Seeds are durable cues; archive and purge are explicit internal lifecycle actions, with public administration deferred. |
+| Treat undeveloped seeds as abandoned. | Seeds are durable cues; operators may explicitly archive and purge them through the administration CLI. |
 | Make SQLite the product model. | SQLite is the default reference adapter; PostgreSQL is the schema-isolated secondary reference that proves the behavioral ports. |
 | Treat local SQLite as general multi-writer storage. | One local POSIX host and effective user; WAL permits readers and serialises one writer. |
 | Retain aliases and generated pointers. | Agents evolve schemas and move records explicitly. |
@@ -53,10 +53,8 @@ contract.
 
 The current implementation remains local-first and pre-release. PostgreSQL is
 a supported generic public-v1 stdio reference backend when installed with its
-`[postgresql]` extra. The backend-neutral portable data and operational
-lifecycle are implemented as private V1-10 application/storage seams; public
-commands, paths, confirmation and recovery UX remain V1-11 work. Semantic
-search, an administration CLI, supported `uvx` installation, remote MCP,
-hosted identity, and maintenance/deprecation policy remain separate future
-work. Their absence is deliberate and is not filled by private modules,
-examples, or research artifacts.
+`[postgresql]` extra. V1-11 exposes the backend-neutral operational lifecycle
+and portable data seams through a bounded administration CLI. Semantic search,
+supported `uvx` installation, remote MCP, hosted identity, and
+maintenance/deprecation policy remain separate future work. Their absence is
+deliberate and is not filled by examples or research artifacts.

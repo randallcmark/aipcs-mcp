@@ -161,7 +161,8 @@ not migrate or repair storage. C3 implements the exact operational transition
 matrix through the existing coordinator with stable retry and recovery exits.
 C4 adds logical file export/import and dry-run validation. Cross-backend
 transfer remains two separately configured commands rather than a mixed
-runtime. Purge and the supported distribution workflow remain later slices.
+runtime. C5 adds archived-only, authority-bound purge with terminal replay.
+The supported distribution workflow remains V1-12.
 
 ## Error and retry compatibility
 
@@ -185,9 +186,8 @@ No compatibility commitment yet exists for:
 
 - third-party adapters or mixed-backend runtime composition;
 - semantic, fuzzy, embedding, or cross-service search;
-- public export/import/restore, online backup, repair, archive/resume, or
-  purge workflows;
-- administration CLI workflows or supported `uvx` packaging;
+- online physical backup/restore or arbitrary repair;
+- supported `uvx` packaging;
 - remote MCP, authentication, hosted tenancy, or multi-host deployment; or
 - support windows, security-fix windows, or deprecation periods.
 

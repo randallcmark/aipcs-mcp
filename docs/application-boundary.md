@@ -49,6 +49,10 @@ must use the same application and coordinator boundaries. C4 passes only
 already-open private binary streams to the coordinator. CLI file handling owns
 exclusive publication and safe read-only opening; the coordinator retains
 canonical validation, spooling, limits, and validation-before-write.
+V1-11 C5 similarly passes one typed purge command through the coordinator.
+Archived state, exact revision, authority, physical absence, and terminal
+tombstone publication remain coordinator/registry responsibilities; the CLI
+owns only strong confirmation and safe projection.
 
 The data application owns generic record, branch, discovery, and maintenance
 use cases. It receives the registry-authoritative materialised service and a

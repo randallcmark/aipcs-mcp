@@ -13,7 +13,8 @@ The current source runtime supports:
 - generic record create, get, list, search, update, delete, and history;
 - memory branches with primary and related record membership;
 - shape-only bootstrap plus bounded service summaries, facets, and samples;
-- read-only mechanical maintenance candidate discovery; and
+- read-only mechanical maintenance candidate discovery;
+- local administration, operational lifecycle, and logical transfer commands;
 - a local SQLite implementation over stdio; and
 - a generic PostgreSQL reference implementation over stdio when installed with
   the `postgresql` optional dependency.
@@ -22,9 +23,8 @@ SQLite is the default local reference backend. PostgreSQL is a supported
 generic public-v1 stdio reference backend when the package is installed with
 its `[postgresql]` extra and an operator provides a database. The commands
 below are checkout/development invocations; a supported `uvx` distribution,
-an administration CLI, operator-facing portable lifecycle commands, remote
-MCP, physical backup/restore, hosted tenancy, and semantic or fuzzy search
-remain deferred.
+remote MCP, physical backup/restore, hosted tenancy, and semantic or fuzzy
+search remain deferred.
 
 ## Documentation
 
@@ -203,7 +203,7 @@ merge records, archive, delete, or rewrite memory.
 Bootstrap is bounded to 100 service cards. Summary is bounded as described
 above. Maintenance returns at most 100 deterministic candidates.
 
-## Internal portable lifecycle boundary
+## Administration and portable lifecycle
 
 The source tree implements the V1-10 backend-neutral application and storage
 seams for logical export/import, suspend/resume/archive/restore, and deliberate
@@ -217,9 +217,33 @@ coordinator. Machine mode requires an explicit operation UUID and revision;
 interactive human mode displays any generated values before confirmation.
 V1-11 C4 exposes logical `export` and `import` through exclusive mode-`0600`
 files. Export never overwrites; import rejects symlinks and non-regular files;
-dry run validates the complete bundle before any destination write. Purge
-remains fail-closed. The 21-tool stdio contract, configuration keys, and
-single-backend runtime profiles are unchanged.
+dry run validates the complete bundle before any destination write. C5
+exposes archived-only purge with either a verified export receipt or an
+explicit override and exact service-identity confirmation. The 21-tool stdio
+contract, configuration keys, and single-backend runtime profiles are
+unchanged.
+
+The administration command tree is:
+
+```text
+aipcs status
+aipcs doctor [--service SERVICE_ID]
+aipcs storage status [--service SERVICE_ID]
+aipcs service list [--limit N]
+aipcs service inspect SERVICE_ID
+aipcs service suspend|resume|archive|restore SERVICE_ID
+aipcs export SERVICE_ID --output FILE
+aipcs import --input FILE [--dry-run]
+aipcs service purge SERVICE_ID
+aipcs maintenance scan --service SERVICE_ID
+```
+
+Machine lifecycle/export commands require `--expected-revision` and
+`--operation-id`; archive additionally requires `--yes`. Actual import
+requires `--operation-id` and `--yes`. Machine purge also requires exactly one
+of `--receipt` or `--override`, plus `--yes` and an exact
+`--confirm-service-id`. JSON is the default stable output; `--format human`
+is opt-in.
 
 The internal `export_format_version: 1` artifact is strict canonical UTF-8
 JSON Lines containing logical service, manifest, record, history, branch, and
@@ -239,11 +263,9 @@ separately authorised, terminal, and leaves a minimal immutable tombstone.
 There is no remap, clone, merge, overwrite, skip, partial-import, or automatic
 cleanup mode.
 
-Wheel and sdist release verification exercises this internal boundary from
+Wheel and sdist release verification exercises this boundary from
 outside the checkout with private streams on SQLite and both
-SQLite↔PostgreSQL directions for pinned PostgreSQL 16 and 18. V1-11 owns public
-path selection, cross-runtime orchestration, confirmation, recovery UX, and
-admin commands.
+SQLite↔PostgreSQL directions for pinned PostgreSQL 16 and 18.
 
 ## Agent-use examples
 
@@ -332,9 +354,8 @@ The current source contract deliberately excludes:
 - generated schema-specific tools and per-domain services;
 - semantic, fuzzy, embedding, or cross-service search;
 - third-party storage adapters or mixed-backend runtime composition;
-- operator-facing export/import/restore, backup, repair, archive/resume, and
-  purge workflows;
-- an administration CLI and supported `uvx` installation;
+- physical backup/restore and arbitrary repair;
+- a supported `uvx` installation;
 - remote MCP, authentication, hosted tenancy, and multi-host SQLite; and
 - automatic truth resolution, merge, archival, deletion, or schema invention.
 

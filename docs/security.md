@@ -127,7 +127,10 @@ surface that V1-11 defines. C4 export uses a same-directory owner-private
 temporary regular file, fsyncs content, and publishes atomically without
 replacement. Import opens read-only without following the final symlink and
 requires a regular file. Paths are never passed to the coordinator or returned
-in results and errors. Purge remains a bounded `unsupported_operation`.
+in results and errors. Purge requires archived state, an exact revision and
+operation id, a verified receipt or explicit override, and exact service-id
+confirmation. Physical absence is re-observed before the registry publishes a
+terminal tombstone.
 
 SHA-256 frame, section, and root digests detect accidental tamper, truncation,
 substitution, duplication, and reordering. They are not signatures,
@@ -216,6 +219,5 @@ or agent-specific operating instructions to the public repository.
 
 PostgreSQL is a supported generic public-v1 stdio reference backend when the
 package is installed with its `[postgresql]` extra. Remote MCP,
-authentication, hosted tenancy, operator-facing portable lifecycle, physical
-backup/restore, repair, and administration workflows remain deferred and must
-define their own trust boundaries before release.
+authentication, hosted tenancy, physical backup/restore, and arbitrary repair
+remain deferred and must define their own trust boundaries before release.
