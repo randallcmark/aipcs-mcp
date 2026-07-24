@@ -3,6 +3,11 @@
 This guide is vendor-adaptable. Translate the command and argument array into
 your MCP client's local stdio configuration format.
 
+The JSON examples use the intended post-publication distribution name. Before
+publication, replace the `aipcs-mcp` argument following `--from` with a
+supplied wheel, source archive, or Git URL as described in the
+[quickstart](quickstart.md).
+
 ## MCP process
 
 SQLite:

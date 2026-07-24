@@ -3,6 +3,10 @@
 AIPCS is local-first and stdio-only. One running process uses one configured
 backend and one fixed principal.
 
+Examples using the `aipcs-mcp` distribution name are post-publication forms.
+Before publication, replace the value after `uvx --from` with a supplied wheel,
+source archive, or Git URL as described in the [quickstart](quickstart.md).
+
 ## SQLite
 
 SQLite is the default reference backend for one Linux or macOS host. Use a

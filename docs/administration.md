@@ -3,6 +3,10 @@
 The `aipcs` command operates one resolved profile per invocation. JSON is the
 stable default output; add `--format human` for interactive reading.
 
+Examples using `uvx --from aipcs-mcp` show the intended post-publication
+package name. Before publication, replace `aipcs-mcp` with a supplied wheel,
+source archive, or Git URL as described in the [quickstart](quickstart.md).
+
 Every command accepts the same explicit configuration selectors documented in
 [configuration](configuration.md). Examples below use SQLite; substitute a
 PostgreSQL profile and DSN reference when appropriate.

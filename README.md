@@ -28,11 +28,17 @@ search remain deferred.
 
 ## Installation and isolated invocation
 
-Run the packaged command in an isolated environment:
+After package-index publication, run the packaged command in an isolated
+environment:
 
 ```text
 uvx --from aipcs-mcp aipcs --help
 ```
+
+The current pre-release is not package-index published. Until publication,
+replace `aipcs-mcp` after `--from` with a supplied wheel, source archive, or
+Git URL. The release gate verifies those artifact forms without falling back
+to the checkout.
 
 The PostgreSQL adapter is an explicit optional dependency:
 

@@ -10,9 +10,11 @@ first persisted memory without cloning the repository.
 - Linux or macOS; and
 - an MCP client that can launch a local stdio server.
 
-The package is pre-release and is not yet published to a package index. Until
-publication, replace `aipcs-mcp` in the examples with a wheel, source archive,
-or Git URL supplied by the project.
+The package is pre-release and is not yet published to a package index. The
+examples show the intended post-publication name. Until publication, replace
+the `aipcs-mcp` value after `--from` with a wheel, source archive, or Git URL
+supplied by the project. Do the same for `aipcs-mcp[postgresql]`, retaining the
+`postgresql` extra on the selected source form where the installer supports it.
 
 ## Configure the MCP process
 

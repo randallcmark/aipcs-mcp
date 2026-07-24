@@ -10,7 +10,7 @@ from tarfile import ReadError
 from tarfile import open as open_tar
 from zipfile import BadZipFile, ZipFile, ZipInfo
 
-from check_public_hygiene import content_violations
+from check_public_hygiene import content_violations, path_violations
 
 DENIED_PARTS = frozenset(
     {
@@ -46,6 +46,12 @@ def _is_editor_residue(name: str) -> bool:
         or name.startswith(".#")
         or (len(name) > 2 and name.startswith("#") and name.endswith("#"))
     )
+
+
+def hygiene_path(relative: PurePosixPath) -> PurePosixPath:
+    if len(relative.parts) > 1 and relative.parts[0].casefold().startswith("aipcs_mcp-"):
+        return PurePosixPath(*relative.parts[1:])
+    return relative
 
 
 def member_violation(name: str, *, allow_egg_info: bool) -> str | None:
@@ -84,11 +90,13 @@ def member_failures(
     failures: list[str] = []
     if reason := member_violation(name, allow_egg_info=allow_egg_info):
         failures.append(f"{name}: {reason}")
+    relative = hygiene_path(PurePosixPath(name))
+    failures.extend(f"{name}: {reason}" for reason in path_violations(relative))
     if not regular:
         failures.append(f"{name}: non-regular archive entry")
     if data is not None:
         failures.extend(
-            f"{name}: {reason}" for reason in content_violations(PurePosixPath(name), data)
+            f"{name}: {reason}" for reason in content_violations(relative, data)
         )
     return failures
 

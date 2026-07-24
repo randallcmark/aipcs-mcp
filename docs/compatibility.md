@@ -7,7 +7,7 @@ security-fix commitment remain to be defined.
 
 | Layer | Identifier | Current source contract |
 | --- | --- | --- |
-| Distribution | `aipcs-mcp` SemVer | Single-sourced pre-release version, wheel/sdist, `aipcs` command, and verified `uvx --from aipcs-mcp aipcs …` invocation. |
+| Distribution | `aipcs-mcp` SemVer | Single-sourced pre-release version, wheel/sdist, `aipcs` command, and verified artifact-based isolated `uvx --from SOURCE aipcs …` invocation. The package-name form is intended for later package-index publication. |
 | MCP capability | `aipcs_mcp_contract` | `1.2.0`; 21-tool SQLite or PostgreSQL surface when the selected persistent profile is ready. |
 | Schema | `manifest_version` | Manifest v2 is normal design input. |
 | Configuration | `config_version` | Strict configuration v1 with documented precedence. |

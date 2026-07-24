@@ -96,6 +96,45 @@ def test_sdist_content_guard_accepts_production_and_rejects_private_material(
     assert "private operating instruction" in rejected.stdout
 
 
+def test_sdist_content_guard_reuses_full_private_path_policy(tmp_path: Path) -> None:
+    unsafe = _sdist(
+        tmp_path / "unsafe-private-paths.tar.gz",
+        (
+            "aipcs_mcp-0/.claude/note.txt",
+            "aipcs_mcp-0/archives/note.txt",
+            "aipcs_mcp-0/secret.pem",
+        ),
+    )
+    rejected = subprocess.run(
+        [sys.executable, "scripts/check_wheel_contents.py", str(unsafe)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 1
+    assert "private agent/archive/plan path" in rejected.stdout
+    assert "database or likely credential filename" in rejected.stdout
+
+
+def test_sdist_content_guard_rejects_empty_private_directories(tmp_path: Path) -> None:
+    unsafe = tmp_path / "unsafe-private-directories.tar.gz"
+    with tarfile.open(unsafe, "w:gz") as archive:
+        for name in ("aipcs_mcp-0/.claude", "aipcs_mcp-0/archives"):
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            archive.addfile(info)
+    rejected = subprocess.run(
+        [sys.executable, "scripts/check_wheel_contents.py", str(unsafe)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 1
+    assert "private agent/archive/plan path" in rejected.stdout
+
+
 def test_content_guard_rejects_generated_build_paths(tmp_path: Path) -> None:
     unsafe = _wheel(
         tmp_path / "unsafe.whl",
