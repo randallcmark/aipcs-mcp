@@ -11,10 +11,22 @@ from storage_contracts.portable_conformance import (
     PortableInstallation,
     install,
     logical_fixture,
+    service,
     transfer,
 )
 
-from aipcs_mcp.application.registry_authority import StorageBackend
+from aipcs_mcp.application.operational_lifecycle import (
+    ArchiveCommand,
+    ResumeCommand,
+    SuspendCommand,
+)
+from aipcs_mcp.application.portable import PortableResultCategory
+from aipcs_mcp.application.registry_authority import (
+    PurgeAuthority,
+    PurgeAuthorityKind,
+    PurgeCommand,
+    StorageBackend,
+)
 from aipcs_mcp.portable_coordinator import PortableCoordinator
 from aipcs_mcp.storage.postgresql import (
     PostgreSQLConnectionPolicy,
@@ -149,3 +161,78 @@ def test_all_four_transfer_directions_preserve_normalized_logical_state(
     assert b'"source_backend":"postgresql"' in artifacts[1]
     assert b'"source_backend":"sqlite"' in artifacts[2]
     assert b'"source_backend":"postgresql"' in artifacts[3]
+
+
+def test_installed_shape_sqlite_to_postgresql_lifecycle_purge_and_restart(
+    postgres_test_target: PostgresTestTarget,
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    source = _sqlite(tmp_path / "source", "installed-source")
+    destination = _postgres(postgres_test_target, "installed-destination")
+    fixture = logical_fixture(
+        UUID("85000000-0000-4000-8000-000000000001"),
+        "installed_shape",
+    )
+    install(source, fixture)
+    imported, _artifact = transfer(
+        source,
+        destination,
+        fixture,
+        key="installed-shape",
+    )
+    for command in (
+        ResumeCommand(
+            destination.principal,
+            "installed-verifier",
+            imported.service.service_id,
+            5,
+            "installed-resume",
+        ),
+        SuspendCommand(
+            destination.principal,
+            "installed-verifier",
+            imported.service.service_id,
+            6,
+            "installed-suspend",
+        ),
+        ArchiveCommand(
+            destination.principal,
+            "installed-verifier",
+            imported.service.service_id,
+            7,
+            "installed-archive",
+        ),
+    ):
+        assert (
+            destination.coordinator.transition(command).category
+            is PortableResultCategory.COMPLETED
+        )
+    archived = service(destination, imported.service.service_id)
+    assert archived is not None
+    assert archived.operational_status == "archived"
+    purged = destination.coordinator.purge(
+        PurgeCommand(
+            destination.principal,
+            "installed-verifier",
+            archived.service_id,
+            8,
+            "installed-purge",
+            PurgeAuthority(PurgeAuthorityKind.EXPLICIT_OVERRIDE),
+        )
+    )
+    assert purged.category is PortableResultCategory.COMPLETED
+    assert purged.tombstone is not None
+
+    restarted = _postgres(postgres_test_target, destination.principal)
+    replay = restarted.coordinator.purge(
+        PurgeCommand(
+            destination.principal,
+            "installed-verifier",
+            archived.service_id,
+            8,
+            "installed-purge",
+            PurgeAuthority(PurgeAuthorityKind.EXPLICIT_OVERRIDE),
+        )
+    )
+    assert replay.category is PortableResultCategory.COMPLETED
+    assert replay.tombstone == purged.tombstone

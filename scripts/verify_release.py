@@ -3630,7 +3630,7 @@ def run_installed_registry_r2_smoke(
 
 
 def _wal_release_smoke_program() -> str:
-    """Installed R3/R2 WAL proof; child modes deliberately use this same -I program."""
+    """Installed R4/R2 WAL proof; child modes deliberately use this same -I program."""
 
     program = r'''
 from __future__ import annotations
@@ -3664,8 +3664,8 @@ if mode == "crash":
 
 root.mkdir(mode=0o700)
 registry = SQLiteRegistryAdapter(SQLiteLocationPolicy(root), busy_timeout_ms=50)
-assert registry.migrate() == MigrationState("registry", 3, 3, "ready")
-assert registry.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+assert registry.migrate() == MigrationState("registry", 4, 4, "ready")
+assert registry.inspect_migration() == MigrationState("registry", 4, 4, "ready")
 with sqlite3.connect(db) as connection:
     assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert connection.execute('SELECT phase FROM "aipcs_registry_storage_policy"').fetchone() == ("ready",)
@@ -3764,12 +3764,20 @@ def frozen_registry(mode):
         with sqlite3.connect(fixture_db) as connection: assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
     frozen = SQLiteRegistryAdapter(SQLiteLocationPolicy(fixture_root))
     outcome = frozen.migrate()
-    assert outcome == MigrationState("registry", 3, 3, "ready"), (mode, outcome)
-    assert frozen.inspect_migration() == MigrationState("registry", 3, 3, "ready")
+    assert outcome == MigrationState("registry", 4, 4, "ready"), (mode, outcome)
+    assert frozen.inspect_migration() == MigrationState("registry", 4, 4, "ready")
     with sqlite3.connect(fixture_db) as connection:
-        assert connection.execute('SELECT "result_json" FROM "aipcs_registry_mutation"').fetchone() == (result_json,)
+        assert connection.execute(
+            'SELECT "operation_kind","phase","result_json" '
+            'FROM "aipcs_registry_claim" WHERE "idempotency_key"=\'frozen-key\''
+        ).fetchone() == ("legacy", "completed", result_json)
+        assert connection.execute(
+            'SELECT "identity_state","domain_name","storage_backend" '
+            'FROM "aipcs_registry_identity" WHERE "service_id"=?',
+            (service_id,),
+        ).fetchone() == ("live", "frozen_domain", None)
         assert connection.execute('SELECT count(*),min("audit_id"),max("audit_id") FROM "aipcs_registry_audit"').fetchone() == (1, 1, 1)
-        assert connection.execute('SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" ORDER BY revision').fetchall() == [(1, "registry-0001-initial", "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc"), (2, "registry-0002-durable-intent", "b6190247d4f709728bab59cb4eb5fd149d4b7424472615f377b83f5191e0d8ea"), (3, "registry-0003-wal-policy", registry_policy_checksum)]
+        assert connection.execute('SELECT revision,migration_id,checksum FROM "aipcs_registry_migration" ORDER BY revision').fetchall() == [(1, "registry-0001-initial", "d40691d8ae8e09b10767b262ac716bc1689c52f4887770d9f43cd84679d291bc"), (2, "registry-0002-durable-intent", "b6190247d4f709728bab59cb4eb5fd149d4b7424472615f377b83f5191e0d8ea"), (3, "registry-0003-wal-policy", registry_policy_checksum), (4, "registry-0004-portable-lifecycle", "2647ae605b191187bfee7057959699ea2d993a4f9450ada9c02fa191c7395300")]
         assert connection.execute('SELECT phase FROM "aipcs_registry_storage_policy"').fetchone() == ("ready",)
 for fixture_mode in ("clean", "prepared-delete", "prepared-wal"): frozen_registry(fixture_mode)
 
@@ -4230,6 +4238,465 @@ def run_installed_lifecycle_coordinator_smoke(
         )
 
 
+def _portable_lifecycle_smoke_program() -> str:
+    """Return the installed private-stream transfer, tamper, and restart proof."""
+
+    return r"""
+import os
+import site
+import sys
+from dataclasses import replace
+from datetime import UTC, datetime
+from io import BytesIO
+from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
+
+package_roots = tuple(Path(value).resolve() for value in site.getsitepackages())
+for module in (
+    "aipcs_mcp.application.models",
+    "aipcs_mcp.application.operational_lifecycle",
+    "aipcs_mcp.application.portable",
+    "aipcs_mcp.application.portable_store",
+    "aipcs_mcp.application.registry_authority",
+    "aipcs_mcp.manifest_v2",
+    "aipcs_mcp.portable_coordinator",
+    "aipcs_mcp.records",
+    "aipcs_mcp.storage.postgresql",
+    "aipcs_mcp.storage.postgresql.registry_migrations",
+    "aipcs_mcp.storage.sqlite",
+    "aipcs_mcp.storage.sqlite.portable",
+):
+    loaded = __import__(module, fromlist=["*"])
+    origin = Path(loaded.__file__).resolve()
+    assert any(origin.is_relative_to(root) for root in package_roots)
+
+from aipcs_mcp.application.models import MaterialisationStorage, Service
+from aipcs_mcp.application.operational_lifecycle import (
+    ArchiveCommand,
+    ResumeCommand,
+    SuspendCommand,
+)
+from aipcs_mcp.application.portable import ImportBundleRequest, PortableResultCategory
+from aipcs_mcp.application.portable_store import (
+    PortableStoreMember,
+    WriteAdmissionFence,
+    portable_member_sort_key,
+)
+from aipcs_mcp.application.registry_authority import (
+    ExportCommand,
+    PurgeAuthority,
+    PurgeAuthorityKind,
+    PurgeCommand,
+    StorageBackend,
+)
+from aipcs_mcp.manifest_v2 import ManifestV2
+from aipcs_mcp.portable_coordinator import PortableCoordinator
+from aipcs_mcp.records import FrozenJsonObject, RecordHistoryEvent, RecordValue
+from aipcs_mcp.storage.postgresql import (
+    PostgreSQLConnectionPolicy,
+    PostgreSQLDsn,
+    PostgreSQLPortableServiceStore,
+    PostgreSQLRegistryAdapter,
+)
+from aipcs_mcp.storage.postgresql.registry_migrations import SCHEMA
+from aipcs_mcp.storage.sqlite import SQLiteLocationPolicy, SQLiteRegistryAdapter
+from aipcs_mcp.storage.sqlite.portable import SQLitePortableServiceStore
+
+AT = datetime(2026, 7, 24, 12, tzinfo=UTC)
+LATER = datetime(2026, 7, 24, 12, 1, tzinfo=UTC)
+FENCE = WriteAdmissionFence(7, "closed")
+root, scenario, source_name, destination_name, mode = sys.argv[1:]
+root = Path(root).resolve()
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+assert mode in {"initial", "restart"}
+
+
+class Clock:
+    def now(self):
+        return LATER
+
+
+class UUIDFactory:
+    def __init__(self, label):
+        self.label = label
+        self.count = 0
+
+    def __call__(self):
+        self.count += 1
+        return uuid5(NAMESPACE_URL, f"{self.label}:{self.count}")
+
+
+def server_fields():
+    return [
+        {"name": "id", "type": "uuid", "required": True, "primary_key": True},
+        {"name": "owner_id", "type": "string", "required": True},
+        {"name": "created_at", "type": "datetime", "required": True},
+        {"name": "updated_at", "type": "datetime", "required": True},
+        {"name": "created_via", "type": "string", "required": True},
+        {"name": "record_version", "type": "integer", "required": True},
+    ]
+
+
+manifest = ManifestV2.model_validate(
+    {
+        "manifest_version": 2,
+        "schema_version": 1,
+        "entities": [
+            {
+                "name": "memory",
+                "attributes": [
+                    *server_fields(),
+                    {"name": "body", "type": "string", "required": True},
+                    {"name": "rank", "type": "integer", "required": True},
+                ],
+            }
+        ],
+        "relationships": [],
+        "indices": [],
+        "query_patterns": ["Find installed portable memory."],
+        "discovery_facets": [{"entity": "memory", "field": "body"}],
+        "retrieval_guidance": "Use exact installed fixture values.",
+        "migration_history": [],
+    }
+)
+service_id = uuid5(NAMESPACE_URL, f"{scenario}:service")
+record_id = uuid5(service_id, "record")
+fields = FrozenJsonObject.from_mapping({"body": "remember", "rank": 7})
+members = tuple(
+    sorted(
+        (
+            PortableStoreMember(
+                "record",
+                RecordValue(
+                    "memory",
+                    record_id,
+                    1,
+                    AT,
+                    AT,
+                    "installed-fixture",
+                    fields,
+                ),
+            ),
+            PortableStoreMember(
+                "history",
+                RecordHistoryEvent(
+                    "memory", record_id, 1, "create", AT, None, fields
+                ),
+            ),
+        ),
+        key=portable_member_sort_key,
+    )
+)
+
+
+def installation(backend_name, location, principal, label):
+    backend = StorageBackend(backend_name)
+    if backend is StorageBackend.SQLITE:
+        policy = SQLiteLocationPolicy(location)
+        registry = SQLiteRegistryAdapter(policy)
+        store = SQLitePortableServiceStore(policy, clock=Clock().now)
+    else:
+        dsn = PostgreSQLDsn(os.environ["AIPCS_RELEASE_POSTGRES_DSN"])
+        registry = PostgreSQLRegistryAdapter(
+            dsn,
+            PostgreSQLConnectionPolicy(SCHEMA, 5, 1_000, 10_000),
+        )
+        store = PostgreSQLPortableServiceStore(dsn, clock=Clock().now)
+    assert registry.migrate().status == "ready"
+    coordinator = PortableCoordinator(
+        registry.open_uow,
+        Clock(),
+        UUIDFactory(label),
+        backend,
+        store,
+    )
+    return backend, principal, registry.open_uow, store, coordinator
+
+
+source = installation(
+    source_name,
+    root / "source",
+    f"{scenario}-source",
+    f"{scenario}:source",
+)
+destination = installation(
+    destination_name,
+    root / "destination",
+    f"{scenario}-destination",
+    f"{scenario}:destination",
+)
+print("PORTABLE_MIGRATED", flush=True)
+
+
+def bound_service(installation):
+    backend, principal, _uows, _store, _coordinator = installation
+    return Service(
+        service_id,
+        principal,
+        f"installed_{service_id.hex[:20]}",
+        "project",
+        "Installed private-stream portability proof",
+        AT,
+        AT,
+        AT,
+        manifest,
+        1,
+        "materialised",
+        "suspended",
+        5,
+        AT,
+        MaterialisationStorage(backend.value, f"svc_{service_id.hex}"),
+    )
+
+
+def get_service(installation):
+    _backend, principal, uows, _store, _coordinator = installation
+    uow = uows()
+    try:
+        observed = uow.services.get(principal, service_id)
+        uow.rollback()
+        return observed
+    finally:
+        uow.close()
+
+
+source_service = bound_service(source)
+destination_service = bound_service(destination)
+source_backend, source_principal, source_uows, source_store, source_coordinator = source
+(
+    destination_backend,
+    destination_principal,
+    _destination_uows,
+    destination_store,
+    destination_coordinator,
+) = destination
+
+if mode == "initial":
+    source_uow = source_uows()
+    try:
+        source_uow.services.add(source_service)
+        source_uow.commit()
+    finally:
+        source_uow.close()
+    assert source_store.stage(source_service, members, FENCE).status == "staged"
+    print("PORTABLE_SOURCE_STAGED", flush=True)
+    output = BytesIO()
+    exported = source_coordinator.export(
+        ExportCommand(
+            source_principal,
+            "installed-verifier",
+            service_id,
+            5,
+            "installed-export",
+        ),
+        output,
+    )
+    assert exported.category is PortableResultCategory.COMPLETED
+    assert exported.artifact_written
+    print("PORTABLE_EXPORTED", flush=True)
+    artifact = output.getvalue()
+    forbidden = (
+        source_principal,
+        destination_principal,
+        str(root),
+        "svc_",
+        "installed-export",
+        "installed-import",
+        os.environ.get("AIPCS_RELEASE_POSTGRES_DSN", ""),
+    )
+    assert all(not value or value.encode() not in artifact for value in forbidden)
+    assert f'"source_backend":"{source_backend.value}"'.encode() in artifact
+    tampered = artifact.replace(
+        b'"body":"remember"',
+        b'"body":"remembfr"',
+        1,
+    )
+    assert tampered != artifact
+    rejected = destination_coordinator.import_bundle(
+        ImportBundleRequest(
+            destination_principal,
+            "installed-verifier",
+            destination_backend,
+            "installed-tamper",
+        ),
+        BytesIO(tampered),
+    )
+    assert rejected.category is PortableResultCategory.MALFORMED_INPUT
+    assert get_service(destination) is None
+    assert destination_store.is_absent(
+        replace(destination_service, operational_status="archived")
+    )
+    print("PORTABLE_TAMPER_REJECTED", flush=True)
+    imported = destination_coordinator.import_bundle(
+        ImportBundleRequest(
+            destination_principal,
+            "installed-verifier",
+            destination_backend,
+            "installed-import",
+        ),
+        BytesIO(artifact),
+    )
+    assert imported.category is PortableResultCategory.COMPLETED
+    assert imported.service == destination_service
+    assert destination_store.observe(destination_service, FENCE, members)
+    print("PORTABLE_IMPORTED", flush=True)
+    transitions = (
+        ResumeCommand(
+            destination_principal,
+            "installed-verifier",
+            service_id,
+            5,
+            "installed-resume",
+        ),
+        SuspendCommand(
+            destination_principal,
+            "installed-verifier",
+            service_id,
+            6,
+            "installed-suspend",
+        ),
+        ArchiveCommand(
+            destination_principal,
+            "installed-verifier",
+            service_id,
+            7,
+            "installed-archive",
+        ),
+    )
+    for label, command in zip(
+        ("RESUME", "SUSPEND", "ARCHIVE"),
+        transitions,
+        strict=True,
+    ):
+        transition = destination_coordinator.transition(command)
+        print(
+            f"PORTABLE_{label}_{transition.category.value.upper()}",
+            flush=True,
+        )
+        assert transition.category is PortableResultCategory.COMPLETED
+    archived = get_service(destination)
+    assert archived is not None
+    assert archived.operational_status == "archived"
+    assert archived.service_revision == 8
+    print("PORTABLE_ARCHIVED", flush=True)
+    purged = destination_coordinator.purge(
+        PurgeCommand(
+            destination_principal,
+            "installed-verifier",
+            service_id,
+            8,
+            "installed-purge",
+            PurgeAuthority(PurgeAuthorityKind.EXPLICIT_OVERRIDE),
+        )
+    )
+    assert purged.category is PortableResultCategory.COMPLETED
+    assert purged.tombstone is not None
+    assert purged.tombstone.receipt_id is None
+    assert get_service(destination) is None
+    assert destination_store.is_absent(archived)
+    print("PORTABLE_PURGED", flush=True)
+else:
+    assert get_service(source) == source_service
+    assert source_store.observe(source_service, FENCE, members)
+    assert get_service(destination) is None
+    replay = destination_coordinator.purge(
+        PurgeCommand(
+            destination_principal,
+            "installed-verifier",
+            service_id,
+            8,
+            "installed-purge",
+            PurgeAuthority(PurgeAuthorityKind.EXPLICIT_OVERRIDE),
+        )
+    )
+    assert replay.category is PortableResultCategory.COMPLETED
+    assert replay.tombstone is not None
+    assert replay.tombstone.receipt_id is None
+    assert destination_store.is_absent(
+        replace(destination_service, operational_status="archived")
+    )
+    print("PORTABLE_RESTARTED", flush=True)
+"""
+
+
+def run_installed_portable_lifecycle_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Run installed SQLite private-stream transfer and restart proof."""
+
+    client = workspace / f"{name}-portable-lifecycle-smoke.py"
+    client.write_text(_portable_lifecycle_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"{name}-portable-lifecycle-cwd"
+    cwd.mkdir(mode=0o700)
+    root = workspace / f"{name}-portable-lifecycle-root"
+    scenario = f"installed-{name}-sqlite-sqlite"
+    for mode in ("initial", "restart"):
+        run_stage(
+            f"installed {name} portable lifecycle {mode}",
+            [python, "-I", client, root, scenario, "sqlite", "sqlite", mode],
+            cwd=cwd,
+            environment=environment,
+            timeout=SMOKE_TIMEOUT_SECONDS,
+            redaction_roots=redaction_roots,
+        )
+
+
+def run_postgresql_portable_lifecycle_smoke(
+    python: Path,
+    workspace: Path,
+    name: str,
+    target: PostgreSQLReleaseTarget,
+    *,
+    environment: Mapping[str, str],
+    redaction_roots: Iterable[Path],
+) -> None:
+    """Run both installed cross-backend directions with restart on owned PostgreSQL."""
+
+    client = workspace / f"postgres-{name}-portable-lifecycle-smoke.py"
+    client.write_text(_portable_lifecycle_smoke_program(), encoding="utf-8")
+    cwd = workspace / f"postgres-{name}-portable-lifecycle-cwd"
+    cwd.mkdir(mode=0o700)
+    child_environment = dict(environment)
+    child_environment[POSTGRES_RELEASE_DSN_ENV] = target.dsn
+    for source, destination in (
+        ("sqlite", "postgresql"),
+        ("postgresql", "sqlite"),
+    ):
+        root = workspace / f"postgres-{name}-{source}-{destination}-portable-root"
+        scenario = f"installed-{name}-{source}-{destination}"
+        for mode in ("initial", "restart"):
+            try:
+                run_stage(
+                    f"installed PostgreSQL {name} {source} to {destination} {mode}",
+                    [
+                        python,
+                        "-I",
+                        client,
+                        root,
+                        scenario,
+                        source,
+                        destination,
+                        mode,
+                    ],
+                    cwd=cwd,
+                    environment=child_environment,
+                    timeout=POSTGRES_SMOKE_TIMEOUT_SECONDS,
+                    redaction_roots=redaction_roots,
+                )
+            except ReleaseVerificationError as error:
+                checkpoints = re.findall(r"PORTABLE_[A-Z_]+", str(error))
+                checkpoint = checkpoints[-1] if checkpoints else "PORTABLE_START"
+                raise ReleaseVerificationError(
+                    "Installed PostgreSQL portable lifecycle verification failed "
+                    f"for {source}-to-{destination} {mode} after {checkpoint}."
+                ) from None
+
+
 def run_installed_public_lifecycle_smoke(
     python: Path,
     workspace: Path,
@@ -4528,6 +4995,14 @@ def verify_postgresql_integration(
                     environment=environment,
                     redaction_roots=redaction_roots,
                 )
+                run_postgresql_portable_lifecycle_smoke(
+                    python,
+                    workspace,
+                    name,
+                    target,
+                    environment=environment,
+                    redaction_roots=redaction_roots,
+                )
         require_clean_checkout_artifacts(root)
         failed = False
     finally:
@@ -4688,6 +5163,13 @@ def verify_release(
             environment=environment,
             redaction_roots=redaction_roots,
         )
+        run_installed_portable_lifecycle_smoke(
+            wheel_python,
+            workspace,
+            "wheel",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
         run_installed_public_lifecycle_smoke(
             wheel_python,
             workspace,
@@ -4756,6 +5238,13 @@ def verify_release(
             redaction_roots=redaction_roots,
         )
         run_installed_lifecycle_coordinator_smoke(
+            sdist_python,
+            workspace,
+            "sdist",
+            environment=environment,
+            redaction_roots=redaction_roots,
+        )
+        run_installed_portable_lifecycle_smoke(
             sdist_python,
             workspace,
             "sdist",

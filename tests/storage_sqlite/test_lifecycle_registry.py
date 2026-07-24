@@ -1048,6 +1048,18 @@ def test_import_receipt_is_bound_to_its_completed_claim_and_published_service(
     )
     assert isinstance(completed, CompletedRegistryClaim)
     assert adapter.inspect_migration().status == "ready"
+    suspended = replace(
+        service,
+        updated_at=_START + timedelta(seconds=1),
+        last_activity_at=_START + timedelta(seconds=1),
+        operational_status="suspended",
+        service_revision=service.service_revision + 1,
+    )
+    assert _write(
+        adapter,
+        lambda uow: uow.services.save(suspended, service.service_revision),
+    ) == "saved"
+    assert adapter.inspect_migration().status == "ready"
 
     with sqlite3.connect(_database(tmp_path)) as connection:
         connection.execute(

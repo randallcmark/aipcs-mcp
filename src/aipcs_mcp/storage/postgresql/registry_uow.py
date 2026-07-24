@@ -809,6 +809,10 @@ class PostgreSQLRegistryUnitOfWork:
             at, prepared.purge_authority, prepared.purge_authority.receipt_id,
         )
         self._execute(
+            f'DELETE FROM {_RECEIPT} WHERE "principal_id"=%s AND "service_id"=%s',
+            (prepared.principal_id, str(prepared.service_id)),
+        )
+        self._execute(
             f'UPDATE {_CLAIM} SET "phase"=\'tombstoned\',"created_via"=NULL,'
             '"intent_json"=NULL,"result_json"=NULL,"recovery_category"=NULL '
             'WHERE "principal_id"=%s AND "service_id"=%s AND "idempotency_key"<>%s',

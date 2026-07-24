@@ -721,6 +721,43 @@ def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
     assert (root / "registry.sqlite").is_file()
 
 
+def test_embedded_portable_lifecycle_client_uses_private_streams_and_restarts(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    program = verifier._portable_lifecycle_smoke_program()
+    compile(program, "installed_portable_lifecycle_smoke.py", "exec")
+    assert "BytesIO" in program
+    assert "PortableCoordinator" in program
+    assert "ImportBundleRequest" in program
+    assert "MALFORMED_INPUT" in program
+    assert "PurgeAuthorityKind.EXPLICIT_OVERRIDE" in program
+    assert 'assert mode in {"initial", "restart"}' in program
+    assert "AIPCS_RELEASE_POSTGRES_DSN" in program
+    assert "postgresql://" not in program
+    assert "write_bytes" not in program
+    assert "write_text" not in program
+
+    root = tmp_path / "portable-lifecycle-root"
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(ROOT / "src")])
+    for mode in ("initial", "restart"):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "installed_portable_lifecycle_smoke.py",
+                str(root),
+                "installed-source-contract",
+                "sqlite",
+                "sqlite",
+                mode,
+            ],
+        )
+        exec(compile(program, "installed_portable_lifecycle_smoke.py", "exec"), {})
+    assert (root / "source" / "registry.sqlite").is_file()
+    assert (root / "destination" / "registry.sqlite").is_file()
+    assert tuple((root / "destination" / "services").glob("*.sqlite")) == ()
+
+
 def test_embedded_registry_r2_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -1037,6 +1074,9 @@ def test_wal_release_smoke_uses_each_installed_interpreter_and_external_cwd(
     assert "frozen_registry(mode)" in program
     assert "prepared-delete" in program and "prepared-wal" in program
     assert '"byte-preserved"' in program
+    assert 'MigrationState("registry", 4, 4, "ready")' in program
+    assert '"registry-0004-portable-lifecycle"' in program
+    assert "2647ae605b191187bfee7057959699ea2d993a4f9450ada9c02fa191c7395300" in program
     assert 'MigrationState("service_store", 3, 3, "ready")' in program
     assert '"service-store-0003-record-topology"' in program
     assert "8181f28aa6e4f8812ae169ea9754eb13fbfe10b574a88a36968564a4595896d7" in program
@@ -1086,6 +1126,91 @@ def test_lifecycle_coordinator_smoke_uses_each_installed_interpreter_and_externa
     assert calls[0][1][-2] == calls[1][1][-2]
     assert calls[2][1][-2] == calls[3][1][-2]
     assert calls[0][1][-2] != calls[2][1][-2]
+
+
+def test_portable_lifecycle_smoke_uses_installed_interpreter_streams_and_restart(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path]] = []
+
+    def fake_stage(label, args, *, cwd, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    for name in ("wheel", "sdist"):
+        verifier.run_installed_portable_lifecycle_smoke(
+            tmp_path / f"{name}-venv" / "bin" / "python",
+            tmp_path,
+            name,
+            environment={},
+            redaction_roots=(),
+        )
+
+    assert [label for label, _, _ in calls] == [
+        "installed wheel portable lifecycle initial",
+        "installed wheel portable lifecycle restart",
+        "installed sdist portable lifecycle initial",
+        "installed sdist portable lifecycle restart",
+    ]
+    assert all(args[1] == "-I" for _, args, _ in calls)
+    assert calls[0][1][-3:] == ("sqlite", "sqlite", "initial")
+    assert calls[1][1][-3:] == ("sqlite", "sqlite", "restart")
+    assert calls[2][1][-3:] == ("sqlite", "sqlite", "initial")
+    assert calls[3][1][-3:] == ("sqlite", "sqlite", "restart")
+    assert calls[0][2] == tmp_path / "wheel-portable-lifecycle-cwd"
+    assert calls[2][2] == tmp_path / "sdist-portable-lifecycle-cwd"
+    assert calls[0][2] != calls[2][2]
+
+
+def test_postgresql_portable_lifecycle_smoke_covers_both_cross_backend_directions(
+    monkeypatch, tmp_path: Path, verifier
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path, dict[str, str]]] = []
+
+    def fake_stage(label, args, *, cwd, environment, **kwargs):
+        calls.append((label, tuple(map(str, args)), cwd, dict(environment)))
+        return verifier.StageResult(label)
+
+    monkeypatch.setattr(verifier, "run_stage", fake_stage)
+    target = verifier.PostgreSQLReleaseTarget(
+        "127.0.0.1",
+        5432,
+        "installed_fixture",
+        "installed_runtime",
+        "synthetic-secret",
+    )
+    verifier.run_postgresql_portable_lifecycle_smoke(
+        tmp_path / "wheel-venv" / "bin" / "python",
+        tmp_path,
+        "wheel",
+        target,
+        environment={},
+        redaction_roots=(),
+    )
+
+    assert [label for label, _, _, _ in calls] == [
+        "installed PostgreSQL wheel sqlite to postgresql initial",
+        "installed PostgreSQL wheel sqlite to postgresql restart",
+        "installed PostgreSQL wheel postgresql to sqlite initial",
+        "installed PostgreSQL wheel postgresql to sqlite restart",
+    ]
+    assert [args[-3:] for _, args, _, _ in calls] == [
+        ("sqlite", "postgresql", "initial"),
+        ("sqlite", "postgresql", "restart"),
+        ("postgresql", "sqlite", "initial"),
+        ("postgresql", "sqlite", "restart"),
+    ]
+    assert all(args[1] == "-I" for _, args, _, _ in calls)
+    assert all(
+        environment[verifier.POSTGRES_RELEASE_DSN_ENV] == target.dsn
+        for _, _, _, environment in calls
+    )
+    assert all(target.dsn not in " ".join(args) for _, args, _, _ in calls)
+    assert all(
+        cwd == tmp_path / "postgres-wheel-portable-lifecycle-cwd"
+        for _, _, cwd, _ in calls
+    )
 
 
 def test_main_hides_unexpected_exception_details(monkeypatch, capsys, verifier) -> None:

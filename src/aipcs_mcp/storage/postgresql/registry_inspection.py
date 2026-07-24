@@ -1001,7 +1001,17 @@ def _receipt_matches_completion(
         and intent.get("kind") == "import"
         and intent.get("bundle_root_sha256") == receipt.bundle_root_sha256
         and intent.get("destination_backend") == receipt.storage_backend.value
-        and value == registered
+        and registered is not None
+        and _immutable_service_identity(value)
+        == _immutable_service_identity(registered)
+        and value.service_revision <= registered.service_revision
+        and value.updated_at <= registered.updated_at
+        and (
+            value.service_revision != registered.service_revision
+            or value == registered
+        )
+        and (value.materialised_at, value.storage)
+        == (registered.materialised_at, registered.storage)
         and value.principal_id == receipt.principal_id
         and value.service_id == receipt.service_id
         and value.service_revision == receipt.service_revision

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from io import BytesIO
 from uuid import UUID, uuid4
@@ -217,6 +218,13 @@ def test_operational_matrix_then_receipt_purge_is_terminal_and_tombstoned(
     assert purged.tombstone is not None
     assert service(installation, archived.service_id) is None
     assert installation.store.is_absent(archived)
+    restarted = SQLiteRegistryAdapter(SQLiteLocationPolicy(tmp_path / "lifecycle"))
+    assert restarted.inspect_migration().status == "ready"
+    with sqlite3.connect(tmp_path / "lifecycle" / "registry.sqlite") as connection:
+        assert connection.execute(
+            'SELECT count(*) FROM "aipcs_registry_receipt" WHERE "service_id"=?',
+            (str(archived.service_id),),
+        ).fetchone() == (0,)
     collision = installation.coordinator.import_bundle(
         ImportBundleRequest(
             "owner", "test", StorageBackend.SQLITE, "reimport-purged"

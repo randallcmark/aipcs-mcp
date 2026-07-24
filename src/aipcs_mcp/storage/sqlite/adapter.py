@@ -1051,7 +1051,17 @@ def _receipt_matches_authority_completion(
         and receipt.verification.value == "verified"
         and intent.bundle_root_sha256 == receipt.bundle_root_sha256
         and intent.destination_backend is receipt.storage_backend
-        and completion == registered
+        and registered is not None
+        and _immutable_service_identity(completion)
+        == _immutable_service_identity(registered)
+        and completion.service_revision <= registered.service_revision
+        and completion.updated_at <= registered.updated_at
+        and (
+            completion.service_revision != registered.service_revision
+            or completion == registered
+        )
+        and (completion.materialised_at, completion.storage)
+        == (registered.materialised_at, registered.storage)
         and completion.principal_id == receipt.principal_id
         and completion.service_id == receipt.service_id
         and completion.service_revision == receipt.service_revision

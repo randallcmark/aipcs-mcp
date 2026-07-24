@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -726,6 +727,18 @@ def test_import_receipt_inspection_binds_claim_intent_and_registered_service() -
         {("principal", "import-claim"): (claim_row, claim)},
         {str(service_id): service},
     )
+    advanced = replace(
+        service,
+        updated_at=at + timedelta(seconds=1),
+        last_activity_at=at + timedelta(seconds=1),
+        operational_status="suspended",
+        service_revision=8,
+    )
+    assert registry_inspection_module._valid_receipt_row(
+        receipt_row,
+        {("principal", "import-claim"): (claim_row, claim)},
+        {str(service_id): advanced},
+    )
     assert not registry_inspection_module._valid_receipt_row(
         {**receipt_row, "bundle_root_sha256": "c" * 64},
         {("principal", "import-claim"): (claim_row, claim)},
@@ -905,6 +918,10 @@ def test_purge_retains_bounded_audit_evidence(monkeypatch: pytest.MonkeyPatch) -
     )
     assert any(
         statement.startswith('DELETE FROM "aipcs_registry"."aipcs_registry_service"')
+        for statement in connection.statements
+    )
+    assert any(
+        statement.startswith('DELETE FROM "aipcs_registry"."aipcs_registry_receipt"')
         for statement in connection.statements
     )
 

@@ -784,6 +784,11 @@ class SQLiteRegistryUnitOfWork:
             at, prepared.purge_authority, prepared.purge_authority.receipt_id,
         )
         self._connection.execute(
+            'DELETE FROM "aipcs_registry_receipt" '
+            'WHERE "principal_id"=? AND "service_id"=?',
+            (prepared.principal_id, str(prepared.service_id)),
+        )
+        self._connection.execute(
             'UPDATE "aipcs_registry_claim" SET "phase"=\'tombstoned\',"created_via"=NULL,'
             '"intent_json"=NULL,"result_json"=NULL,"recovery_category"=NULL '
             'WHERE "principal_id"=? AND "service_id"=? AND "idempotency_key"<>?',
