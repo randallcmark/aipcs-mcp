@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from mcp.server.lowlevel import Server
 
+from .application.admin import (
+    AdminInspectionApplication,
+    AdminInspectionUnavailable,
+    MigrationObservation,
+)
 from .application.data import DataApplication
-from .application.models import MaterialisationStorage
+from .application.models import ApplicationContext, MaterialisationStorage
 from .application.ports import Clock, IdProvider
 from .application.registry_authority import StorageBackend
 from .application.services import ServiceApplication
@@ -20,7 +26,15 @@ from .lifecycle_coordinator import LifecycleCoordinator
 from .mcp_server import create_server
 from .portable_coordinator import PortableCoordinator
 from .records import DataFailure, RecordSpecification
-from .storage.contracts import MigrationState, ServiceStoreLocator
+from .relational import compile_manifest
+from .storage.contracts import (
+    DomainSchemaStore,
+    MigrationState,
+    RegistryAdapter,
+    ServiceStoreCatalog,
+    ServiceStoreLocator,
+)
+from .storage.errors import StorageBusy, StorageMigrationError, StorageUnavailable
 from .storage.postgresql import (
     PostgreSQLConnectionPolicy,
     PostgreSQLDomainSchemaStore,
@@ -112,6 +126,194 @@ class Uuid4ServiceIds(IdProvider):
 
     def new_service_id(self) -> UUID:
         return uuid4()
+
+
+@dataclass(frozen=True, slots=True)
+class AdminRuntime:
+    """One resolved read-only administration composition."""
+
+    inspection: AdminInspectionApplication
+    context: ApplicationContext
+
+
+class AdapterAdminStorageInspector:
+    """Translate concrete adapter inspections into application-owned facts."""
+
+    def __init__(
+        self,
+        backend: StorageBackend,
+        registry: RegistryAdapter,
+        catalog: ServiceStoreCatalog,
+        domain: DomainSchemaStore,
+    ) -> None:
+        self._backend = backend
+        self._registry = registry
+        self._catalog = catalog
+        self._domain = domain
+
+    def inspect_registry(self) -> MigrationObservation:
+        return self._migration("registry", self._registry.inspect_migration)
+
+    def inspect_service(
+        self, storage: MaterialisationStorage
+    ) -> MigrationObservation:
+        locator = self._locator(storage)
+        return self._migration(
+            "service_store", lambda: self._catalog.inspect_migration(locator)
+        )
+
+    def inspect_domain(
+        self, storage: MaterialisationStorage, manifest: object
+    ) -> str:
+        locator = self._locator(storage)
+        try:
+            state = self._domain.inspect(locator, compile_manifest(manifest))  # type: ignore[arg-type]
+        except StorageBusy:
+            raise AdminInspectionUnavailable("storage_busy") from None
+        except (StorageUnavailable, StorageMigrationError):
+            raise AdminInspectionUnavailable("storage_unavailable") from None
+        except Exception:
+            raise AdminInspectionUnavailable("internal_error") from None
+        return state.status
+
+    def _migration(self, component: str, inspect: object) -> MigrationObservation:
+        if not callable(inspect):
+            raise AdminInspectionUnavailable("internal_error")
+        try:
+            state = inspect()
+        except StorageBusy:
+            raise AdminInspectionUnavailable("storage_busy") from None
+        except (StorageUnavailable, StorageMigrationError):
+            raise AdminInspectionUnavailable("storage_unavailable") from None
+        except Exception:
+            raise AdminInspectionUnavailable("internal_error") from None
+        if (
+            type(state) is not MigrationState
+            or state.component != component
+            or state.status not in {
+                "uninitialised",
+                "outdated",
+                "ready",
+                "incompatible",
+                "dirty",
+            }
+        ):
+            raise AdminInspectionUnavailable("internal_error")
+        return MigrationObservation(
+            state.component,
+            state.status,
+            state.applied_revision,
+            state.target_revision,
+        )
+
+    def _locator(self, storage: MaterialisationStorage) -> ServiceStoreLocator:
+        if (
+            type(storage) is not MaterialisationStorage
+            or storage.backend != self._backend.value
+        ):
+            raise AdminInspectionUnavailable("internal_error")
+        return ServiceStoreLocator(storage.backend, storage.namespace)
+
+
+def compose_admin_runtime(
+    config: ResolvedConfiguration, *, environ: Mapping[str, str] | None = None
+) -> AdminRuntime:
+    """Compose read-only administration without migration or service-store writes."""
+
+    if type(config) is not ResolvedConfiguration:
+        raise RuntimeError("Administration configuration is invalid.")
+    if config.profile == "stateless":
+        return AdminRuntime(
+            AdminInspectionApplication("stateless", None, None, None),
+            ApplicationContext("stateless", "cli"),
+        )
+    if config.principal_id is None:
+        raise RuntimeError("Administration principal is unavailable.")
+    if config.profile == "sqlite":
+        if (
+            config.sqlite_data_root is None
+            or not is_supported_sqlite_platform()
+            or not is_supported_sqlite_runtime()
+        ):
+            raise RuntimeError("Unsupported runtime profile.")
+        location = SQLiteLocationPolicy.from_resolved(
+            config.sqlite_data_root, config.sources["sqlite_data_root"]
+        )
+        registry = SQLiteRegistryAdapter(
+            location, busy_timeout_ms=config.sqlite_busy_timeout_ms
+        )
+        catalog = SQLiteServiceStoreCatalog(
+            location, busy_timeout_ms=config.sqlite_busy_timeout_ms
+        )
+        domain = SQLiteDomainSchemaStore(
+            location, busy_timeout_ms=config.sqlite_busy_timeout_ms
+        )
+        clock = SystemUtcClock()
+        services = ServiceApplication(registry.open_uow, clock, Uuid4ServiceIds())
+        store = SQLiteMaterialisedDataStore(
+            location,
+            busy_timeout_ms=config.sqlite_busy_timeout_ms,
+            clock=clock.now,
+            record_ids=uuid4,
+            branch_ids=uuid4,
+        )
+        data = DataApplication(registry.open_uow, SQLiteAdmittedDataStore(store))
+        inspection = AdapterAdminStorageInspector(
+            StorageBackend.SQLITE, registry, catalog, domain
+        )
+        return AdminRuntime(
+            AdminInspectionApplication(
+                "sqlite", inspection, services, data
+            ),
+            ApplicationContext(config.principal_id, "cli"),
+        )
+    if config.profile == "postgresql":
+        try:
+            environment = os.environ if environ is None else environ
+            dsn = resolve_postgresql_dsn_for_serve(config, environment)
+            policy = PostgreSQLConnectionPolicy.from_configuration(config)
+            registry = PostgreSQLRegistryAdapter(dsn, policy)
+            catalog = PostgreSQLServiceStoreCatalog(
+                dsn,
+                connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+                lock_timeout_ms=config.postgres_lock_timeout_ms,
+                statement_timeout_ms=config.postgres_statement_timeout_ms,
+            )
+            domain = PostgreSQLDomainSchemaStore(
+                dsn,
+                connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+                lock_timeout_ms=config.postgres_lock_timeout_ms,
+                statement_timeout_ms=config.postgres_statement_timeout_ms,
+                service_store_catalog=catalog,
+            )
+            clock = SystemUtcClock()
+            services = ServiceApplication(registry.open_uow, clock, Uuid4ServiceIds())
+            store = PostgreSQLMaterialisedDataStore(
+                dsn,
+                connect_timeout_seconds=config.postgres_connect_timeout_seconds,
+                lock_timeout_ms=config.postgres_lock_timeout_ms,
+                statement_timeout_ms=config.postgres_statement_timeout_ms,
+                service_store_catalog=catalog,
+                domain_schema_store=domain,
+                clock=clock.now,
+                record_ids=uuid4,
+                branch_ids=uuid4,
+            )
+            data = DataApplication(registry.open_uow, PostgreSQLAdmittedDataStore(store))
+            inspection = AdapterAdminStorageInspector(
+                StorageBackend.POSTGRESQL, registry, catalog, domain
+            )
+            return AdminRuntime(
+                AdminInspectionApplication(
+                    "postgresql", inspection, services, data
+                ),
+                ApplicationContext(config.principal_id, "cli"),
+            )
+        except Exception:
+            raise RuntimeError(
+                "PostgreSQL administration runtime could not be composed."
+            ) from None
+    raise RuntimeError("Unsupported runtime profile.")
 
 
 def compose_server(

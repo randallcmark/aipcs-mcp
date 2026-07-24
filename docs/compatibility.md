@@ -153,14 +153,12 @@ directions on pinned PostgreSQL 16 and 18, including tamper-before-write,
 redaction, restart replay, purge, physical absence, and exact container
 cleanup.
 
-V1-10 intentionally exposes none of this through MCP, configuration, or
-mixed-backend runtime composition. V1-11 C1 freezes and recognizes the
-operator command grammar, canonical identifier/revision validation,
-confirmation policy, JSON/human projection, and exit classes, but every new
-admin command still fails closed as `unsupported_operation`. It does not yet
-resolve a path, compose storage, or invoke a portable/lifecycle operation.
-Later V1-11 slices own that path and confirmation UX, cross-runtime
-orchestration, and supported distribution workflow.
+V1-10 intentionally exposes none of this through MCP or mixed-backend runtime
+composition. V1-11 C2 recognizes the complete operator command grammar and
+implements the read-only status, doctor, storage, service, and maintenance
+commands for the configured homogeneous backend. These inspection paths do
+not migrate or repair storage. Lifecycle, file transfer, purge, cross-runtime
+orchestration, and the supported distribution workflow remain later slices.
 
 ## Error and retry compatibility
 

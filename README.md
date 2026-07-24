@@ -207,10 +207,12 @@ above. Maintenance returns at most 100 deterministic candidates.
 
 The source tree implements the V1-10 backend-neutral application and storage
 seams for logical export/import, suspend/resume/archive/restore, and deliberate
-purge. V1-11 C1 freezes the administration command grammar and pure
-validation/output contracts, but every new admin command currently fails
-closed as `unsupported_operation`; no command yet composes storage or invokes
-these operations. The 21-tool stdio contract, configuration keys, and
+purge. V1-11 C2 exposes read-only `status`, `doctor`, `storage status`,
+`service list`, `service inspect`, and `maintenance scan` commands through an
+application-owned inspection seam. They inspect configured SQLite or
+PostgreSQL state without migration, repair, DDL, or hidden lifecycle actions.
+Lifecycle, export/import, and purge commands remain fail-closed until their
+later slices. The 21-tool stdio contract, configuration keys, and
 single-backend runtime profiles are unchanged.
 
 The internal `export_format_version: 1` artifact is strict canonical UTF-8

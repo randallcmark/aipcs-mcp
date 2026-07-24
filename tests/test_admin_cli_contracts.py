@@ -449,7 +449,7 @@ def test_human_result_rejects_unsafe_or_unbounded_values(
         render_human_result(result)
 
 
-def test_admin_command_is_validated_then_fails_closed_without_runtime(
+def test_unimplemented_mutation_is_validated_then_fails_closed_without_runtime(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -457,10 +457,23 @@ def test_admin_command_is_validated_then_fails_closed_without_runtime(
         cli,
         "resolve_configuration",
         lambda **_: (_ for _ in ()).throw(
-            AssertionError("C1 must not resolve or compose an admin runtime")
+            AssertionError("Unimplemented mutations must not compose an admin runtime")
         ),
     )
-    assert cli.main(["status"]) == CliExit.REFUSED
+    assert (
+        cli.main(
+            [
+                "service",
+                "suspend",
+                SERVICE_ID,
+                "--expected-revision",
+                "1",
+                "--operation-id",
+                OPERATION_ID,
+            ]
+        )
+        == CliExit.REFUSED
+    )
     output = capsys.readouterr()
     assert output.out == ""
     assert json.loads(output.err)["error"]["code"] == "unsupported_operation"
@@ -469,13 +482,6 @@ def test_admin_command_is_validated_then_fails_closed_without_runtime(
 @pytest.mark.parametrize(
     "argv",
     [
-        ["status"],
-        ["doctor"],
-        ["doctor", "--service", SERVICE_ID],
-        ["storage", "status"],
-        ["storage", "status", "--service", SERVICE_ID],
-        ["service", "list", "--limit", "25"],
-        ["service", "inspect", SERVICE_ID],
         [
             "service",
             "suspend",
@@ -559,10 +565,9 @@ def test_admin_command_is_validated_then_fails_closed_without_runtime(
             OPERATION_ID,
             "--yes",
         ],
-        ["maintenance", "scan", "--service", SERVICE_ID],
     ],
 )
-def test_every_frozen_admin_command_parses_to_c1_unavailable_result(
+def test_unimplemented_admin_mutations_parse_to_unavailable_result(
     argv: list[str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -601,7 +606,21 @@ def test_complete_machine_archive_reaches_unavailable_result(
 def test_human_admin_failure_uses_human_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert cli.main(["status", "--format", "human"]) == CliExit.REFUSED
+    assert cli.main(["storage", "status", "--format", "human"]) == CliExit.REFUSED
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err.startswith("error [unsupported_operation]:")
+
+
+def test_stateless_status_and_doctor_are_read_only_successes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["status"]) == CliExit.SUCCESS
+    status = json.loads(capsys.readouterr().out)["result"]
+    assert status["profile"] == "stateless"
+    assert status["overall"] == "unavailable"
+
+    assert cli.main(["doctor"]) == CliExit.SUCCESS
+    doctor = json.loads(capsys.readouterr().out)["result"]
+    assert doctor["profile"] == "stateless"
+    assert doctor["overall"] == "fail"

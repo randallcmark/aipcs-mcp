@@ -37,11 +37,12 @@ accepts only typed commands and private binary streams. Bundle parsing and
 logical payload values remain storage-independent; the top-level coordinator
 alone maps bounded storage failures and invokes the selected portable-store
 port. It is not reachable from the V1-10 MCP contract or configuration
-surface. V1-11 C1 registers only the frozen CLI grammar and pure invocation,
-confirmation, presentation, and exit contracts; every new admin command
-currently returns `unsupported_operation` without resolving configuration or
-composing storage. Later V1-11 slices may wrap these application commands but
-must not bypass them to reach adapters directly.
+surface. V1-11 C2 composes the frozen read-only administration commands
+through an application-owned inspection port. The runtime composition root
+translates concrete migration and domain inspection into bounded application
+facts; application and CLI modules do not import adapters. These commands do
+not migrate, repair, execute DDL, or perform lifecycle transitions. Later
+V1-11 slices must use the same application and coordinator boundaries.
 
 The data application owns generic record, branch, discovery, and maintenance
 use cases. It receives the registry-authoritative materialised service and a

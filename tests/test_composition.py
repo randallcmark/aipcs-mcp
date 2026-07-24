@@ -86,6 +86,27 @@ def test_stateless_composition_constructs_no_storage() -> None:
     assert anyio.run(_tool_names, server) == ["aipcs_server_info"]
 
 
+def test_read_only_admin_composition_does_not_create_or_migrate_sqlite(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "admin-read-only"
+    _secure_parent(root)
+
+    admin = runtime.compose_admin_runtime(_config(root))
+
+    assert not root.exists()
+    result = admin.inspection.status(admin.context)
+    assert result.registry is not None
+    assert result.registry.status == "uninitialised"
+    assert result.overall == "attention_required"
+    assert not root.exists()
+
+
+def test_stateless_admin_composition_has_no_persistent_runtime() -> None:
+    admin = runtime.compose_admin_runtime(_config(None, profile="stateless"))
+    assert admin.inspection.status(admin.context).profile == "stateless"
+
+
 def test_private_portable_composition_selects_the_configured_sqlite_backend(
     tmp_path: Path,
 ) -> None:

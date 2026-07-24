@@ -178,8 +178,9 @@ detail.
 There is no dotenv loading, configuration inheritance, include mechanism,
 secret-file support, remote configuration, profile plugin system, automatic
 reload, database probe by configuration commands, or directory creation by
-`config show`/`config validate`. There is no database URL, raw SQL, adapter
-plugin, retry, or standalone administration command.
+`config show`/`config validate`. Administration commands use the same strict
+selectors and redaction rules. There is no database URL, raw SQL, adapter
+plugin, or arbitrary retry/repair command.
 
 ## Development use
 

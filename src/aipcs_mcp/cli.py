@@ -34,6 +34,8 @@ from .admin_cli import (
     render_human_error,
     render_human_result,
 )
+from .application.admin import project_doctor, project_migration, project_status
+from .application.errors import ApplicationError
 from .configuration.errors import to_contract_error
 from .configuration.models import ConfigOverrides, ResolvedConfiguration
 from .configuration.reporting import (
@@ -42,9 +44,11 @@ from .configuration.reporting import (
 )
 from .configuration.resolver import require_runnable, resolve_configuration
 from .contracts import validate_stdio_only
+from .data_results import project_maintenance
 from .errors import AipcsContractError, ErrorCode, success
 from .mcp_server import run_stdio
-from .runtime import compose_server
+from .records import DataFailure
+from .runtime import compose_admin_runtime, compose_server
 
 
 def _add_configuration_options(parser: argparse.ArgumentParser) -> None:
@@ -96,7 +100,7 @@ def _add_mutation_options(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the frozen V1-11 command tree without composing admin storage."""
+    """Build the frozen V1-11 command tree."""
 
     parser = argparse.ArgumentParser(prog="aipcs")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -367,15 +371,141 @@ def _optional_uuid(value: object | None, *, label: str) -> UUID | None:
     return None if value is None else parse_canonical_uuid(value, label=label)
 
 
-def _run_unavailable_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
-    """Validate C1 syntax without composing a registry, store, or admin runtime."""
+def _run_admin(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
+    """Resolve and execute the currently composed administration slice."""
 
     _preflight(args, environ)
-    _parse_admin_invocation(args)
-    raise AipcsContractError(
-        ErrorCode.UNSUPPORTED_OPERATION,
-        "Administration command is not available in this implementation slice.",
-    )
+    invocation = _parse_admin_invocation(args)
+    if not isinstance(
+        invocation,
+        (
+            StatusInvocation,
+            DoctorInvocation,
+            StorageStatusInvocation,
+            ServiceListInvocation,
+            ServiceInspectInvocation,
+            MaintenanceScanInvocation,
+        ),
+    ):
+        raise AipcsContractError(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "Administration command is not available in this implementation slice.",
+        )
+    resolved = _resolve(args, runnable=True, environ=environ)
+    try:
+        runtime = compose_admin_runtime(resolved, environ=environ)
+    except Exception:
+        raise AipcsContractError(
+            ErrorCode.STORAGE_UNAVAILABLE,
+            "Administration storage is unavailable.",
+        ) from None
+    application = runtime.inspection
+    context = runtime.context
+    try:
+        if type(invocation) is StatusInvocation:
+            result = project_status(application.status(context))
+        elif type(invocation) is DoctorInvocation:
+            result = project_doctor(application.doctor(context, invocation.service_id))
+        elif type(invocation) is StorageStatusInvocation:
+            _require_persistent_admin(resolved.profile)
+            result = project_migration(
+                application.storage_status(context, invocation.service_id)
+            )
+        elif type(invocation) is ServiceListInvocation:
+            _require_persistent_admin(resolved.profile)
+            result = {
+                "services": [
+                    service.model_dump(mode="json", by_alias=True, warnings="error")
+                    for service in application.service_list(context, invocation.limit)
+                ]
+            }
+        elif type(invocation) is ServiceInspectInvocation:
+            _require_persistent_admin(resolved.profile)
+            result = application.service_inspect(
+                context, invocation.service_id
+            ).model_dump(mode="json", by_alias=True, warnings="error")
+        elif type(invocation) is MaintenanceScanInvocation:
+            _require_persistent_admin(resolved.profile)
+            value = application.maintenance_scan(context, invocation.service_id)
+            if type(value) is DataFailure:
+                raise _data_failure(value)
+            result = project_maintenance(value).model_dump(
+                mode="json", warnings="error"
+            )
+        else:
+            raise AipcsContractError(
+                ErrorCode.UNSUPPORTED_OPERATION,
+                "Administration command is not available in this implementation slice.",
+            )
+    except AipcsContractError:
+        raise
+    except ApplicationError as error:
+        raise _application_failure(error) from None
+    except Exception:
+        raise AipcsContractError(
+            ErrorCode.INTERNAL_ERROR,
+            "The administration command could not be completed safely.",
+        ) from None
+    _write_success(result, invocation.output_format.value)
+    return 0
+
+
+def _require_persistent_admin(profile: str) -> None:
+    if profile == "stateless":
+        raise AipcsContractError(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "Persistent administration is not available for this profile.",
+        )
+
+
+def _application_failure(error: ApplicationError) -> AipcsContractError:
+    try:
+        code = ErrorCode(error.code)
+    except ValueError:
+        code = ErrorCode.INTERNAL_ERROR
+    return AipcsContractError(code, error.message)
+
+
+_ADMIN_DATA_FAILURES: dict[str, tuple[ErrorCode, str, bool]] = {
+    "validation_failed": (
+        ErrorCode.VALIDATION_FAILED,
+        "Administration input failed validation.",
+        False,
+    ),
+    "not_found": (ErrorCode.NOT_FOUND, "The requested service was not found.", False),
+    "storage_migration_required": (
+        ErrorCode.STORAGE_MIGRATION_REQUIRED,
+        "Service storage requires migration.",
+        False,
+    ),
+    "storage_busy": (ErrorCode.STORAGE_BUSY, "Storage is temporarily busy.", True),
+    "operation_uncertain": (
+        ErrorCode.OPERATION_UNCERTAIN,
+        "The operation outcome is uncertain.",
+        True,
+    ),
+    "storage_unavailable": (
+        ErrorCode.STORAGE_UNAVAILABLE,
+        "Storage is unavailable.",
+        False,
+    ),
+    "internal_error": (
+        ErrorCode.INTERNAL_ERROR,
+        "The administration command could not be completed safely.",
+        False,
+    ),
+}
+
+
+def _data_failure(value: DataFailure) -> AipcsContractError:
+    mapped = _ADMIN_DATA_FAILURES.get(value.code)
+    if mapped is None:
+        return AipcsContractError(
+            ErrorCode.INTERNAL_ERROR,
+            "The administration command could not be completed safely.",
+        )
+    code, message, retryable = mapped
+    return AipcsContractError(code, message, retryable=retryable)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -399,7 +529,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "import",
             "maintenance",
         }:
-            return _run_unavailable_admin(args, environment)
+            return _run_admin(args, environment)
     except AipcsContractError as error:
         output_format = getattr(args, "output_format", "json")
         _write_contract_error(error, output_format)
