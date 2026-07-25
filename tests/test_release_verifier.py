@@ -62,13 +62,19 @@ def test_intended_set_keeps_dirty_and_untracked_but_excludes_ignored(
     assert (root / "tracked.txt").read_text(encoding="utf-8") == "dirty tracked content\n"
 
 
-def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
+def test_generated_checkout_artifacts_excludes_known_development_metadata(
     tmp_path: Path, verifier
 ) -> None:
     root = tmp_path / "source"
     (root / ".git" / "__pycache__").mkdir(parents=True)
     (root / ".venv" / "lib").mkdir(parents=True)
     (root / ".venv" / "lib" / "ignored.pyc").write_bytes(b"ignored")
+    egg_info = root / "src" / "aipcs_mcp.egg-info"
+    egg_info.mkdir(parents=True)
+    (egg_info / "PKG-INFO").write_text("generated", encoding="utf-8")
+    unrelated_egg_info = root / "vendor" / "other.egg-info"
+    unrelated_egg_info.mkdir(parents=True)
+    (unrelated_egg_info / "PKG-INFO").write_text("generated", encoding="utf-8")
     (root / "src" / "__pycache__").mkdir(parents=True)
     (root / "src" / "__pycache__" / "module.pyc").write_bytes(b"generated")
     (root / ".mypy_cache").mkdir()
@@ -110,6 +116,7 @@ def test_generated_checkout_artifacts_excludes_only_root_git_and_venv(
         "src/__pycache__",
         "state.sqlite",
         "transcripts",
+        "vendor/other.egg-info",
     }
     with pytest.raises(
         verifier.ReleaseVerificationError,

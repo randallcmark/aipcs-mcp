@@ -215,6 +215,12 @@ _PRIVATE_FILE_SUFFIXES = frozenset(
 _PUBLIC_AGENT_EXAMPLES = frozenset(
     {PurePosixPath("examples/agent-instructions/AGENTS.md")}
 )
+_DEVELOPMENT_DIRECTORY_PATHS = frozenset(
+    {
+        PurePosixPath(".venv"),
+        PurePosixPath("src/aipcs_mcp.egg-info"),
+    }
+)
 _PRIVATE_TRANSCRIPT = re.compile(
     r"(?:^|/)(?:20\d{2}-\d{2}-\d{2}-.+|[^/]*(?:transcript|session)[^/]*)"
     r"\.(?:txt|md|json)$",
@@ -557,14 +563,20 @@ def require_uvx(uvx: str | None = None) -> str:
 
 
 def generated_checkout_artifacts(root: Path) -> tuple[Path, ...]:
-    """Find denied private/generated material without entering .git or the development venv."""
+    """Find denied private/generated material without entering known development metadata."""
 
     artifacts: list[Path] = []
     for current, directories, names in os.walk(root, topdown=True, followlinks=False):
         current_path = Path(current)
         if current_path == root:
-            directories[:] = [name for name in directories if name not in {".git", ".venv"}]
+            directories[:] = [name for name in directories if name != ".git"]
         for directory in tuple(directories):
+            relative_directory = PurePosixPath(
+                (current_path / directory).relative_to(root).as_posix()
+            )
+            if relative_directory in _DEVELOPMENT_DIRECTORY_PATHS:
+                directories.remove(directory)
+                continue
             folded = directory.casefold()
             if (
                 folded in _GENERATED_DIRECTORY_NAMES
