@@ -1,10 +1,14 @@
 # Contributing
 
-The project is preparing for its first public release. The licence, public
-contribution intake, code of conduct, vulnerability-reporting channel, and
-release policy are tracked as later release-readiness decisions. Until those
-are published, treat this document as the development workflow rather than an
-invitation to submit code under unspecified terms.
+The project is preparing for its first public release. Contributors retain
+copyright in their work; by submitting a contribution, they license it under
+[Apache-2.0](LICENSE). The maintainer welcomes legitimate issues and pull
+requests, but cannot promise a review, response, or merge time. Maintainers
+may close work that is out of scope or cannot be sustained.
+
+Every pull request must link an issue so that scope, alternatives, and review
+history are visible. A project code of conduct will be published with a
+private reporting route before public contribution intake opens.
 
 ## Development setup
 
@@ -29,6 +33,9 @@ homelab, or production database.
 
 ## Change rules
 
+- Open or link an issue before submitting a pull request so the intent,
+  alternatives, and review trail are visible.
+
 - Preserve the stable generic MCP contract unless a versioned contract change
   is intentional and documented.
 - Keep CLI and MCP behavior in shared application services.
@@ -46,5 +53,5 @@ maintainer-specific agent instructions.
 
 Do not open a public issue containing a suspected vulnerability, credential,
 private record, database, export artifact, or sensitive path. A dedicated
-private reporting policy is not yet published; that is a blocker for general
-availability and will be added before public contribution intake.
+private reporting policy is in [SECURITY.md](SECURITY.md). Once this repository
+is public, use GitHub's **Report a vulnerability** flow in its Security tab.

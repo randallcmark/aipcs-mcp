@@ -1,5 +1,9 @@
 # AIPCS MCP
 
+<p align="center">
+  <img src="assets/aipcs-mark.svg" width="112" alt="AIPCS MCP logo">
+</p>
+
 `aipcs-mcp` is a pre-release, local-first memory primitive server for AI
 agents. An agent defines a relational memory schema; the server supplies a
 stable generic MCP surface for service lifecycle, records, discovery, branches,
@@ -25,6 +29,8 @@ its `[postgresql]` extra and an operator provides a database. The commands
 below distinguish isolated package invocation from checkout development.
 Remote MCP, physical backup/restore, hosted tenancy, and semantic or fuzzy
 search remain deferred.
+
+Copyright 2026 Mark Randall. Licensed under [Apache-2.0](LICENSE).
 
 ## Installation and isolated invocation
 
@@ -72,7 +78,12 @@ the locked development environment described below.
 - [Security and trust boundary](docs/security.md)
 - [Compatibility](docs/compatibility.md)
 - [Design evolution](docs/design-evolution.md)
+- [Security reporting](SECURITY.md)
+- [Release policy](RELEASING.md)
+- [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
+- [AIPCS name and logo policy](TRADEMARKS.md)
+- [Licence](LICENSE)
 
 Start with the [quickstart](docs/quickstart.md) to reach a first persisted
 memory using only the installed package and public MCP tools.
