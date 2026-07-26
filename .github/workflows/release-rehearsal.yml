@@ -14,11 +14,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
-      - run: uv sync --frozen --group dev
-      - run: PYTHONDONTWRITEBYTECODE=1 uv run python scripts/verify_release.py --exact-tip --postgres-integration --postgres-major 16
+      - run: uv python install 3.14
+      - run: uv sync --frozen --group dev --python 3.14
+      - run: uv run --python 3.14 python -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 51, 3), sqlite3.sqlite_version; print(f'SQLite {sqlite3.sqlite_version}')"
+      - run: PYTHONDONTWRITEBYTECODE=1 uv run --python 3.14 python scripts/verify_release.py --exact-tip --postgres-integration --postgres-major 16
