@@ -4,9 +4,12 @@ AIPCS treats MCP arguments, manifests, record values, cursors, configuration,
 and durable storage as untrusted at each boundary. Inputs are validated before
 persistence; failures are bounded and redacted.
 
-This document describes the current source contract. There is not yet a
-published supported-release, maintenance, vulnerability-reporting, or
-security-fix policy.
+This document describes the current source contract. The public reporting and
+maintenance posture is in the repository [security policy](../SECURITY.md):
+the latest public release receives best-effort security fixes only, and GitHub
+Private Vulnerability Reporting is the canonical report channel after public
+visibility. The maintainer aims to acknowledge a private report within seven
+calendar days when possible; this is not an SLA.
 
 ## Input boundary
 

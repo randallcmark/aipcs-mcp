@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux compatibility / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      # Current managed 3.12/3.13 builds bundle SQLite 3.50.4.  That is below
+      # AIPCS's 3.51.3 safety minimum, so full SQLite integration coverage is
+      # deliberately exercised by the supported 3.14 jobs below.
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv sync --frozen --group dev --python ${{ matrix.python-version }}
+      - run: uv run --python ${{ matrix.python-version }} ruff check .
+      - run: >-
+          uv run --python ${{ matrix.python-version }} pytest -q
+          tests/application
+          tests/storage_contracts
+          tests/storage_postgresql/test_data_core_codecs.py
+          tests/storage_postgresql/test_domain_schema.py
+          tests/test_contracts.py
+          tests/test_data_requests.py
+          tests/test_data_results.py
+          tests/test_manifest_v2.py
+          tests/test_portable_io.py
+          tests/test_records.py
+          tests/test_relational.py
+
+  linux-storage:
+    name: Linux storage / Python 3.14
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --frozen --group dev --python 3.14
+      - run: uv run --python 3.14 python -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 51, 3), sqlite3.sqlite_version; print(f'SQLite {sqlite3.sqlite_version}')"
+      - run: uv run --python 3.14 ruff check .
+      - run: uv run --python 3.14 pytest -q
+
+  macos:
+    name: macOS / Python 3.14
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --frozen --group dev --python 3.14
+      - run: uv run --python 3.14 python -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 51, 3), sqlite3.sqlite_version; print(f'SQLite {sqlite3.sqlite_version}')"
+      - run: uv run --python 3.14 ruff check .
+      - run: uv run --python 3.14 pytest -q

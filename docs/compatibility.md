@@ -1,9 +1,23 @@
 # Compatibility and release boundary
 
-`aipcs-mcp` remains pre-release (`0.0.0.dev0`). The source tree implements the
-public-v1 contract below and its wheel, sdist, and isolated `uvx` invocation
-are release-verified. Publication, a release window, deprecation policy, and
-security-fix commitment remain to be defined.
+`aipcs-mcp` remains pre-release (`0.0.0.dev0`). The first public release is
+planned as `0.1.0`. The source tree implements the public-v1 contract below
+and its wheel, sdist, and isolated `uvx` invocation are release-verified.
+GitHub visibility and PyPI publication are separately authorised release
+actions.
+
+## Pre-1.0 policy
+
+The latest public release receives best-effort maintenance and security fixes;
+there is no SLA, backport branch, or guaranteed cadence. Minor pre-1.0 releases
+may make breaking changes with explicit release notes. Additive evolution is
+preferred, with special care for MCP tool names and arguments, CLI commands,
+configuration, portable bundles, and database schema paths.
+
+Where feasible, planned non-security removals are announced at least one minor
+release ahead. Security or correctness may require an immediate change. See
+[RELEASING.md](../RELEASING.md) and [SECURITY.md](../SECURITY.md) for the
+operational policy.
 
 | Layer | Identifier | Current source contract |
 | --- | --- | --- |
@@ -188,9 +202,9 @@ No compatibility commitment yet exists for:
 - third-party adapters or mixed-backend runtime composition;
 - semantic, fuzzy, embedding, or cross-service search;
 - online physical backup/restore or arbitrary repair;
-- package-index publication and general-availability versioning;
+- package-index publication;
 - remote MCP, authentication, hosted tenancy, or multi-host deployment; or
-- support windows, security-fix windows, or deprecation periods.
+- multi-version support or formal response/fix windows.
 
 Those capabilities will define their own compatibility boundaries when
 implemented and validated. Earlier prototypes and research data stores are not

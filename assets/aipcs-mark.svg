@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
+  <title id="title">AIPCS MCP</title>
+  <desc id="description">A connected set of memory primitives forming an A.</desc>
+  <rect width="256" height="256" rx="56" fill="#17153d"/>
+  <path d="M55 186 128 54l73 132M82 137h92" fill="none" stroke="#a5f3fc" stroke-linecap="round" stroke-linejoin="round" stroke-width="15"/>
+  <circle cx="55" cy="186" r="17" fill="#67e8f9"/>
+  <circle cx="128" cy="54" r="17" fill="#c4b5fd"/>
+  <circle cx="201" cy="186" r="17" fill="#67e8f9"/>
+  <circle cx="82" cy="137" r="11" fill="#fef3c7"/>
+  <circle cx="174" cy="137" r="11" fill="#fef3c7"/>
+</svg>

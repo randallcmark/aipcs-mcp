@@ -8,17 +8,26 @@ dynamic = ["version"]
 description = "Contract-first MCP server for agent-defined persistent context services."
 readme = "README.md"
 requires-python = ">=3.12" # Matches the current reference implementation floor.
-authors = [{ name = "AIPCS maintainers" }]
+license = "Apache-2.0"
+authors = [{ name = "Mark Randall" }]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
+  "Operating System :: POSIX",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
 ]
 
 dependencies = [
   "mcp>=1.28.1,<2",
   "pydantic>=2.11,<3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/randallcmark/aipcs-mcp"
+Repository = "https://github.com/randallcmark/aipcs-mcp"
+Issues = "https://github.com/randallcmark/aipcs-mcp/issues"
 
 [project.scripts]
 aipcs = "aipcs_mcp.cli:main"

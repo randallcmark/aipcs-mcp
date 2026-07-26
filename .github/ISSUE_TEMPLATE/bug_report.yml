@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a reproducible problem in AIPCS MCP.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not use this form for suspected vulnerabilities, credentials,
+        private records, databases, export bundles, or sensitive paths. Use
+        GitHub's private vulnerability reporting flow instead.
+  - type: input
+    id: version
+    attributes:
+      label: AIPCS MCP version or commit
+      placeholder: 0.1.0 or abc1234
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, backend, and transport. Remove sensitive details.
+      placeholder: macOS 15, Python 3.14, SQLite, stdio
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include safe, redacted output only.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic data and omit secrets, paths, and private memory.
+    validations:
+      required: true
