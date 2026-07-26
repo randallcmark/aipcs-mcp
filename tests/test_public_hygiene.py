@@ -6,6 +6,8 @@ import sys
 import tomllib
 from pathlib import Path, PurePosixPath
 
+from packaging.version import Version
+
 from aipcs_mcp import __version__
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +30,7 @@ def test_package_metadata_and_normal_tree() -> None:
     assert metadata["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "aipcs_mcp.__version__"
     }
-    assert __version__ == "0.0.0.dev0"
+    assert str(Version(__version__)) == __version__
     assert set(metadata["project"]["optional-dependencies"]) == {"postgresql"}
     assert set(metadata["dependency-groups"]) == {"dev"}
     result = subprocess.run(

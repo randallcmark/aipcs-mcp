@@ -4,6 +4,7 @@ import pytest
 from fixtures import valid_design_request, valid_manifest
 
 import aipcs_mcp.legacy_v1
+from aipcs_mcp import __version__
 from aipcs_mcp.contracts import (
     StorageSummary,
     parse_public_design,
@@ -19,7 +20,7 @@ def test_server_info_is_safe_and_capability_versioned() -> None:
     data = public_server_info().model_dump(mode="json")
     assert data == {
         "server_name": "aipcs-mcp",
-        "package_version": "0.0.0.dev0",
+        "package_version": __version__,
         "aipcs_mcp_contract": "1.2.0",
         "supported_manifest_versions": [2],
         "transports": ["stdio", "streamable-http"],

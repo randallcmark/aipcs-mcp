@@ -111,6 +111,18 @@ SQLite is supported only on Linux/macOS, a local POSIX filesystem, one host,
 SQLite 3.51.3 or newer, and cooperating processes under the same effective
 user.
 
+### SQLite WAL-reset safety baseline
+
+SQLite 3.51.3 fixed a rare WAL-reset bug that can corrupt a database when two
+or more connections write or checkpoint the same WAL-mode file at the same
+instant. AIPCS uses WAL for persistent SQLite storage, so it certifies SQLite
+3.51.3 or newer rather than trying to infer downstream distribution backports.
+Some older patched builds may be safe, but they are outside the supported
+baseline and are rejected deliberately. The requirement is a data-integrity
+control, not a feature preference. See SQLite's
+[WAL-reset bug documentation](https://www.sqlite.org/wal.html#walreset) and
+[3.51.3 release notes](https://sqlite.org/releaselog/3_51_3.html).
+
 The location policy requires an operator-owned `0700` data root, an owner-only
 service-store container, and `0600` database/WAL/SHM files. Descriptor-relative
 no-follow checks reject unsafe ancestors, symlinks, unexpected file types,

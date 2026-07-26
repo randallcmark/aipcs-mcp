@@ -252,6 +252,9 @@ def test_missing_non_utf8_oversize_no_discovery_and_no_storage_creation(
     config = resolve(
         overrides=ConfigOverrides(profile="sqlite", principal_id="p", sqlite_data_root=str(root))
     )
+    monkeypatch.setattr(
+        "aipcs_mcp.configuration.resolver.sqlite_runtime_version", lambda: (3, 51, 3)
+    )
     require_runnable(config)
     assert not root.exists()
 
@@ -343,6 +346,7 @@ def test_cli_redacts_and_validate_serve_stop_before_server(
     monkeypatch.setattr(
         cli, "compose_server", lambda _: (_ for _ in ()).throw(AssertionError("server started"))
     )
+    monkeypatch.setattr(cli, "require_runnable", lambda _: None)
     assert cli.main(["config", "show", "--config", str(unavailable)]) == 0
     assert cli.main(["config", "validate", "--config", str(unavailable)]) == 0
     assert cli.main(["serve", "--config", str(unavailable)]) == 2

@@ -13,13 +13,20 @@ history are visible. Participation is governed by the
 
 ## Development setup
 
-Requirements are Python 3.12 or newer and `uv`.
+Requirements are Python 3.12 or newer and `uv`. The complete SQLite-backed
+suite additionally requires a Python runtime bundling SQLite 3.51.3 or newer.
+The supported local route is managed Python 3.14:
 
 ```text
-uv sync --group dev
-uv run pytest -q
-uv run ruff check .
+uv python install 3.14
+uv sync --group dev --python 3.14
+uv run --python 3.14 pytest -q
+uv run --python 3.14 ruff check .
 ```
+
+On an older SQLite runtime, the regular test command skips SQLite-backed tests
+with an explicit safety reason and still runs runtime-independent coverage. Do
+not treat that as full SQLite validation.
 
 Run the complete local release rehearsal before proposing a release-affecting
 change:

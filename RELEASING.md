@@ -15,7 +15,8 @@ rehearsal.
 ## Before a GitHub release
 
 1. Confirm the working tree is clean and the candidate version and changelog
-   are correct.
+   are correct. The suite accepts a valid release version; the artifact
+   verifier proves that source, wheel, and sdist versions match.
 2. Run the manual **Release rehearsal** workflow on the exact candidate commit.
 3. Repeat the documented fresh-clone smoke test on macOS and Ubuntu.
 4. Review open security reports, dependency alerts, CodeQL findings, and any
@@ -29,6 +30,10 @@ rehearsal.
    records GitHub build provenance attestations for them.
 7. Create and annotate the `v0.1.0` tag and GitHub release, including known
    limitations and migration notes.
+
+Normal CI automatically scans reachable Git history for public-hygiene
+violations. The manual release rehearsal repeats that scan alongside the
+artifact, SQLite, and PostgreSQL checks on the exact candidate commit.
 
 ## Later PyPI publication
 

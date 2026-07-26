@@ -12,6 +12,26 @@ aipcs storage status [configuration options]
 These commands are bounded and redacted. Do not add database credentials,
 storage paths, or private record content to public issue reports.
 
+## SQLite profile reports `sqlite_runtime_unsupported`
+
+SQLite persistence requires SQLite 3.51.3 or newer because older runtimes are
+affected by SQLite's WAL-reset data-integrity defect. AIPCS reports the detected
+SQLite version in the safe error envelope and in `aipcs config show`; no paths,
+records, or configuration values are disclosed.
+
+Installing or upgrading a system `sqlite3` command normally does not change the
+SQLite library used by Python. Use a managed Python runtime instead:
+
+```text
+uv python install 3.14
+uv run --python 3.14 aipcs config validate --profile sqlite --principal-id my-agent
+```
+
+For an installed command, use the same selection with `uvx --python 3.14`.
+Alternatively, select the PostgreSQL profile with the `[postgresql]` extra; it
+is not affected by this SQLite runtime requirement. Do not patch out the
+runtime check or set an assumed-safe override.
+
 ## The profile validates but the server does not start
 
 `config validate` checks structure only. It does not read the PostgreSQL DSN,

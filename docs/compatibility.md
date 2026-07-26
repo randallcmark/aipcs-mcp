@@ -51,7 +51,10 @@ binding must not advertise tools it cannot execute.
 
 SQLite compatibility is one host, Linux or macOS, a local POSIX filesystem,
 SQLite 3.51.3 or newer, and cooperating processes under the same effective
-user. Persistent WAL supports concurrent readers and one serialised writer.
+user. This is the supported safety baseline for SQLite's WAL-reset data-integrity
+fix, not a claim that no older distribution backport can contain it. Use a
+managed Python 3.14 runtime when the host Python is older; PostgreSQL is
+unaffected. Persistent WAL supports concurrent readers and one serialised writer.
 Windows SQLite, network filesystems, multi-host writers, and hostile same-user
 isolation are outside the boundary.
 

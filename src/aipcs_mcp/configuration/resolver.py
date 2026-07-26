@@ -65,6 +65,7 @@ _HTTP_ORIGIN = re.compile(
     r"^https?://(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:.]+\])(?::[1-9][0-9]{0,4})?$",
     re.I,
 )
+_SQLITE_SAFETY_MINIMUM = (3, 51, 3)
 
 
 def resolve_configuration(
@@ -184,10 +185,17 @@ def resolve_configuration(
 
 
 def require_runnable(config: ResolvedConfiguration) -> None:
-    if config.profile == "sqlite" and (
-        not is_supported_sqlite_platform() or not is_supported_sqlite_runtime()
-    ):
-        raise ConfigurationError(ErrorCode.UNSUPPORTED_OPERATION, "profile")
+    if config.profile != "sqlite":
+        return
+    if not is_supported_sqlite_platform():
+        raise ConfigurationError(ErrorCode.UNSUPPORTED_OPERATION, "sqlite_platform")
+    version = sqlite_runtime_version()
+    if version is None or version < _SQLITE_SAFETY_MINIMUM:
+        raise ConfigurationError(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "sqlite_runtime",
+            sqlite_version=sqlite_runtime_version_text(version),
+        )
 
 
 def is_supported_sqlite_platform() -> bool:
@@ -199,14 +207,29 @@ def is_supported_sqlite_platform() -> bool:
 def is_supported_sqlite_runtime() -> bool:
     """Return whether the loaded SQLite runtime includes the WAL-reset bug fix."""
 
+    version = sqlite_runtime_version()
+    return version is not None and version >= _SQLITE_SAFETY_MINIMUM
+
+
+def sqlite_runtime_version() -> tuple[int, int, int] | None:
+    """Return the loaded SQLite version only when its shape is safe to report."""
+
     runtime = import_module("sqlite3")
     version = getattr(runtime, "sqlite_version_info", None)
-    return (
+    if not (
         type(version) is tuple
         and len(version) >= 3
         and all(type(part) is int for part in version[:3])
-        and version[:3] >= (3, 51, 3)
-    )
+    ):
+        return None
+    return version[:3]
+
+
+def sqlite_runtime_version_text(version: tuple[int, int, int] | None = None) -> str | None:
+    """Render only validated runtime metadata for public diagnostics."""
+
+    observed = sqlite_runtime_version() if version is None else version
+    return None if observed is None else ".".join(str(part) for part in observed)
 
 
 def _read_file(path: Path | None) -> dict[str, object]:
