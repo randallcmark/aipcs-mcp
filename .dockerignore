@@ -1,0 +1,16 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.sqlite
+*.sqlite3
+*.db
+.data
+archives
+captures
+exec-plans
+private-data
+research
+transcripts

@@ -16,7 +16,7 @@ server, stable generic tools, and schemas that agents can design and evolve.
 | Keep tool definitions inside schemas. | Tool definitions belong to the fixed server contract, not manifest data. |
 | Let discovery infer relevance or authority. | Bootstrap is shape-only; summary and maintenance expose bounded declared/mechanical facts without ranking truth. |
 | Defer concurrency evidence. | Lifecycle uses registry durable intent; record/topology mutations use a separate completed-only local replay ledger. |
-| Treat local transport proof as remote readiness. | The current runtime is stdio-only; remote MCP is deferred. |
+| Treat local transport proof as remote readiness. | Streamable HTTP now has explicit loopback, Host/Origin, and session boundaries; authentication and tenancy are still separate concerns. |
 
 ## What 1.2 establishes
 
@@ -52,9 +52,10 @@ contract.
 ## Still deferred
 
 The current implementation remains local-first and pre-release. PostgreSQL is
-a supported generic public-v1 stdio reference backend when installed with its
+a supported generic public-v1 reference backend when installed with its
 `[postgresql]` extra. A bounded administration CLI exposes backend-neutral
-operational lifecycle and portable data seams. Semantic search,
-package-index publication, remote MCP, hosted identity, and
-maintenance/deprecation policy remain separate future work. Their absence is
-deliberate and is not filled by examples or research artifacts.
+operational lifecycle and portable data seams. Streamable HTTP enables trusted
+service deployment, but hosted identity, application-managed authentication,
+semantic search, package-index publication, and maintenance/deprecation policy
+remain separate future work. Their absence is deliberate and is not filled by
+examples or research artifacts.

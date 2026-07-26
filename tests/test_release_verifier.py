@@ -622,6 +622,7 @@ def test_embedded_catalog_client_is_syntactically_valid(verifier) -> None:
     assert "site.getsitepackages()" in program
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_catalog_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -636,6 +637,7 @@ def test_embedded_catalog_client_exercises_the_source_contract(
     assert restarted.value.code == 0
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_domain_schema_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -704,6 +706,7 @@ def test_embedded_lifecycle_client_exercises_the_source_contract(
     assert tuple(tmp_path.iterdir()) == ()
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -758,6 +761,7 @@ def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
     assert (root / "registry.sqlite").is_file()
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_portable_lifecycle_client_uses_private_streams_and_restarts(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -821,7 +825,9 @@ def test_embedded_admin_cli_client_covers_the_installed_v1_11_surface(verifier) 
 def test_embedded_uvx_client_is_isolated_and_runs_a_sqlite_workflow(verifier) -> None:
     program = verifier._uvx_smoke_program()
     compile(program, "uvx_smoke.py", "exec")
-    assert '"--offline", "--isolated", "--from"' in program
+    assert '"--isolated"' in program
+    assert '"--python", python_text' in program
+    assert '"--offline"' not in program
     assert '"aipcs_service_seed"' in program
     assert '"aipcs_service_list"' in program
     assert '"status"' in program
@@ -830,6 +836,7 @@ def test_embedded_uvx_client_is_isolated_and_runs_a_sqlite_workflow(verifier) ->
     assert "postgresql://" not in program
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_registry_r2_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -1295,6 +1302,8 @@ def test_uvx_smoke_runs_each_artifact_from_an_isolated_empty_directory(
     ]
     assert all(args[1] == "-I" for _, args, _ in calls)
     assert all(args[3] == "/synthetic/bin/uvx" for _, args, _ in calls)
+    assert calls[0][1][4] == str(tmp_path / "wheel-venv" / "bin" / "python")
+    assert calls[1][1][4] == str(tmp_path / "sdist-venv" / "bin" / "python")
     assert calls[0][2] == tmp_path / "wheel-uvx"
     assert calls[1][2] == tmp_path / "sdist-uvx"
 
@@ -1442,6 +1451,8 @@ def test_copy_side_gates_are_direct_and_never_reinvoke_verifier(
     ruff_call = next(arguments for label, arguments, _ in calls if label == "ruff")
     group_index = sync_call.index("--group")
     assert sync_call[group_index : group_index + 2] == ("--group", "dev")
+    python_index = sync_call.index("--python")
+    assert sync_call[python_index : python_index + 2] == ("--python", str(verifier.sys.executable))
     assert sync_call[-1] == "--no-install-project"
     assert boundary_call[-2:] == ("python", "scripts/check_application_boundaries.py")
     assert "--no-sync" in boundary_call

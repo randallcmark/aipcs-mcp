@@ -285,6 +285,7 @@ def test_lifecycle_failure_mapping_covers_every_portable_category() -> None:
     assert set(cli._PORTABLE_FAILURES) == set(PortableResultCategory)
 
 
+@pytest.mark.requires_sqlite
 def test_sqlite_cli_lifecycle_replay_stale_and_exact_transitions(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

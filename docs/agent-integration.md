@@ -34,6 +34,17 @@ PostgreSQL uses `aipcs-mcp[postgresql]`, `--profile postgresql`, and
 `--postgres-dsn-env NAME`. Put the DSN itself in the process environment, not
 in agent instructions or tool arguments.
 
+## Streamable HTTP service
+
+The service transport exposes the identical tool catalogue and envelopes as
+the local process. Configure an MCP client that supports Streamable HTTP with
+the single endpoint URL selected by the operator (for example,
+`https://memory.example.test/mcp`); do not add per-tool URLs or embed storage
+credentials in agent instructions. The endpoint must be served through the
+trusted TLS/authentication gateway described in
+[storage and deployment](storage.md). AIPCS's configured principal and MCP
+session identifier are not client credentials.
+
 ## Recommended agent protocol
 
 1. Call `aipcs_bootstrap` at the beginning of a session.

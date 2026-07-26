@@ -1,7 +1,8 @@
 # Storage and deployment
 
-AIPCS is local-first and stdio-only. One running process uses one configured
-backend and one fixed principal.
+AIPCS is local-first. One running process uses one configured backend and one
+fixed principal. `stdio` is the default local transport; Streamable HTTP is a
+supported trusted-service transport.
 
 Examples using the `aipcs-mcp` distribution name are post-publication forms.
 Before publication, replace the value after `uvx --from` with a supplied wheel,
@@ -68,12 +69,79 @@ Supported:
 - a local stdio MCP process;
 - SQLite on one supported host; or
 - PostgreSQL 16–18 in an operator-managed environment, including a homelab,
-  when the process still communicates with its MCP client over local stdio.
+  with either local stdio or a configured Streamable HTTP endpoint; and
+- one Streamable HTTP MCP endpoint for a trusted operator deployment, with
+  loopback binding by default and explicit non-loopback/Host policy when a
+  reverse proxy or private network requires it.
+
+The HTTP listener is not an authentication, authorization, tenancy, or TLS
+implementation. Keep the default loopback bind for a local service. For a
+homelab or container deployment, place a non-loopback listener behind a
+trusted authenticated TLS gateway, configure its exact Host header in AIPCS,
+and do not expose the AIPCS port directly to an untrusted LAN or the Internet.
+
+## Container service example
+
+The supplied `Dockerfile` builds the PostgreSQL reference-service image. Its
+pinned base currently supplies SQLite 3.46.1, below AIPCS's SQLite 3.51.3
+safety floor, so SQLite is intentionally unavailable inside this container.
+Use `profile = "postgresql"`; run a supported managed Python locally for the
+SQLite reference backend. The image does not create a database, store a DSN,
+publish a port, or provide a reverse proxy. Supply an operator-owned
+configuration file and secret reference at runtime.
+
+Build a local image:
+
+```text
+docker build --tag aipcs-mcp:local .
+```
+
+For a service behind a host-local reverse proxy, the container must bind its
+own network interface while Docker publishes the port only to the host's
+loopback address. A generic configuration is:
+
+```toml
+config_version = 1
+profile = "postgresql"
+transport = "streamable-http"
+
+[identity]
+principal_id = "homelab_memory"
+
+[postgresql]
+dsn_env = "AIPCS_DATABASE_DSN"
+
+[streamable_http]
+host = "0.0.0.0"
+port = 8000
+path = "/mcp"
+allowed_hosts = ["127.0.0.1:8000", "localhost:8000"]
+allowed_origins = []
+session_idle_timeout_seconds = 1800
+allow_non_loopback = true
+```
+
+Run it on an operator-managed Docker network that can reach PostgreSQL, but
+publish the MCP port only to the host loopback:
+
+```text
+docker run --rm \
+  --network homelab-internal \
+  --publish 127.0.0.1:8000:8000 \
+  --env AIPCS_DATABASE_DSN \
+  --volume /absolute/operator/config.toml:/etc/aipcs/config.toml:ro \
+  aipcs-mcp:local
+```
+
+An upstream proxy may terminate TLS and authenticate clients before forwarding
+to that loopback port. Its public hostname must be added to `allowed_hosts` if
+it preserves the original Host header. Do not enable a broad Docker port
+publish (`8000:8000`) unless the network itself is deliberately trusted and
+the authentication boundary is already enforced upstream.
 
 Deferred:
 
-- remote MCP listeners;
-- authentication and hosted tenancy;
+- application-managed authentication and hosted tenancy;
 - multi-host SQLite;
 - adapter plugins and mixed-backend runtime composition; and
 - automated database/role provisioning.

@@ -18,7 +18,6 @@ def _clear_transport_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     ("argv", "environment"),
     [
         (["serve", "--transport", "sse"], {}),
-        (["serve", "--transport", "streamable-http"], {}),
         (["serve"], {"FASTMCP_PORT": "8000"}),
         (["serve"], {"AIPCS_MCP_TRANSPORT": "sse"}),
     ],
@@ -53,7 +52,7 @@ def test_non_stdio_configuration_returns_one_failure_envelope_before_server_cons
         "error": {
             "code": "transport_not_supported",
             "message": (
-                "Public v1 supports stdio only; listener transports and listener settings are disabled."
+                "Use documented AIPCS transport configuration; legacy listener settings are disabled."
             ),
             "issues": [],
             "retryable": False,
@@ -78,3 +77,23 @@ def test_stdio_configuration_constructs_server_only_after_preflight(
 
     assert cli.main(["serve", "--transport", "stdio"]) == 0
     assert calls == ["stdio"]
+
+
+def test_streamable_http_configuration_constructs_server_only_after_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_transport_environment(monkeypatch)
+    calls: list[str] = []
+
+    class StubServer: ...
+
+    async def run_streamable_http(_: object, config: object) -> None:
+        assert config.transport == "streamable-http"  # type: ignore[attr-defined]
+        calls.append("streamable-http")
+
+    monkeypatch.setattr(cli, "compose_server", lambda _: StubServer())
+    monkeypatch.setattr(cli, "run_streamable_http", run_streamable_http)
+    monkeypatch.setattr(cli, "_configure_stderr_logging", lambda _: None)
+
+    assert cli.main(["serve", "--transport", "streamable-http"]) == 0
+    assert calls == ["streamable-http"]

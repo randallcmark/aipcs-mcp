@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from aipcs_mcp.configuration.errors import ConfigurationError
+from aipcs_mcp.configuration.errors import ConfigurationError, to_contract_error
 from aipcs_mcp.configuration.models import ConfigOverrides
 from aipcs_mcp.configuration.reporting import safe_config_report
 from aipcs_mcp.configuration.resolver import (
@@ -132,8 +132,14 @@ def test_sqlite_runtime_gate_reads_only_runtime_metadata(monkeypatch: pytest.Mon
             profile="sqlite", principal_id="operator", sqlite_data_root="/sqlite-root"
         )
     )
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError) as error:
         require_runnable(config)
+    assert error.value.path == "sqlite_runtime"
+    assert error.value.sqlite_version == "3.51.2"
+    public = to_contract_error(error.value).envelope().model_dump()
+    assert public["error"]["issues"][0]["code"] == "sqlite_runtime_unsupported"
+    assert "3.51.2" in public["error"]["issues"][0]["message"]
+    assert "WAL-reset" in public["error"]["message"]
 
     Runtime.sqlite_version_info = (3, 51, 3)
     assert is_supported_sqlite_runtime() is True

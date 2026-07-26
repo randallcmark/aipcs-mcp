@@ -2,7 +2,7 @@
 
 | Area | Current source contract | Deferred or excluded |
 | --- | --- | --- |
-| Transport | Local MCP over stdio | Remote MCP, listeners, authentication, hosted tenancy |
+| Transport | Local stdio or trusted Streamable HTTP service endpoint | Application-managed authentication, hosted tenancy |
 | Memory model | Agent-defined manifest-v2 relational schemas | Generated schema-specific tools or services |
 | Lifecycle | Seed, design, materialise, adjacent additive evolve | Rename/remove/rebuild and arbitrary repair |
 | Records | Generic CRUD, history, optimistic revisions, idempotent replay | Cross-service transactions |
@@ -11,7 +11,7 @@
 | Discovery | Shape-only bootstrap, bounded summaries/facets/samples | Automatic relevance or truth ranking |
 | Maintenance | Read-only mechanical candidates | Automatic merge, archive, purge, or deletion |
 | SQLite | Linux/macOS, one local POSIX host, cooperating same-user processes | Windows, network filesystems, multi-host, hostile same-user isolation |
-| PostgreSQL | Generic stdio reference adapter, majors 16–18 | Database/role provisioning, hosted tenancy |
+| PostgreSQL | Generic reference adapter, majors 16–18 | Database/role provisioning, hosted tenancy |
 | Administration | Read-only inspection, lifecycle, logical export/import, deliberate purge | Raw SQL, arbitrary migration/repair |
 | Portability | Strict logical cross-backend artifact and dry run | Physical database backup, replication, best-effort import |
 | Distribution | Wheel, sdist, `aipcs` entry point, isolated `uvx` verification | Package-index publication and GA version |

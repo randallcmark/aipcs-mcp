@@ -86,6 +86,7 @@ def test_stateless_composition_constructs_no_storage() -> None:
     assert anyio.run(_tool_names, server) == ["aipcs_server_info"]
 
 
+@pytest.mark.requires_sqlite
 def test_read_only_admin_composition_does_not_create_or_migrate_sqlite(
     tmp_path: Path,
 ) -> None:
@@ -107,6 +108,7 @@ def test_stateless_admin_composition_has_no_persistent_runtime() -> None:
     assert admin.inspection.status(admin.context).profile == "stateless"
 
 
+@pytest.mark.requires_sqlite
 def test_private_portable_composition_selects_the_configured_sqlite_backend(
     tmp_path: Path,
 ) -> None:
@@ -118,6 +120,7 @@ def test_private_portable_composition_selects_the_configured_sqlite_backend(
     assert isinstance(coordinator._store, runtime.SQLitePortableServiceStore)
 
 
+@pytest.mark.requires_sqlite
 def test_ready_sqlite_migrates_once_before_mcp_construction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -455,6 +458,7 @@ def test_non_ready_postgresql_fails_before_service_store_construction(
         runtime.compose_server(_postgres_config(), environ={"AIPCS_SYNTHETIC_DSN": "ignored"})
 
 
+@pytest.mark.requires_sqlite
 def test_ready_sqlite_server_info_does_not_allocate_or_migrate_a_service_store(tmp_path: Path) -> None:
     root = tmp_path / "ready-root"
     _secure_parent(root)
@@ -486,6 +490,7 @@ def test_ready_sqlite_server_info_does_not_allocate_or_migrate_a_service_store(t
     assert not (root / "service-stores").exists()
 
 
+@pytest.mark.requires_sqlite
 @pytest.mark.parametrize("state", ["uninitialised", "dirty", "incompatible"])
 def test_non_ready_sqlite_fails_before_mcp_construction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str
@@ -588,6 +593,7 @@ def _migrated_root(root: Path) -> Path:
     return root / "registry.sqlite"
 
 
+@pytest.mark.requires_sqlite
 @pytest.mark.parametrize("kind", ["unsafe", "dirty", "incompatible"])
 def test_startup_failures_are_one_bounded_stderr_envelope(tmp_path: Path, kind: str) -> None:
     root = tmp_path / "secret-root-component"

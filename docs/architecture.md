@@ -5,7 +5,7 @@ Agent-defined schemas are data; they never become generated Python, SQL,
 network endpoints, or per-schema tools.
 
 ```text
-MCP stdio / administration CLI
+MCP stdio or Streamable HTTP / administration CLI
               |
        validation and projection
               |
@@ -16,7 +16,9 @@ SQLite adapters      PostgreSQL adapters
 
 ## Public boundaries
 
-- **MCP transport:** local stdio only; one fixed principal per process.
+- **MCP transport:** local stdio by default, or one Streamable HTTP endpoint
+  with explicit listener and Host/Origin policy; one fixed principal per
+  process in either case.
 - **CLI:** operator inspection, lifecycle, and logical transfer over the same
   application services.
 - **Manifest:** backend-neutral relational schema and retrieval intent.
@@ -29,6 +31,20 @@ The registry owns service identity, current manifest, service/schema revision,
 lifecycle state, and cross-store intent. Each service store owns domain data,
 record history, branches, membership, and completed local mutation replay.
 Neither adapter's physical schema is a public extension API.
+
+## Service transport boundary
+
+Streamable HTTP is an adapter over the same composed low-level MCP server, not
+a second tool catalogue or a web API for individual memory schemas. The SDK
+manages opaque transport sessions and bounds their idle lifetime. The session
+identifier is not an AIPCS principal, user identity, or tenant boundary.
+
+The listener accepts only one configured MCP path. It binds `127.0.0.1` by
+default, validates configured Host and Origin allowlists, and does not trust
+proxy-supplied forwarding headers. A non-loopback bind is a deliberate
+operator choice for a trusted network or reverse-proxy topology; TLS,
+authentication, authorization, rate limiting, and tenant mapping remain
+outside the AIPCS process.
 
 ## Consistency model
 

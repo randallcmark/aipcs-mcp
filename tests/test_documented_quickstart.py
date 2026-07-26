@@ -8,10 +8,12 @@ import re
 from pathlib import Path
 
 import anyio
+import pytest
 from stdio_helpers import async_session, call_envelope, sqlite_parameters, successful
 
 ROOT = Path(__file__).resolve().parents[1]
 JSON_FENCE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+pytestmark = pytest.mark.requires_sqlite
 
 
 def documented_payload(required_keys: set[str]) -> dict[str, object]:

@@ -19,16 +19,19 @@ The current source runtime supports:
 - shape-only bootstrap plus bounded service summaries, facets, and samples;
 - read-only mechanical maintenance candidate discovery;
 - local administration, operational lifecycle, and logical transfer commands;
-- a local SQLite implementation over stdio; and
-- a generic PostgreSQL reference implementation over stdio when installed with
-  the `postgresql` optional dependency.
+- a local SQLite implementation over stdio or Streamable HTTP; and
+- a generic PostgreSQL reference implementation over either transport when
+  installed with the `postgresql` optional dependency.
 
 SQLite is the default local reference backend. PostgreSQL is a supported
-generic public-v1 stdio reference backend when the package is installed with
-its `[postgresql]` extra and an operator provides a database. The commands
-below distinguish isolated package invocation from checkout development.
-Remote MCP, physical backup/restore, hosted tenancy, and semantic or fuzzy
-search remain deferred.
+generic public-v1 reference backend when the package is installed with its
+`[postgresql]` extra and an operator provides a database. `stdio` remains the
+local default. Streamable HTTP is available for a trusted service deployment;
+it binds to loopback by default and is not an authentication or tenancy layer.
+Remote public exposure must sit behind an authenticated TLS gateway. Physical
+backup/restore, hosted tenancy, and semantic or fuzzy search remain deferred.
+Any client that can reach an AIPCS HTTP listener has full read/write access to
+every service for that listener's configured principal.
 
 Copyright 2026 Mark Randall. Licensed under [Apache-2.0](LICENSE).
 
@@ -333,7 +336,8 @@ The current source contract deliberately excludes:
 - semantic, fuzzy, embedding, or cross-service search;
 - third-party storage adapters or mixed-backend runtime composition;
 - physical backup/restore and arbitrary repair;
-- remote MCP, authentication, hosted tenancy, and multi-host SQLite; and
+- application-managed HTTP authentication or authorisation, hosted tenancy,
+  and multi-host SQLite; and
 - automatic truth resolution, merge, archival, deletion, or schema invention.
 
 Repository tests and examples are synthetic contract fixtures. Do not add

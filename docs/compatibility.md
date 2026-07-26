@@ -51,11 +51,14 @@ binding must not advertise tools it cannot execute.
 
 SQLite compatibility is one host, Linux or macOS, a local POSIX filesystem,
 SQLite 3.51.3 or newer, and cooperating processes under the same effective
-user. Persistent WAL supports concurrent readers and one serialised writer.
+user. This is the supported safety baseline for SQLite's WAL-reset data-integrity
+fix, not a claim that no older distribution backport can contain it. Use a
+managed Python 3.14 runtime when the host Python is older; PostgreSQL is
+unaffected. Persistent WAL supports concurrent readers and one serialised writer.
 Windows SQLite, network filesystems, multi-host writers, and hostile same-user
 isolation are outside the boundary.
 
-PostgreSQL is a supported generic public-v1 stdio reference adapter for major
+PostgreSQL is a supported generic public-v1 reference adapter for major
 versions 16 through 18 when installed with the `[postgresql]` extra. It uses
 `psycopg` 3 and one operator-provisioned database with a fixed registry schema
 and schema-isolated service storage. Release verification passes the full
@@ -203,7 +206,7 @@ No compatibility commitment yet exists for:
 - semantic, fuzzy, embedding, or cross-service search;
 - online physical backup/restore or arbitrary repair;
 - package-index publication;
-- remote MCP, authentication, hosted tenancy, or multi-host deployment; or
+- application-managed authentication, hosted tenancy, or multi-host deployment; or
 - multi-version support or formal response/fix windows.
 
 Those capabilities will define their own compatibility boundaries when

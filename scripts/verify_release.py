@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -538,6 +539,10 @@ def require_local_preconditions(root: Path, uv: str | None = None) -> str:
 
     if tuple(sys.version_info[:2]) < (3, 12):
         raise ReleaseVerificationError("Python 3.12 or newer is required.")
+    if sqlite3.sqlite_version_info < (3, 51, 3):
+        raise ReleaseVerificationError(
+            "SQLite 3.51.3 or newer is required for the release verifier."
+        )
     for relative in ("pyproject.toml", "uv.lock", ".git", "scripts/check_wheel_contents.py"):
         if not (root / relative).exists():
             raise ReleaseVerificationError(
@@ -817,6 +822,8 @@ def run_source_gates(
             [
                 uv,
                 "sync",
+                "--python",
+                sys.executable,
                 "--locked",
                 "--offline",
                 "--group",
@@ -5374,13 +5381,21 @@ import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-uvx, artifact_text, workspace_text = sys.argv[1:]
+uvx, python_text, artifact_text, workspace_text = sys.argv[1:]
 artifact = Path(artifact_text)
 workspace = Path(workspace_text)
 principal = "uvx-release-principal"
 missing_root = workspace / "missing"
 data_root = workspace / "data"
-base = [uvx, "--offline", "--isolated", "--from", str(artifact), "aipcs"]
+base = [
+    uvx,
+    "--isolated",
+    "--python",
+    python_text,
+    "--from",
+    str(artifact),
+    "aipcs",
+]
 environment = dict(os.environ)
 
 
@@ -5428,7 +5443,7 @@ async def seed_through_mcp():
     parameters = StdioServerParameters(
         command=uvx,
         args=[
-            "--offline", "--isolated", "--from", str(artifact), "aipcs",
+            "--isolated", "--python", python_text, "--from", str(artifact), "aipcs",
             "serve",
             "--profile", "sqlite",
             "--principal-id", principal,
@@ -5497,7 +5512,7 @@ def run_uvx_smoke(
     root.mkdir(mode=0o700)
     run_stage(
         f"isolated uvx {name}",
-        [python, "-I", client, uvx, artifact, root],
+        [python, "-I", client, uvx, python, artifact, root],
         cwd=root,
         environment=environment,
         timeout=POSTGRES_SMOKE_TIMEOUT_SECONDS,
