@@ -20,6 +20,8 @@ from stdio_helpers import (
     sqlite_parameters,
 )
 
+pytestmark = pytest.mark.requires_sqlite
+
 
 def _secure_parent(root: Path) -> None:
     os.chmod(root.parent, 0o700)

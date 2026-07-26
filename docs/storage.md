@@ -82,10 +82,13 @@ and do not expose the AIPCS port directly to an untrusted LAN or the Internet.
 
 ## Container service example
 
-The supplied `Dockerfile` builds the PostgreSQL-capable reference image. It
-does not create a database, store a DSN, publish a port, or provide a reverse
-proxy. Supply an operator-owned configuration file and secret reference at
-runtime.
+The supplied `Dockerfile` builds the PostgreSQL reference-service image. Its
+pinned base currently supplies SQLite 3.46.1, below AIPCS's SQLite 3.51.3
+safety floor, so SQLite is intentionally unavailable inside this container.
+Use `profile = "postgresql"`; run a supported managed Python locally for the
+SQLite reference backend. The image does not create a database, store a DSN,
+publish a port, or provide a reverse proxy. Supply an operator-owned
+configuration file and secret reference at runtime.
 
 Build a local image:
 

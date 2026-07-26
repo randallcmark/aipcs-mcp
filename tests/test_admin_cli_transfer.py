@@ -50,6 +50,7 @@ def _source_service(root: Path) -> str:
     return str(service.service_id)
 
 
+@pytest.mark.requires_sqlite
 def test_export_dry_run_import_replay_collision_and_tamper(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -168,6 +169,7 @@ def test_export_dry_run_import_replay_collision_and_tamper(
     uow.close()
 
 
+@pytest.mark.requires_sqlite
 def test_import_rejects_symlink_without_echoing_path(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

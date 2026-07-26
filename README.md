@@ -30,6 +30,8 @@ local default. Streamable HTTP is available for a trusted service deployment;
 it binds to loopback by default and is not an authentication or tenancy layer.
 Remote public exposure must sit behind an authenticated TLS gateway. Physical
 backup/restore, hosted tenancy, and semantic or fuzzy search remain deferred.
+Any client that can reach an AIPCS HTTP listener has full read/write access to
+every service for that listener's configured principal.
 
 Copyright 2026 Mark Randall. Licensed under [Apache-2.0](LICENSE).
 
@@ -334,7 +336,8 @@ The current source contract deliberately excludes:
 - semantic, fuzzy, embedding, or cross-service search;
 - third-party storage adapters or mixed-backend runtime composition;
 - physical backup/restore and arbitrary repair;
-- application-managed authentication, hosted tenancy, and multi-host SQLite; and
+- application-managed HTTP authentication or authorisation, hosted tenancy,
+  and multi-host SQLite; and
 - automatic truth resolution, merge, archival, deletion, or schema invention.
 
 Repository tests and examples are synthetic contract fixtures. Do not add

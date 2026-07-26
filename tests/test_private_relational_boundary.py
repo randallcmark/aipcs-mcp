@@ -12,6 +12,7 @@ from pathlib import Path
 from uuid import UUID
 
 import anyio
+import pytest
 from fixtures import entity, valid_manifest
 from stdio_helpers import async_session, call_envelope, sqlite_parameters, successful
 
@@ -134,6 +135,7 @@ def _assert_only_foundation_and_target_objects(database: Path) -> None:
     }
 
 
+@pytest.mark.requires_sqlite
 def test_private_relational_schema_isolated_from_registry_and_public_restart(tmp_path: Path) -> None:
     root = tmp_path / "sqlite-root"
     _secure_parent(root)

@@ -622,6 +622,7 @@ def test_embedded_catalog_client_is_syntactically_valid(verifier) -> None:
     assert "site.getsitepackages()" in program
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_catalog_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -636,6 +637,7 @@ def test_embedded_catalog_client_exercises_the_source_contract(
     assert restarted.value.code == 0
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_domain_schema_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -704,6 +706,7 @@ def test_embedded_lifecycle_client_exercises_the_source_contract(
     assert tuple(tmp_path.iterdir()) == ()
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -758,6 +761,7 @@ def test_embedded_lifecycle_coordinator_client_exercises_the_source_contract(
     assert (root / "registry.sqlite").is_file()
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_portable_lifecycle_client_uses_private_streams_and_restarts(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:
@@ -832,6 +836,7 @@ def test_embedded_uvx_client_is_isolated_and_runs_a_sqlite_workflow(verifier) ->
     assert "postgresql://" not in program
 
 
+@pytest.mark.requires_sqlite
 def test_embedded_registry_r2_client_exercises_the_source_contract(
     monkeypatch, tmp_path: Path, verifier
 ) -> None:

@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 import anyio
+import pytest
 from fixtures import valid_manifest
 from stdio_helpers import async_session, call_envelope, sqlite_parameters, successful
 
@@ -189,6 +190,7 @@ def test_source_stdio_process_disables_checkout_bytecode(tmp_path: Path) -> None
     assert parameters.env["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
+@pytest.mark.requires_sqlite
 def test_sqlite_ready_lifecycle_and_design(tmp_path: Path) -> None:
     root = tmp_path / "aipcs-stdio-root"
     _secure_parent(root)
@@ -352,6 +354,7 @@ def test_sqlite_ready_lifecycle_and_design(tmp_path: Path) -> None:
     anyio.run(exercise)
 
 
+@pytest.mark.requires_sqlite
 def test_restart_replay_and_conflict(tmp_path: Path) -> None:
     root = tmp_path / "aipcs-restart-root"
     _secure_parent(root)
@@ -447,6 +450,7 @@ def test_restart_replay_and_conflict(tmp_path: Path) -> None:
     anyio.run(exercise)
 
 
+@pytest.mark.requires_sqlite
 def test_public_pending_and_recovery_required_projection(tmp_path: Path) -> None:
     root = tmp_path / "aipcs-recovery-root"
     principal = "test-principal-recovery"
@@ -538,6 +542,7 @@ def test_public_pending_and_recovery_required_projection(tmp_path: Path) -> None
     anyio.run(exercise_recovery)
 
 
+@pytest.mark.requires_sqlite
 def test_two_same_key_stdio_processes_resume_one_prepared_materialise_once(tmp_path: Path) -> None:
     root = tmp_path / "aipcs-same-key-root"
     principal = "test-principal-same-key"
@@ -634,6 +639,7 @@ def test_two_same_key_stdio_processes_resume_one_prepared_materialise_once(tmp_p
         assert audits == (1,)
 
 
+@pytest.mark.requires_sqlite
 def test_different_key_stdio_request_is_blocked_before_service_store_work(tmp_path: Path) -> None:
     root = tmp_path / "aipcs-different-key-root"
     principal = "test-principal-different-key"
@@ -695,6 +701,7 @@ def test_different_key_stdio_request_is_blocked_before_service_store_work(tmp_pa
     assert claims == [("prepared-winner", "prepared")]
 
 
+@pytest.mark.requires_sqlite
 def test_second_principal_isolated_and_can_reuse_key(tmp_path: Path) -> None:
     root = tmp_path / "aipcs-principal-root"
     _secure_parent(root)

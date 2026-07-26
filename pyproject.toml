@@ -21,6 +21,7 @@ classifiers = [
 
 dependencies = [
   "mcp>=1.28.1,<2",
+  "packaging>=24",
   "pydantic>=2.11,<3",
   "starlette>=0.45,<2",
   "uvicorn>=0.30,<1",
@@ -53,6 +54,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "requires_sqlite: requires a supported SQLite runtime and filesystem platform",
+]
 
 [tool.ruff]
 line-length = 100

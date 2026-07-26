@@ -13,6 +13,7 @@ name = "aipcs-mcp"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "packaging" },
     { name = "pydantic" },
     { name = "starlette" },
     { name = "uvicorn" },
@@ -32,6 +33,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=1.28.1,<2" },
+    { name = "packaging", specifier = ">=24" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgresql'", specifier = ">=3.2,<4" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "starlette", specifier = ">=0.45,<2" },

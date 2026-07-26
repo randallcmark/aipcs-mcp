@@ -231,6 +231,7 @@ def _config(root: Path, principal: str) -> list[str]:
     ]
 
 
+@pytest.mark.requires_sqlite
 def test_sqlite_cli_purge_override_replay_and_active_refusal(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
