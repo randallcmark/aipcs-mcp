@@ -28,19 +28,19 @@ jobs:
       - run: uv python install ${{ matrix.python-version }}
       - run: uv sync --frozen --group dev --python ${{ matrix.python-version }}
       - run: uv run --python ${{ matrix.python-version }} ruff check .
-      - >-
-        uv run --python ${{ matrix.python-version }} pytest -q
-        tests/application
-        tests/storage_contracts
-        tests/storage_postgresql/test_data_core_codecs.py
-        tests/storage_postgresql/test_domain_schema.py
-        tests/test_contracts.py
-        tests/test_data_requests.py
-        tests/test_data_results.py
-        tests/test_manifest_v2.py
-        tests/test_portable_io.py
-        tests/test_records.py
-        tests/test_relational.py
+      - run: >-
+          uv run --python ${{ matrix.python-version }} pytest -q
+          tests/application
+          tests/storage_contracts
+          tests/storage_postgresql/test_data_core_codecs.py
+          tests/storage_postgresql/test_domain_schema.py
+          tests/test_contracts.py
+          tests/test_data_requests.py
+          tests/test_data_results.py
+          tests/test_manifest_v2.py
+          tests/test_portable_io.py
+          tests/test_records.py
+          tests/test_relational.py
 
   linux-storage:
     name: Linux storage / Python 3.14
