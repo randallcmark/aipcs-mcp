@@ -10,7 +10,7 @@ from aipcs_mcp.contracts import (
     parse_service_evolve,
     parse_service_materialise,
     public_server_info,
-    validate_stdio_only,
+    validate_transport_environment,
 )
 from aipcs_mcp.errors import AipcsContractError, ErrorCode
 
@@ -22,7 +22,7 @@ def test_server_info_is_safe_and_capability_versioned() -> None:
         "package_version": "0.0.0.dev0",
         "aipcs_mcp_contract": "1.2.0",
         "supported_manifest_versions": [2],
-        "transports": ["stdio"],
+        "transports": ["stdio", "streamable-http"],
         "features": {
             "server_info": True,
             "manifest_v2_validation": True,
@@ -145,23 +145,23 @@ def test_validation_error_sanitises_oversized_untrusted_location() -> None:
     ("transport", "environment"),
     [
         ("sse", {}),
-        ("streamable-http", {}),
         (None, {"FASTMCP_PORT": "8000"}),
         (None, {"AIPCS_HOST": "127.0.0.1"}),
         ("stdio", {"AIPCS_MCP_TRANSPORT": "sse"}),
         ("stdio", {"FASTMCP_STREAMABLE_HTTP_PATH": "/mcp"}),
     ],
 )
-def test_listener_configuration_is_rejected_before_server_construction(
+def test_undocumented_listener_configuration_is_rejected_before_server_construction(
     transport: str | None, environment: dict[str, str]
 ) -> None:
     with pytest.raises(AipcsContractError) as raised:
-        validate_stdio_only(transport, environment)
+        validate_transport_environment(transport, environment)
     assert raised.value.code is ErrorCode.TRANSPORT_NOT_SUPPORTED
 
 
-def test_stdio_configuration_is_allowed() -> None:
-    assert validate_stdio_only("stdio", {}) == "stdio"
+@pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
+def test_documented_transport_is_allowed(transport: str) -> None:
+    assert validate_transport_environment(transport, {}) == transport
 
 
 def test_lifecycle_parsers_require_strict_preconditions_and_detach_evolve_manifest() -> None:

@@ -12,7 +12,7 @@ from aipcs_mcp.errors import AipcsContractError, ErrorCode
 def _clear_transport_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AIPCS_TRANSPORT", raising=False)
     monkeypatch.delenv("AIPCS_MCP_TRANSPORT", raising=False)
-    for key in cli.validate_stdio_only.__globals__["LISTENER_ENV_KEYS"]:
+    for key in cli.validate_transport_environment.__globals__["LISTENER_ENV_KEYS"]:
         monkeypatch.delenv(key, raising=False)
 
 
@@ -20,7 +20,10 @@ def test_config_show_returns_redacted_success_without_constructing_server(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _clear_transport_environment(monkeypatch)
-    resolved = object()
+    class Resolved:
+        transport = "stdio"
+
+    resolved = Resolved()
     captured: dict[str, Any] = {}
 
     def resolve(**kwargs: Any) -> object:
@@ -70,7 +73,10 @@ def test_config_validate_requires_runnable_profile_without_constructing_server(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _clear_transport_environment(monkeypatch)
-    resolved = object()
+    class Resolved:
+        transport = "stdio"
+
+    resolved = Resolved()
     calls: list[object] = []
     monkeypatch.setattr(cli, "resolve_configuration", lambda **_: resolved)
     monkeypatch.setattr(cli, "require_runnable", lambda value: calls.append(value))
@@ -141,7 +147,10 @@ def test_serve_resolves_and_requires_runnable_before_server_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_transport_environment(monkeypatch)
-    resolved = object()
+    class Resolved:
+        transport = "stdio"
+
+    resolved = Resolved()
     calls: list[str] = []
     monkeypatch.setattr(cli, "resolve_configuration", lambda **_: resolved)
     monkeypatch.setattr(cli, "require_runnable", lambda value: calls.append("runnable"))

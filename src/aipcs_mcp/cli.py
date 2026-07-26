@@ -1,4 +1,4 @@
-"""Stdio-only command-line entry point for AIPCS MCP."""
+"""Command-line entry point for local and service AIPCS MCP transports."""
 
 from __future__ import annotations
 
@@ -69,9 +69,10 @@ from .configuration.reporting import (
     safe_validation_report,
 )
 from .configuration.resolver import require_runnable, resolve_configuration
-from .contracts import validate_stdio_only
+from .contracts import validate_transport_environment
 from .data_results import project_maintenance
 from .errors import AipcsContractError, ErrorCode, success
+from .http_server import run_streamable_http
 from .mcp_server import run_stdio
 from .records import DataFailure
 from .runtime import compose_admin_runtime, compose_server
@@ -80,7 +81,26 @@ from .runtime import compose_admin_runtime, compose_server
 def _add_configuration_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", help="Explicit TOML configuration file.")
     parser.add_argument("--profile", help="Execution profile override.")
-    parser.add_argument("--transport", help="Public v1 accepts stdio only.")
+    parser.add_argument("--transport", help="MCP transport: stdio or streamable-http.")
+    parser.add_argument("--http-host", help="Streamable HTTP bind address override.")
+    parser.add_argument("--http-port", help="Streamable HTTP bind port override.")
+    parser.add_argument("--http-path", help="Streamable HTTP MCP endpoint path override.")
+    parser.add_argument(
+        "--http-allowed-hosts",
+        help="Comma-separated Streamable HTTP Host header allowlist override.",
+    )
+    parser.add_argument(
+        "--http-allowed-origins",
+        help="Comma-separated Streamable HTTP Origin header allowlist override.",
+    )
+    parser.add_argument(
+        "--http-session-idle-timeout-seconds",
+        help="Streamable HTTP session idle timeout override.",
+    )
+    parser.add_argument(
+        "--http-allow-non-loopback",
+        help="Explicitly permit a non-loopback Streamable HTTP bind address (true or false).",
+    )
     parser.add_argument("--principal-id", help="Principal identity override.")
     parser.add_argument(
         "--sqlite-data-root", help="SQLite data-root override (redacted in output)."
@@ -222,6 +242,13 @@ def _overrides_from_args(args: argparse.Namespace) -> ConfigOverrides:
     return ConfigOverrides(
         profile=args.profile,
         transport=args.transport,
+        http_host=args.http_host,
+        http_port=args.http_port,
+        http_path=args.http_path,
+        http_allowed_hosts=args.http_allowed_hosts,
+        http_allowed_origins=args.http_allowed_origins,
+        http_session_idle_timeout_seconds=args.http_session_idle_timeout_seconds,
+        http_allow_non_loopback=args.http_allow_non_loopback,
         principal_id=args.principal_id,
         sqlite_data_root=args.sqlite_data_root,
         sqlite_busy_timeout_ms=args.sqlite_busy_timeout_ms,
@@ -259,9 +286,9 @@ def _write_success(result: dict[str, object], output_format: str = "json") -> No
 
 
 def _preflight(args: argparse.Namespace, environ: Mapping[str, str]) -> None:
-    """Reject listeners before configuration work or server construction."""
+    """Reject unsupported ambient listener settings before configuration work."""
 
-    validate_stdio_only(args.transport, environ=environ)
+    validate_transport_environment(args.transport, environ=environ)
 
 
 def _run_config_show(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
@@ -298,7 +325,10 @@ def _run_serve(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     _configure_stderr_logging(resolved)
     try:
         server = compose_server(resolved)
-        anyio.run(run_stdio, server)
+        if resolved.transport == "stdio":
+            anyio.run(run_stdio, server)
+        else:
+            anyio.run(run_streamable_http, server, resolved)
     except Exception:
         _write_contract_error(
             AipcsContractError(ErrorCode.INTERNAL_ERROR, "Server could not be started safely.")

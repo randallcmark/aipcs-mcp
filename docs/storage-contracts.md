@@ -365,9 +365,10 @@ streams.
 
 ## Deferred adapter work
 
-PostgreSQL is a supported generic public-v1 stdio reference adapter when the
+PostgreSQL is a supported generic public-v1 reference adapter when the
 package is installed with its `[postgresql]` extra. Third-party adapters,
 mixed-backend runtime composition, physical backup/restore, arbitrary repair,
-remote administration, and cross-store transactions remain deferred. Those
+remote administration, application-managed authentication, and cross-store
+transactions remain deferred. Those
 features require explicit contracts and validation rather than exposure of
 either reference adapter's private modules.

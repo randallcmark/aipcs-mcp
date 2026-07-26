@@ -209,7 +209,9 @@ class ServerInfo(PublicModel):
     package_version: str = PACKAGE_VERSION
     aipcs_mcp_contract: str = CONTRACT_VERSION
     supported_manifest_versions: list[Literal[2]] = Field(default_factory=lambda: [2])
-    transports: list[Literal["stdio"]] = Field(default_factory=lambda: ["stdio"])
+    transports: list[Literal["stdio", "streamable-http"]] = Field(
+        default_factory=lambda: ["stdio", "streamable-http"]
+    )
     features: ServerFeatures = Field(default_factory=ServerFeatures)
     operational_statuses: list[Literal["active"]] = Field(default_factory=lambda: ["active"])
 
@@ -395,23 +397,26 @@ def _require_canonical_service_id(value: object) -> None:
         )
 
 
-def validate_stdio_only(
+def validate_transport_environment(
     transport: str | None = None, environ: Mapping[str, str] | None = None
-) -> Literal["stdio"]:
-    """Reject all listener-oriented configuration before MCP server construction."""
+) -> Literal["stdio", "streamable-http"] | None:
+    """Reject undocumented listener settings before configuration resolution.
+
+    The AIPCS configuration resolver owns the supported transport and listener
+    settings.  Ambient FastMCP and retired AIPCS listener variables must never
+    silently alter a process launched by an editor, container, or service manager.
+    """
 
     environment = os.environ if environ is None else environ
-    invalid_cli_transport = transport not in {None, "stdio"}
-    invalid_environment_transport = any(
-        environment.get(key) not in {None, "", "stdio"} for key in TRANSPORT_ENV_KEYS
-    )
+    invalid_cli_transport = transport not in {None, "stdio", "streamable-http"}
+    retired_transport_configured = environment.get("AIPCS_MCP_TRANSPORT") not in {None, ""}
     listener_configured = any(environment.get(key) for key in LISTENER_ENV_KEYS)
-    if invalid_cli_transport or invalid_environment_transport or listener_configured:
+    if invalid_cli_transport or retired_transport_configured or listener_configured:
         raise AipcsContractError(
             ErrorCode.TRANSPORT_NOT_SUPPORTED,
-            "Public v1 supports stdio only; listener transports and listener settings are disabled.",
+            "Use documented AIPCS transport configuration; legacy listener settings are disabled.",
         )
-    return "stdio"
+    return transport  # type: ignore[return-value]
 
 
 def _reject_retired_fields(value: object) -> None:

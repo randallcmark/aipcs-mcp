@@ -45,6 +45,27 @@ indistinguishable from absence or stale state as appropriate; counts, facets,
 branches, samples, maintenance, replay keys, and cursors are all
 principal-scoped.
 
+## Streamable HTTP boundary
+
+Streamable HTTP serves the same finite MCP tool catalogue as stdio. It does
+not derive an AIPCS principal from an HTTP client, authenticate a user, or
+provide tenant isolation. Opaque MCP transport session IDs are managed by the
+SDK solely to correlate requests; they are not authorization credentials.
+
+The endpoint binds to `127.0.0.1` by default. It enables the SDK's DNS
+rebinding protection, requires a configured Host header match, accepts an
+absent Origin for non-browser MCP clients, and rejects every presented Origin
+unless it exactly matches the configured allowlist. Idle sessions are bounded
+and proxy-supplied forwarding headers are not trusted.
+
+An operator may explicitly permit a non-loopback IP bind only with an explicit
+Host policy. That setting acknowledges a trusted-network or reverse-proxy
+topology; it does not make the process safe for untrusted clients. Terminate
+TLS and enforce authentication, authorization, rate limits, and any tenant
+mapping at a trusted gateway before traffic reaches AIPCS. Never expose an
+unauthenticated persistent-principal endpoint directly to an untrusted LAN or
+the Internet.
+
 ## Replay and concurrency boundaries
 
 Seed/design and materialise/evolve mutations use the registry's global
@@ -222,7 +243,8 @@ or private maintainer-specific operating instructions to the public repository.
 Vendor-neutral agent-integration examples must remain explicitly scoped under
 `examples/`.
 
-PostgreSQL is a supported generic public-v1 stdio reference backend when the
-package is installed with its `[postgresql]` extra. Remote MCP,
-authentication, hosted tenancy, physical backup/restore, and arbitrary repair
-remain deferred and must define their own trust boundaries before release.
+PostgreSQL is a supported generic public-v1 reference backend when the package
+is installed with its `[postgresql]` extra. Streamable HTTP supports a trusted
+service deployment, while application-managed authentication, hosted tenancy,
+physical backup/restore, and arbitrary repair remain deferred and must define
+their own trust boundaries before release.

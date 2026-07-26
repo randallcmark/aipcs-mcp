@@ -24,6 +24,16 @@ def safe_config_report(config: ResolvedConfiguration) -> dict[str, object]:
             "postgresql_lock_timeout_ms": config.postgres_lock_timeout_ms,
             "postgresql_statement_timeout_ms": config.postgres_statement_timeout_ms,
         },
+        "streamable_http": {
+            "configured": config.transport == "streamable-http",
+            "host_configured": config.sources["http_host"] != "default",
+            "port_configured": config.sources["http_port"] != "default",
+            "path_configured": config.sources["http_path"] != "default",
+            "host_policy_configured": config.sources["http_allowed_hosts"] != "default",
+            "origin_policy_configured": config.sources["http_allowed_origins"] != "default",
+            "session_idle_timeout_seconds": config.http_session_idle_timeout_seconds,
+            "non_loopback_explicitly_allowed": config.http_allow_non_loopback,
+        },
         "sources": dict(config.sources),
     }
 

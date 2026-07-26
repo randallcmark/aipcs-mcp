@@ -22,7 +22,7 @@ def to_contract_error(error: Exception) -> AipcsContractError:
         if error.code == ErrorCode.TRANSPORT_NOT_SUPPORTED:
             return AipcsContractError(
                 error.code,
-                "Public v1 supports stdio only; listener transports and listener settings are disabled.",
+                "The selected transport is not supported by the documented configuration.",
             )
         if error.code == ErrorCode.UNSUPPORTED_OPERATION:
             message = "The selected configuration profile is unavailable in this release."

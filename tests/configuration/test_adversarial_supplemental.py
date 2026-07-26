@@ -85,6 +85,13 @@ def test_each_field_proves_environment_over_file_and_file_over_default(tmp_path:
     assert default.sources == {
         "profile": "default",
         "transport": "default",
+        "http_host": "default",
+        "http_port": "default",
+        "http_path": "default",
+        "http_allowed_hosts": "default",
+        "http_allowed_origins": "default",
+        "http_session_idle_timeout_seconds": "default",
+        "http_allow_non_loopback": "default",
         "principal_id": "default",
         "sqlite_data_root": "default",
         "sqlite_busy_timeout_ms": "default",
@@ -348,7 +355,7 @@ def test_cli_uses_one_environment_snapshot_for_preflight_and_resolution(
     for key in (*LISTENER_ENV_KEYS, *TRANSPORT_ENV_KEYS):
         monkeypatch.delenv(key, raising=False)
     seen: list[dict[str, str]] = []
-    original_preflight = cli.validate_stdio_only
+    original_preflight = cli.validate_transport_environment
     original_resolver = cli.resolve_configuration
 
     def preflight(transport=None, environ=None):
@@ -363,7 +370,7 @@ def test_cli_uses_one_environment_snapshot_for_preflight_and_resolution(
             config_path=config_path,
         )
 
-    monkeypatch.setattr(cli, "validate_stdio_only", preflight)
+    monkeypatch.setattr(cli, "validate_transport_environment", preflight)
     monkeypatch.setattr(cli, "resolve_configuration", resolver)
     assert cli.main(["config", "show"]) == 0
     assert len(seen) == 2
