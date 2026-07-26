@@ -20,4 +20,5 @@ jobs:
       - run: uv python install 3.14
       - run: uv sync --frozen --group dev --python 3.14
       - run: uv run --python 3.14 python -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 51, 3), sqlite3.sqlite_version; print(f'SQLite {sqlite3.sqlite_version}')"
-      - run: PYTHONDONTWRITEBYTECODE=1 uv run --python 3.14 python scripts/verify_release.py --exact-tip --postgres-integration --postgres-major 16
+      - run: PYTHONDONTWRITEBYTECODE=1 uv run --python 3.14 python scripts/verify_release.py --exact-tip
+      - run: PYTHONDONTWRITEBYTECODE=1 uv run --python 3.14 python scripts/verify_release.py --postgres-integration --postgres-major 16
