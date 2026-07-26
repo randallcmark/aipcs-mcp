@@ -232,6 +232,7 @@ class _Catalog:
         self.migrate_error: Exception | None = None
         self.migrate_result = MigrationState("service_store", 2, 2, "ready")
         self.migrate_results: list[MigrationState] = []
+        self.migrate_outcomes: list[MigrationState | Exception] = []
         self.locator: ServiceStoreLocator | None = None
 
     def info(self) -> StorageAdapterInfo:
@@ -257,6 +258,11 @@ class _Catalog:
 
     def migrate(self, locator: ServiceStoreLocator) -> MigrationState:
         self._called("migrate")
+        if self.migrate_outcomes:
+            value = self.migrate_outcomes.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
         if self.migrate_error is not None:
             raise self.migrate_error
         if self.migrate_results:
@@ -636,6 +642,8 @@ def test_materialise_foundation_exact_and_uncertain_categories(
     state: MigrationState | Exception, category: LifecycleResultCategory
 ) -> None:
     coordinator, registry, catalog, domain = _coordinator(_service(), [state], [])
+    if type(state) is StorageUnavailable:
+        catalog.migrate_error = StorageUnavailable()
     result = coordinator.execute(MaterialiseCommand("principal", "test", _ID, 2, 1, "key"))
     assert result.category is category
     assert domain.calls == []
@@ -644,7 +652,35 @@ def test_materialise_foundation_exact_and_uncertain_categories(
     else:
         assert registry.intent is not None and registry.intent.phase is LifecyclePhase.PREPARED
     if type(state) is StorageUnavailable:
-        assert catalog.calls == ["info", "allocate", "inspect_migration"]
+        assert catalog.calls == ["info", "allocate", "inspect_migration", "migrate"]
+
+
+def test_unavailable_foundation_reconciles_a_cooperating_same_key_migration() -> None:
+    coordinator, registry, catalog, domain = _coordinator(
+        _service(),
+        [StorageUnavailable(), MigrationState("service_store", 3, 3, "ready")],
+        [
+            DomainSchemaState("unmaterialised"),
+            DomainSchemaState("ready"),
+        ],
+    )
+    catalog.migrate_result = MigrationState("service_store", 3, 3, "ready")
+
+    result = coordinator.execute(
+        MaterialiseCommand("principal", "test", _ID, 2, 1, "same-key")
+    )
+
+    assert result.category == "completed"
+    assert catalog.calls == [
+        "info",
+        "allocate",
+        "inspect_migration",
+        "migrate",
+        "inspect_migration",
+    ]
+    assert domain.calls == ["inspect", "materialise", "inspect"]
+    assert registry.intent is not None
+    assert registry.intent.phase is LifecyclePhase.COMPLETED
 
 
 def test_transient_unavailable_foundation_reconciles_through_migration_boundary() -> None:
@@ -1004,6 +1040,10 @@ def test_successful_foundation_action_then_unavailable_reinspection_is_uncertain
         ],
         [],
     )
+    catalog.migrate_outcomes = [
+        MigrationState("service_store", 3, 3, "ready"),
+        StorageUnavailable(),
+    ]
 
     result = coordinator.execute(
         MaterialiseCommand("principal", "test", _ID, 2, 1, "key")
@@ -1016,6 +1056,7 @@ def test_successful_foundation_action_then_unavailable_reinspection_is_uncertain
         "inspect_migration",
         "migrate",
         "inspect_migration",
+        "migrate",
     ]
     assert domain.calls == []
     assert state.intent is not None and state.intent.phase is LifecyclePhase.PREPARED

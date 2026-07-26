@@ -366,7 +366,22 @@ class LifecycleCoordinator:
                     return FoundationObservation.UNCERTAIN
                 state = refreshed
         except StorageUnavailable:
-            return FoundationObservation.UNAVAILABLE
+            # A read-side service-store acquisition can reject a transient
+            # WAL-sidecar observation while a cooperating same-key process is
+            # crossing its migration boundary. Reconcile once through the
+            # writer boundary: it either observes the peer's completed state,
+            # reports ordinary contention, or repeats the unavailable result
+            # without weakening the static location/security policy.
+            try:
+                state = self._catalog.migrate(locator)
+            except StorageBusy:
+                return FoundationObservation.BUSY
+            except StorageUnavailable:
+                return FoundationObservation.UNAVAILABLE
+            except StorageMigrationError:
+                return FoundationObservation.UNCERTAIN
+            except Exception:
+                return _result(LifecycleResultCategory.INTERNAL_FAILURE)
         except StorageMigrationError:
             return FoundationObservation.UNCERTAIN
         except Exception:
