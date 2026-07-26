@@ -7,8 +7,9 @@ requests, but cannot promise a review, response, or merge time. Maintainers
 may close work that is out of scope or cannot be sustained.
 
 Every pull request must link an issue so that scope, alternatives, and review
-history are visible. A project code of conduct will be published with a
-private reporting route before public contribution intake opens.
+history are visible. Participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md); conduct reports may be sent privately to
+[conduct@indigo-blocks.uk](mailto:conduct@indigo-blocks.uk).
 
 ## Development setup
 

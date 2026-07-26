@@ -1,7 +1,7 @@
 prune tests
 prune .agents
 prune .codex
-include CHANGELOG.md CONTRIBUTING.md LICENSE NOTICE RELEASING.md SECURITY.md TRADEMARKS.md
+include CHANGELOG.md CODE_OF_CONDUCT.md CONTRIBUTING.md LICENSE NOTICE RELEASING.md SECURITY.md TRADEMARKS.md
 recursive-include assets *.svg
 recursive-include docs *.md
 recursive-include examples *.md

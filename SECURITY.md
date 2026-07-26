@@ -19,8 +19,8 @@ best-effort basis by the sole maintainer.
 
 Before public visibility, private vulnerability reporting must be enabled in
 the repository's GitHub security settings. GitHub Private Vulnerability
-Reporting is the canonical reporting channel; no security email address is
-required for the initial release.
+Reporting is the canonical reporting channel. If that route is unavailable,
+reports may be sent to [security@indigo-blocks.uk](mailto:security@indigo-blocks.uk).
 
 ## Disclosure and fixes
 

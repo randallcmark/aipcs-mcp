@@ -79,6 +79,7 @@ the locked development environment described below.
 - [Compatibility](docs/compatibility.md)
 - [Design evolution](docs/design-evolution.md)
 - [Security reporting](SECURITY.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Release policy](RELEASING.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
