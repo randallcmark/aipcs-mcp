@@ -69,8 +69,8 @@ Retrieval modes have operational meaning:
 - a string with `retrieval_mode: "annotation"` is stored and returned but is
   not filterable.
 
-Search accepts at most 16 declared domain filters. There is no inferred,
-substring, fuzzy, semantic, or cross-service filter mode.
+Search accepts at most 16 declared domain filters and only the filter modes
+declared above.
 
 ## Initial design and evolution
 

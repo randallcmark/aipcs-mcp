@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "aipcs-mcp"
+name = "aipcs"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

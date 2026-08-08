@@ -29,7 +29,7 @@ async def _stdio_smoke() -> None:
         ClientSession(read_stream, write_stream) as session,
     ):
         initialized = await session.initialize()
-        assert initialized.serverInfo.name == "aipcs-mcp"
+        assert initialized.serverInfo.name == "aipcs"
 
         tools = await session.list_tools()
         assert [tool.name for tool in tools.tools] == ["aipcs_server_info"]

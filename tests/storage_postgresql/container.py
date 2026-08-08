@@ -25,10 +25,11 @@ ACTIVATION_ENV = "AIPCS_POSTGRES_TESTS"
 IMAGE_ENV = "AIPCS_POSTGRES_TEST_IMAGE"
 MAJOR_ENV = "AIPCS_POSTGRES_TEST_MAJOR"
 _ACTIVATION_VALUE = "container"
-_SUPPORTED_MAJORS = frozenset({"16", "18"})
+_SUPPORTED_MAJORS = frozenset({"16", "17", "18"})
 PINNED_POSTGRES_IMAGES = MappingProxyType(
     {
         "16": "postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
+        "17": "postgres@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317",
         "18": "postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
     }
 )

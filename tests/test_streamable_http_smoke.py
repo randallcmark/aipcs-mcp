@@ -68,7 +68,7 @@ async def _streamable_http_smoke() -> None:
             ClientSession(read_stream, write_stream) as session,
         ):
             initialized = await session.initialize()
-            assert initialized.serverInfo.name == "aipcs-mcp"
+            assert initialized.serverInfo.name == "aipcs"
             result = await session.call_tool("aipcs_server_info", {})
             assert result.isError is not True
             assert result.structuredContent == {

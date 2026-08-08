@@ -563,7 +563,7 @@ def test_semantically_unknown_service_field_is_rejected_before_registry_access()
                 1,
                 "aipcs-json-c14n-1",
                 "aipcs-bundle-limits-1",
-                "aipcs-mcp",
+                "aipcs",
                 "0.0.0",
                 "1.2.0",
                 "2026-07-24T12:00:00.000000Z",

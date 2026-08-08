@@ -55,7 +55,7 @@ def test_incomplete_or_absent_opt_in_returns_no_settings() -> None:
     ) is None
 
 
-@pytest.mark.parametrize("major", ["16", "18"])
+@pytest.mark.parametrize("major", ["16", "17", "18"])
 def test_settings_accept_the_exact_image_for_each_supported_matrix_major(major: str) -> None:
     settings = PostgresContainerSettings(PINNED_POSTGRES_IMAGES[major], major)
 

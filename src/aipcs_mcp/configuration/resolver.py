@@ -491,14 +491,14 @@ def _default_sqlite_root(environ: Mapping[str, str]) -> Path:
     """Select a pure, redacted platform default; never touch the filesystem."""
 
     if sys.platform == "darwin":
-        return _platform_root(environ.get("HOME")) / "Library" / "Application Support" / "aipcs-mcp"
+        return _platform_root(environ.get("HOME")) / "Library" / "Application Support" / "aipcs"
     if sys.platform == "win32":
         value = environ.get("LOCALAPPDATA")
-        return _platform_root(value) / "aipcs-mcp"
+        return _platform_root(value) / "aipcs"
     xdg = environ.get("XDG_DATA_HOME")
     if xdg is not None:
-        return _platform_root(xdg) / "aipcs-mcp"
-    return _platform_root(environ.get("HOME")) / ".local" / "share" / "aipcs-mcp"
+        return _platform_root(xdg) / "aipcs"
+    return _platform_root(environ.get("HOME")) / ".local" / "share" / "aipcs"
 
 
 def _platform_root(value: object) -> Path:

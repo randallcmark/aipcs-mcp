@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-`aipcs-mcp` is pre-1.0. Security fixes, when made, target the latest public
+`aipcs` is pre-1.0. Security fixes, when made, target the latest public
 release only. There are no maintained backport branches or service-level
 agreement.
 

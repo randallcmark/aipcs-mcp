@@ -43,7 +43,7 @@ long-lived PyPI token to repository secrets. Publish only artefacts built and
 attested by GitHub Actions, then test the normal package-name invocation:
 
 ```text
-uvx --from aipcs-mcp aipcs --help
+uvx --from aipcs aipcs --help
 ```
 
 ## Maintenance

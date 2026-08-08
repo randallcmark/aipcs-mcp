@@ -1,6 +1,6 @@
 """SYNTHETIC_FIXTURE. Managed PostgreSQL concurrency and uncertainty proof.
 
-Every database is the project-owned disposable PostgreSQL 16 fixture. Tests
+Every database is the project-owned disposable pinned PostgreSQL fixture. Tests
 use independent real connections and bounded synchronization; no ambient
 server, external DSN, privileged role, or persistent container is accepted.
 """
@@ -46,7 +46,7 @@ from aipcs_mcp.storage.postgresql.data_core import qualified
 from aipcs_mcp.storage.postgresql.data_store import PostgreSQLMaterialisedDataStore
 from aipcs_mcp.storage.postgresql.domain_schema import PostgreSQLDomainSchemaStore
 from aipcs_mcp.storage.postgresql.registry import PostgreSQLRegistryAdapter
-from aipcs_mcp.storage.postgresql.registry_migrations import SCHEMA
+from aipcs_mcp.storage.postgresql.registry_migrations import SCHEMA, TARGET_REVISION
 from aipcs_mcp.storage.postgresql.service_store import PostgreSQLServiceStoreCatalog
 
 from .container import PostgresTestTarget
@@ -146,7 +146,7 @@ def test_registry_first_migration_same_key_replay_and_service_cas_converge(
 ) -> None:
     first_registry = _registry(postgres_test_target)
     second_registry = _registry(postgres_test_target)
-    expected = MigrationState("registry", 1, 1, "ready")
+    expected = MigrationState("registry", TARGET_REVISION, TARGET_REVISION, "ready")
     assert _parallel(first_registry.migrate, second_registry.migrate) == [expected, expected]
 
     context = ApplicationContext(_PRINCIPAL, _CREATED_VIA)
@@ -611,7 +611,9 @@ def test_post_commit_connection_loss_reobserves_replay_without_registry_poisonin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _registry(postgres_test_target)
-    assert registry.migrate() == MigrationState("registry", 1, 1, "ready")
+    assert registry.migrate() == MigrationState(
+        "registry", TARGET_REVISION, TARGET_REVISION, "ready"
+    )
     registry_loss = _CommitLossOnceFactory()
     from aipcs_mcp.storage.postgresql import registry as registry_module
 
@@ -630,7 +632,9 @@ def test_post_commit_connection_loss_reobserves_replay_without_registry_poisonin
         SequentialIds(UUID(int=11)),
     ).seed(context, seed)
     assert registry_replay.service_id == UUID(int=10)
-    assert registry.inspect_migration() == MigrationState("registry", 1, 1, "ready")
+    assert registry.inspect_migration() == MigrationState(
+        "registry", TARGET_REVISION, TARGET_REVISION, "ready"
+    )
     registry_check = registry.open_uow()
     try:
         assert registry_check.count(_PRINCIPAL) == 1

@@ -28,7 +28,7 @@ class LegacyWarning(PublicModel):
 class LegacyImportProvenance(PublicModel):
     source: Literal["legacy_v1"] = "legacy_v1"
     source_manifest_version: Literal[1] = 1
-    importer: Literal["aipcs-mcp"] = "aipcs-mcp"
+    importer: Literal["aipcs"] = "aipcs"
 
 
 class LegacyImportResult(PublicModel):

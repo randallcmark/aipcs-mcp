@@ -43,8 +43,10 @@ Retrieval is declared and structured:
 
 - scalar fields use exact equality;
 - declared `string_list` membership fields accept one member;
-- annotation fields are returned but not filterable; and
-- there is no fuzzy, semantic, embedding, or cross-service search.
+- annotation fields are returned but not filterable.
+
+The agent chooses the fields and exact retrieval cues it needs; AIPCS keeps
+that retrieval contract explicit rather than selecting relevance on its behalf.
 
 Use `aipcs_bootstrap` to select a service without opening service storage.
 Then use `aipcs_service_summary` to learn the service's actual filters,

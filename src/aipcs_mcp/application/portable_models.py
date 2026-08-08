@@ -11,7 +11,7 @@ from typing import Final, Literal
 EXPORT_FORMAT_VERSION: Final = 1
 CANONICALIZATION_PROFILE: Final = "aipcs-json-c14n-1"
 LIMIT_PROFILE: Final = "aipcs-bundle-limits-1"
-PRODUCER_PACKAGE: Final = "aipcs-mcp"
+PRODUCER_PACKAGE: Final = "aipcs"
 
 MAX_JSON_DEPTH: Final = 64
 MAX_FRAME_BYTES: Final = 1024 * 1024
@@ -125,7 +125,7 @@ class PortableHeader:
     export_format_version: Literal[1]
     canonicalization: Literal["aipcs-json-c14n-1"]
     limit_profile: Literal["aipcs-bundle-limits-1"]
-    producer_package: Literal["aipcs-mcp"]
+    producer_package: Literal["aipcs"]
     producer_package_version: str
     producer_mcp_contract: str
     created_at: str

@@ -231,7 +231,7 @@ def create_server(
     if data_application is not None and (not registry_lifecycle or not materialisation_lifecycle):
         raise ValueError("Incomplete data runtime binding.")
     data_runtime = data_application is not None
-    server = Server("aipcs-mcp", version=__version__)
+    server = Server("aipcs", version=__version__)
     tools = _tools(registry_lifecycle, materialisation_lifecycle, data_runtime)
 
     @server.list_tools()

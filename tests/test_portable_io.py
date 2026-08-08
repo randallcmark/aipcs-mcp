@@ -24,7 +24,7 @@ def _header() -> PortableHeader:
         export_format_version=1,
         canonicalization="aipcs-json-c14n-1",
         limit_profile="aipcs-bundle-limits-1",
-        producer_package="aipcs-mcp",
+        producer_package="aipcs",
         producer_package_version="0.0.0.dev0",
         producer_mcp_contract="1.2.0",
         created_at="2026-07-23T20:00:00.000000Z",

@@ -1,7 +1,7 @@
 # Compatibility and release boundary
 
-`aipcs-mcp` remains pre-release (`0.0.0.dev0`). The first public release is
-planned as `0.1.0`. The source tree implements the public-v1 contract below
+The `aipcs` distribution is preparing its first public release (`0.1.0`). The
+source tree implements the public-v1 contract below
 and its wheel, sdist, and isolated `uvx` invocation are release-verified.
 GitHub visibility and PyPI publication are separately authorised release
 actions.
@@ -21,7 +21,7 @@ operational policy.
 
 | Layer | Identifier | Current source contract |
 | --- | --- | --- |
-| Distribution | `aipcs-mcp` SemVer | Single-sourced pre-release version, wheel/sdist, `aipcs` command, and verified artifact-based isolated `uvx --from SOURCE aipcs …` invocation. The package-name form is intended for later package-index publication. |
+| Distribution | `aipcs` SemVer | Single-sourced version, wheel/sdist, `aipcs` command, and verified artifact-based isolated `uvx --from SOURCE aipcs …` invocation. |
 | MCP capability | `aipcs_mcp_contract` | `1.2.0`; 21-tool SQLite or PostgreSQL surface when the selected persistent profile is ready. |
 | Schema | `manifest_version` | Manifest v2 is normal design input. |
 | Configuration | `config_version` | Strict configuration v1 with documented precedence. |
@@ -62,7 +62,7 @@ PostgreSQL is a supported generic public-v1 reference adapter for major
 versions 16 through 18 when installed with the `[postgresql]` extra. It uses
 `psycopg` 3 and one operator-provisioned database with a fixed registry schema
 and schema-isolated service storage. Release verification passes the full
-contract-parity suites on pinned PostgreSQL 16 and 18 endpoints.
+contract-parity suites on pinned PostgreSQL 16–18 endpoints.
 
 ## Schema and lifecycle compatibility
 
@@ -94,7 +94,7 @@ phase, recovery authority, current manifest, or cross-store transaction.
 Structured search supports exact scalar filters and declared `string_list`
 membership. Annotation fields, undeclared fields, and server-managed fields are
 not filterable. Cursors are opaque and bound to their originating query.
-Semantic/fuzzy search and cursor interpretation are not compatible behaviors.
+Cursor interpretation and undeclared filter modes are not compatible behaviors.
 
 Branches support primary and related record membership, active/archived/
 superseded status, parent topology, and exact branch revisions. Effective
@@ -167,7 +167,7 @@ Transfer receipts describe the exact completed claim and service state at
 issuance. They remain valid historical control evidence after later service
 revisions; they are not current-service projections or portable content.
 Installed wheel/sdist verification covers SQLite and both cross-backend
-directions on pinned PostgreSQL 16 and 18, including tamper-before-write,
+directions on pinned PostgreSQL 16–18, including tamper-before-write,
 redaction, restart replay, purge, physical absence, and exact container
 cleanup.
 
@@ -203,9 +203,8 @@ never compatibility data.
 No compatibility commitment yet exists for:
 
 - third-party adapters or mixed-backend runtime composition;
-- semantic, fuzzy, embedding, or cross-service search;
+- additional retrieval modes;
 - online physical backup/restore or arbitrary repair;
-- package-index publication;
 - application-managed authentication, hosted tenancy, or multi-host deployment; or
 - multi-version support or formal response/fix windows.
 

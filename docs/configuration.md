@@ -136,8 +136,8 @@ For a loopback Streamable HTTP service:
 
 The optional SQLite `data_root` descriptor must be absolute and no longer than
 4,096 characters. When a SQLite profile omits it, resolution selects a redacted
-platform default: `$XDG_DATA_HOME/aipcs-mcp` (or `~/.local/share/aipcs-mcp`) on
-Linux, `~/Library/Application Support/aipcs-mcp` on macOS, and a future
+platform default: `$XDG_DATA_HOME/aipcs` (or `~/.local/share/aipcs`) on
+Linux, `~/Library/Application Support/aipcs` on macOS, and a future
 `LOCALAPPDATA` location on Windows. Resolution never opens or creates this
 path, and reports it as not explicitly configured. SQLite `busy_timeout_ms`
 is an integer from 1 through 30,000 and defaults to 5,000. TOML must provide a

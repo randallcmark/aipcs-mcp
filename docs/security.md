@@ -102,7 +102,7 @@ recognised fields declared by the manifest; it is not a truth judgement.
 Maintenance is advisory and read-only. Its expired, stale, low-confidence,
 superseded, missing-authority, unbranched, duplicate-authority, and
 annotation-size signals are mechanical. Candidate details omit record prose
-and authority-reference values. The server does not rank truth, infer semantic
+and authority-reference values. The server does not rank truth, infer
 duplicates, merge, archive, delete, purge, or rewrite records.
 
 ## SQLite filesystem boundary

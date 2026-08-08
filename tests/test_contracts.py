@@ -19,7 +19,7 @@ from aipcs_mcp.errors import AipcsContractError, ErrorCode
 def test_server_info_is_safe_and_capability_versioned() -> None:
     data = public_server_info().model_dump(mode="json")
     assert data == {
-        "server_name": "aipcs-mcp",
+        "server_name": "aipcs",
         "package_version": __version__,
         "aipcs_mcp_contract": "1.2.0",
         "supported_manifest_versions": [2],

@@ -25,8 +25,8 @@ constraint.
 
 The package is pre-release and is not yet published to a package index. The
 examples show the intended post-publication name. Until publication, replace
-the `aipcs-mcp` value after `--from` with a wheel, source archive, or Git URL
-supplied by the project. Do the same for `aipcs-mcp[postgresql]`, retaining the
+the `aipcs` value after `--from` with a wheel, source archive, or Git URL
+supplied by the project. Do the same for `aipcs[postgresql]`, retaining the
 `postgresql` extra on the selected source form where the installer supports it.
 
 ## Configure the MCP process
@@ -39,7 +39,7 @@ every launch that should see the same memory.
   "command": "uvx",
   "args": ["--python", "3.14",
     "--from",
-    "aipcs-mcp",
+    "aipcs",
     "aipcs",
     "serve",
     "--profile",

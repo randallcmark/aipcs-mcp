@@ -25,7 +25,7 @@ def reasons(path: str, data: bytes = b"safe", *, symlink: bool = False) -> list[
 
 def test_package_metadata_and_normal_tree() -> None:
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    assert metadata["project"]["name"] == "aipcs-mcp"
+    assert metadata["project"]["name"] == "aipcs"
     assert metadata["project"]["dynamic"] == ["version"]
     assert metadata["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "aipcs_mcp.__version__"
