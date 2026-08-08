@@ -20,5 +20,14 @@ jobs:
       - run: uv python install 3.14
       - run: uv sync --frozen --group dev --python 3.14 --no-install-project
       - run: uv run --no-sync --python 3.14 python -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 51, 3), sqlite3.sqlite_version; print(f'SQLite {sqlite3.sqlite_version}')"
+      - name: Prime isolated wheel-install cache
+        shell: bash
+        run: |
+          warmup_dir="$(mktemp -d)"
+          mkdir -p "$warmup_dir/source" "$warmup_dir/dist"
+          git archive --format=tar HEAD | tar -x -C "$warmup_dir/source"
+          uv build --wheel --out-dir "$warmup_dir/dist" "$warmup_dir/source"
+          uv venv --python 3.14 "$warmup_dir/venv"
+          uv pip install --python "$warmup_dir/venv/bin/python" "$warmup_dir"/dist/*.whl
       - run: PYTHONDONTWRITEBYTECODE=1 uv run --no-sync --python 3.14 python scripts/verify_release.py --exact-tip
       - run: PYTHONDONTWRITEBYTECODE=1 uv run --no-sync --python 3.14 python scripts/verify_release.py --postgres-integration --postgres-major 16
