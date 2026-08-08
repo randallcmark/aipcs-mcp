@@ -49,7 +49,9 @@ def _is_editor_residue(name: str) -> bool:
 
 
 def hygiene_path(relative: PurePosixPath) -> PurePosixPath:
-    if len(relative.parts) > 1 and relative.parts[0].casefold().startswith("aipcs_mcp-"):
+    if len(relative.parts) > 1 and relative.parts[0].casefold().startswith(
+        ("aipcs-", "aipcs_mcp-")
+    ):
         return PurePosixPath(*relative.parts[1:])
     return relative
 
