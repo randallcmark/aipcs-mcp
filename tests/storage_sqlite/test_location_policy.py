@@ -39,8 +39,8 @@ def _resolved_policy(monkeypatch, platform: str, root_env: dict[str, str]):
 @pytest.mark.parametrize(
     ("platform", "suffix"),
     [
-        ("linux", (".local", "share", "aipcs-mcp")),
-        ("darwin", ("Library", "Application Support", "aipcs-mcp")),
+        ("linux", (".local", "share", "aipcs")),
+        ("darwin", ("Library", "Application Support", "aipcs")),
     ],
 )
 def test_central_default_fallback_chain_is_created_only_by_migrate(
@@ -64,12 +64,12 @@ def test_xdg_default_owns_only_the_application_leaf(tmp_path: Path, monkeypatch)
     config, policy = _resolved_policy(
         monkeypatch, "linux", {"HOME": str(tmp_path), "XDG_DATA_HOME": str(base)}
     )
-    assert config.sqlite_data_root == base / "aipcs-mcp"
+    assert config.sqlite_data_root == base / "aipcs"
     adapter = SQLiteRegistryAdapter(policy)
     assert adapter.inspect_migration().status == "uninitialised"
     assert list(base.iterdir()) == []
     assert adapter.migrate().status == "ready"
-    assert {entry.name for entry in base.iterdir()} == {"aipcs-mcp"}
+    assert {entry.name for entry in base.iterdir()} == {"aipcs"}
 
 
 def test_explicit_resolved_root_requires_only_its_immediate_parent(
@@ -110,7 +110,7 @@ def test_windows_default_is_resolved_but_posix_adapter_is_unavailable(
         environ={"LOCALAPPDATA": str(tmp_path / "local")},
         config_path=None,
     )
-    assert config.sqlite_data_root == tmp_path / "local" / "aipcs-mcp"
+    assert config.sqlite_data_root == tmp_path / "local" / "aipcs"
     monkeypatch.setattr(location_module.os, "name", "nt")
     with pytest.raises(StorageUnavailable):
         SQLiteLocationPolicy.from_resolved(
@@ -182,7 +182,7 @@ def test_service_catalog_rejects_broad_default_root_for_inspection_and_migration
 ) -> None:
     monkeypatch.setattr(location_module.sys, "platform", "linux")
     home = tmp_path / "home"
-    root = home / ".local" / "share" / "aipcs-mcp"
+    root = home / ".local" / "share" / "aipcs"
     root.mkdir(mode=0o755, parents=True)
     root.chmod(0o755)
     policy = SQLiteLocationPolicy.from_resolved(root, "default")

@@ -383,15 +383,15 @@ def _layout(root: Path, mode: str) -> tuple[Path, tuple[str, ...]]:
     if mode == "explicit":
         return root.parent, (root.name,)
     if sys.platform == "darwin":
-        suffix = ("Library", "Application Support", "aipcs-mcp")
+        suffix = ("Library", "Application Support", "aipcs")
         if tuple(root.parts[-3:]) != suffix:
             raise StorageUnavailable()
         return root.parents[2], suffix
     if sys.platform.startswith("linux"):
-        fallback = (".local", "share", "aipcs-mcp")
+        fallback = (".local", "share", "aipcs")
         if tuple(root.parts[-3:]) == fallback:
             return root.parents[2], fallback
-        if root.name != "aipcs-mcp":
+        if root.name != "aipcs":
             raise StorageUnavailable()
         return root.parent, (root.name,)
     raise StorageUnavailable()

@@ -1,14 +1,14 @@
-# AIPCS MCP
+# AIPCS
 
 <p align="center">
-  <img src="assets/aipcs-mark.svg" width="112" alt="AIPCS MCP logo">
+  <img src="assets/aipcs-mark.svg" width="112" alt="AIPCS logo">
 </p>
 
-`aipcs-mcp` is a pre-release, local-first memory primitive server for AI
+**AIPCS** is a self-operated, local-first memory primitive server for AI
 agents. An agent defines a relational memory schema; the server supplies a
 stable generic MCP surface for service lifecycle, records, discovery, branches,
-and advisory maintenance. It does not generate a new tool or web service for
-each schema.
+and advisory maintenance. The agent retains ownership of its memory architecture
+as its knowledge grows.
 
 The current source runtime supports:
 
@@ -29,7 +29,7 @@ generic public-v1 reference backend when the package is installed with its
 local default. Streamable HTTP is available for a trusted service deployment;
 it binds to loopback by default and is not an authentication or tenancy layer.
 Remote public exposure must sit behind an authenticated TLS gateway. Physical
-backup/restore, hosted tenancy, and semantic or fuzzy search remain deferred.
+backup/restore and hosted tenancy are future work.
 Any client that can reach an AIPCS HTTP listener has full read/write access to
 every service for that listener's configured principal.
 
@@ -41,18 +41,18 @@ After package-index publication, run the packaged command in an isolated
 environment:
 
 ```text
-uvx --from aipcs-mcp aipcs --help
+uvx --from aipcs aipcs --help
 ```
 
 The current pre-release is not package-index published. Until publication,
-replace `aipcs-mcp` after `--from` with a supplied wheel, source archive, or
+replace `aipcs` after `--from` with a supplied wheel, source archive, or
 Git URL. The release gate verifies those artifact forms without falling back
 to the checkout.
 
 The PostgreSQL adapter is an explicit optional dependency:
 
 ```text
-uvx --from 'aipcs-mcp[postgresql]' aipcs config validate \
+uvx --from 'aipcs[postgresql]' aipcs config validate \
   --profile postgresql \
   --principal-id local-agent \
   --postgres-dsn-env AIPCS_POSTGRES_DSN
@@ -208,7 +208,8 @@ Search is structured:
 - annotation fields are not filterable; and
 - undeclared, server-managed, malformed, or unsupported filters fail closed.
 
-There is no substring, fuzzy, semantic, embedding, or cross-service search.
+Search is deliberately limited to the structure declared by the manifest. This
+keeps retrieval explicit, predictable, and owned by the agent's domain model.
 List, search, branch list, and history use query-bound opaque cursors. Clients
 must return the cursor unchanged with the same query rather than parsing or
 reusing it for another query.
@@ -317,23 +318,24 @@ cleanup mode.
 
 Wheel and sdist release verification exercises this boundary from
 outside the checkout with private streams on SQLite and both
-SQLite↔PostgreSQL directions for pinned PostgreSQL 16 and 18.
+SQLite↔PostgreSQL directions for pinned PostgreSQL 16–18.
 
 ## Agent-use examples
 
 The [agent integration guide](docs/agent-integration.md) contains
 vendor-adaptable stdio configuration and public-tool workflows for bootstrap,
 retrieval, persistence, schema evolution, maintenance, and pre-compaction
-persistence. A copyable, deliberately non-operative
-[AGENTS.md example](examples/agent-instructions/AGENTS.md) is kept under
-`examples/`; it is not a maintainer instruction file for this repository.
+persistence. The copyable [AGENTS.md example](examples/agent-instructions/AGENTS.md)
+is deliberately short; an optional [seeded guide service](examples/agent-instructions/seeded-guide-service.md)
+keeps deeper operating help discoverable without adding it to every bootstrap
+response.
 
 ## Current exclusions
 
 The current source contract deliberately excludes:
 
 - generated schema-specific tools and per-domain services;
-- semantic, fuzzy, embedding, or cross-service search;
+- additional retrieval modes beyond declared exact filters;
 - third-party storage adapters or mixed-backend runtime composition;
 - physical backup/restore and arbitrary repair;
 - application-managed HTTP authentication or authorisation, hosted tenancy,

@@ -1,6 +1,6 @@
 # Relational implementation boundary
 
-`aipcs-mcp` packages SQLite and PostgreSQL adapters behind internal catalog,
+AIPCS packages SQLite and PostgreSQL adapters behind internal catalog,
 domain-schema, data, discovery, topology, registry, and portable-store ports.
 These concrete classes are not public APIs, plugin interfaces, MCP
 capabilities, configuration extensions, or repair tools.

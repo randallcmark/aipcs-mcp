@@ -56,6 +56,5 @@ a supported generic public-v1 reference backend when installed with its
 `[postgresql]` extra. A bounded administration CLI exposes backend-neutral
 operational lifecycle and portable data seams. Streamable HTTP enables trusted
 service deployment, but hosted identity, application-managed authentication,
-semantic search, package-index publication, and maintenance/deprecation policy
-remain separate future work. Their absence is deliberate and is not filled by
-examples or research artifacts.
+and maintenance/deprecation policy remain separate future work. Their absence
+is deliberate and is not filled by examples or research artifacts.

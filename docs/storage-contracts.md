@@ -275,7 +275,7 @@ not portable artifacts.
 
 The supported compatibility policy is PostgreSQL major versions 16 through 18.
 Release verification passes the full contract-parity suites on pinned
-PostgreSQL 16 and 18 endpoints. `psycopg` 3 is an optional PostgreSQL
+PostgreSQL 16–18 endpoints. `psycopg` 3 is an optional PostgreSQL
 dependency. The adapter has no general driver or adapter retry loop. For a
 data mutation with commit uncertainty only, it may make one evidence-led
 re-observation and safe retry using the same idempotency key, matching SQLite;

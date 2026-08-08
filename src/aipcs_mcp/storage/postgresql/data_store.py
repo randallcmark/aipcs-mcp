@@ -72,7 +72,7 @@ from .data_core import (
     quote,
 )
 from .domain_schema import PostgreSQLDomainSchemaStore
-from .service_store import PostgreSQLServiceStoreCatalog, _acquire_advisory_lock
+from .service_store import PostgreSQLServiceStoreCatalog
 from .service_store import _inspect as inspect_service_foundation
 from .service_store_migrations import HISTORY, MUTATION
 from .topology import (
@@ -883,7 +883,6 @@ class PostgreSQLMaterialisedDataStore:
             self._ready(locator, specification)
             connection = self._connect(locator.namespace)
             _execute(connection, "BEGIN")
-            _acquire_advisory_lock(connection, locator.namespace)
             _require_service_foundation(connection, locator.namespace)
             _require_domain(connection, locator.namespace, specification)
             if not _write_admission_open(connection, locator.namespace):

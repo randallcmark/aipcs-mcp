@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aipcs-mcp"
+name = "aipcs"
 dynamic = ["version"]
 description = "Contract-first MCP server for agent-defined persistent context services."
 readme = "README.md"

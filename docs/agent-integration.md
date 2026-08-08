@@ -4,7 +4,7 @@ This guide is vendor-adaptable. Translate the command and argument array into
 your MCP client's local stdio configuration format.
 
 The JSON examples use the intended post-publication distribution name. Before
-publication, replace the `aipcs-mcp` argument following `--from` with a
+publication, replace the `aipcs` argument following `--from` with a
 supplied wheel, source archive, or Git URL as described in the
 [quickstart](quickstart.md).
 
@@ -17,7 +17,7 @@ SQLite:
   "command": "uvx",
   "args": [
     "--from",
-    "aipcs-mcp",
+    "aipcs",
     "aipcs",
     "serve",
     "--profile",
@@ -30,7 +30,7 @@ SQLite:
 }
 ```
 
-PostgreSQL uses `aipcs-mcp[postgresql]`, `--profile postgresql`, and
+PostgreSQL uses `aipcs[postgresql]`, `--profile postgresql`, and
 `--postgres-dsn-env NAME`. Put the DSN itself in the process environment, not
 in agent instructions or tool arguments.
 
@@ -47,7 +47,8 @@ session identifier are not client credentials.
 
 ## Recommended agent protocol
 
-1. Call `aipcs_bootstrap` at the beginning of a session.
+1. Call `aipcs_bootstrap` at the beginning of a session. If it shows a
+   guidance service, retrieve only the help needed for the current task.
 2. Select a relevant service, then call `aipcs_service_summary`.
 3. Follow the returned filter modes and retrieval guidance.
 4. Persist durable information when it becomes useful; do not wait for
@@ -87,7 +88,7 @@ equality with one membership value:
 }
 ```
 
-Do not invent fuzzy, semantic, substring, annotation, or cross-service filters.
+Do not invent filters beyond the summary's declared modes.
 
 ## Persistence and replay
 
@@ -151,4 +152,5 @@ Avoid dumping transcripts, hidden prompts, credentials, temporary logs, or
 large working notes into memory. A compact handoff record is more useful than
 an unstructured session archive.
 
-See the copyable [AGENTS.md example](../examples/agent-instructions/AGENTS.md).
+See the copyable [AGENTS.md example](../examples/agent-instructions/AGENTS.md)
+and the optional [seeded guide service](../examples/agent-instructions/seeded-guide-service.md).

@@ -3,8 +3,8 @@
 The `aipcs` command operates one resolved profile per invocation. JSON is the
 stable default output; add `--format human` for interactive reading.
 
-Examples using `uvx --from aipcs-mcp` show the intended post-publication
-package name. Before publication, replace `aipcs-mcp` with a supplied wheel,
+Examples using `uvx --from aipcs` show the intended post-publication package
+name. Before publication, replace `aipcs` with a supplied wheel,
 source archive, or Git URL as described in the [quickstart](quickstart.md).
 
 Every command accepts the same explicit configuration selectors documented in
@@ -30,7 +30,7 @@ aipcs maintenance scan --service SERVICE_ID
 `maintenance scan` never create, migrate, repair, or change storage.
 
 ```text
-uvx --from aipcs-mcp aipcs doctor \
+uvx --from aipcs aipcs doctor \
   --profile sqlite \
   --principal-id my-agent \
   --sqlite-data-root /absolute/private/path/aipcs-data \

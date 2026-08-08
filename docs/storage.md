@@ -4,7 +4,7 @@ AIPCS is local-first. One running process uses one configured backend and one
 fixed principal. `stdio` is the default local transport; Streamable HTTP is a
 supported trusted-service transport.
 
-Examples using the `aipcs-mcp` distribution name are post-publication forms.
+Examples using the `aipcs` distribution name are post-publication forms.
 Before publication, replace the value after `uvx --from` with a supplied wheel,
 source archive, or Git URL as described in the [quickstart](quickstart.md).
 
@@ -18,7 +18,7 @@ serialises writers through SQLite's writer slot.
 Example:
 
 ```text
-uvx --from aipcs-mcp aipcs serve \
+uvx --from aipcs aipcs serve \
   --profile sqlite \
   --principal-id my-agent \
   --sqlite-data-root /absolute/private/path/aipcs-data
@@ -37,7 +37,7 @@ environment variable:
 
 ```text
 export AIPCS_DATABASE_DSN='postgresql://ROLE:PASSWORD@HOST:5432/DATABASE'
-uvx --from 'aipcs-mcp[postgresql]' aipcs serve \
+uvx --from 'aipcs[postgresql]' aipcs serve \
   --profile postgresql \
   --principal-id my-agent \
   --postgres-dsn-env AIPCS_DATABASE_DSN
@@ -90,10 +90,14 @@ SQLite reference backend. The image does not create a database, store a DSN,
 publish a port, or provide a reverse proxy. Supply an operator-owned
 configuration file and secret reference at runtime.
 
+When using CLI options instead of a configuration file, explicitly select the
+DSN reference with `--postgres-dsn-env AIPCS_DATABASE_DSN`; providing that
+environment variable alone does not select it.
+
 Build a local image:
 
 ```text
-docker build --tag aipcs-mcp:local .
+docker build --tag aipcs:local .
 ```
 
 For a service behind a host-local reverse proxy, the container must bind its
@@ -130,7 +134,7 @@ docker run --rm \
   --publish 127.0.0.1:8000:8000 \
   --env AIPCS_DATABASE_DSN \
   --volume /absolute/operator/config.toml:/etc/aipcs/config.toml:ro \
-  aipcs-mcp:local
+  aipcs:local
 ```
 
 An upstream proxy may terminate TLS and authenticate clients before forwarding

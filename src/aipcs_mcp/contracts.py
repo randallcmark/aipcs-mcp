@@ -205,7 +205,7 @@ class ServerFeatures(PublicModel):
 
 
 class ServerInfo(PublicModel):
-    server_name: Literal["aipcs-mcp"] = "aipcs-mcp"
+    server_name: Literal["aipcs"] = "aipcs"
     package_version: str = PACKAGE_VERSION
     aipcs_mcp_contract: str = CONTRACT_VERSION
     supported_manifest_versions: list[Literal[2]] = Field(default_factory=lambda: [2])

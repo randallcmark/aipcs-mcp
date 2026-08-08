@@ -34,7 +34,7 @@ def _header() -> PortableHeader:
         export_format_version=1,
         canonicalization="aipcs-json-c14n-1",
         limit_profile="aipcs-bundle-limits-1",
-        producer_package="aipcs-mcp",
+        producer_package="aipcs",
         producer_package_version="0.0.0.dev0",
         producer_mcp_contract="1.2.0",
         created_at="2026-07-23T20:00:00.000000Z",
@@ -150,10 +150,10 @@ def test_header_frame_has_independent_core_digest_and_exact_shape() -> None:
         {"kind": frame.kind, "ordinal": frame.ordinal, "payload": frame.payload}
     )
     assert frame.sha256 == hashlib.sha256(canonical_json_bytes(core)).hexdigest()
-    assert frame.sha256 == "714f9d01002d256c6ac73cd57bca80b2d3f88c9c30bf7dd9248155973b940faf"
-    assert len(line) == 395
+    assert frame.sha256 == "b656d55a3645d02bd95b5e77f5de804634e754cdcc4e7c25e463de473445d23a"
+    assert len(line) == 391
     assert hashlib.sha256(line).hexdigest() == (
-        "14678e7c175aa634218252c1c790537af95d424654291bcd692e788b24ad0c68"
+        "6eb5b1231f93958d003f7897a669f78bace71e27b2545e8379d5f3b6617ca094"
     )
     assert frame.kind == "header"
     assert frame.ordinal == 0
