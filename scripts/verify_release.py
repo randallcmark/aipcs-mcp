@@ -973,7 +973,7 @@ def require_distribution_contract(artifacts: ArtifactSet) -> None:
             match is not None and match.group("value") != version.group("value")
             for match in source_versions
         )
-        or "Name: aipcs-mcp" not in wheel_metadata
+        or re.search(r"^Name: aipcs$", wheel_metadata, re.MULTILINE) is None
         or "Requires-Python: >=3.12" not in wheel_metadata
         or "aipcs = aipcs_mcp.cli:main" not in wheel_entry_points
         or "Provides-Extra: postgresql" not in wheel_metadata
