@@ -30,4 +30,6 @@ jobs:
           uv venv --python 3.14 "$warmup_dir/venv"
           uv pip install --python "$warmup_dir/venv/bin/python" "$warmup_dir"/dist/*.whl
       - run: PYTHONDONTWRITEBYTECODE=1 uv run --no-sync --python 3.14 python scripts/verify_release.py --exact-tip
+      - name: Pull pinned PostgreSQL 16 fixture
+        run: docker pull postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
       - run: PYTHONDONTWRITEBYTECODE=1 uv run --no-sync --python 3.14 python scripts/verify_release.py --postgres-integration --postgres-major 16
