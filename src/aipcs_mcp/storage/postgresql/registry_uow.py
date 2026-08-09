@@ -634,7 +634,8 @@ class PostgreSQLRegistryUnitOfWork:
         if type(intent) is PortableIntent and intent.kind is PortableOperationKind.IMPORT:
             if intent.destination_backend is not StorageBackend.POSTGRESQL:
                 return RegistryUnsupportedTransition()
-            assert intent.identity is not None
+            if intent.identity is None:
+                raise StorageMigrationError()
             self._lock("identity", "service", str(intent.service_id))
             self._lock("identity", intent.identity.principal_id, intent.identity.domain_name)
             collision = self._import_collision(intent)
@@ -803,7 +804,8 @@ class PostgreSQLRegistryUnitOfWork:
             or not self._purge_receipt_is_valid(prepared)
         ):
             return self._mark_authority_recovery(prepared, at)
-        assert prepared.purge_authority is not None
+        if prepared.purge_authority is None:
+            return self._mark_authority_recovery(prepared, at)
         tombstone = PurgeTombstone(
             service.principal_id, service.service_id, f"svc_{service.service_id.hex}", prepared.created_via,
             at, prepared.purge_authority, prepared.purge_authority.receipt_id,
@@ -978,7 +980,8 @@ class PostgreSQLRegistryUnitOfWork:
         self.append(AuditEvent(event.action, event.outcome, event.service_id, event.principal_id, event.created_via, event.at))
 
     def _import_collision(self, intent: PortableIntent) -> RegistryIdentityCollision | None:
-        assert intent.identity is not None
+        if intent.identity is None:
+            raise StorageMigrationError()
         cursor = self._execute(f'SELECT "identity_state" FROM {_IDENTITY} WHERE "service_id"=%s', (str(intent.service_id),))
         by_service = cursor.fetchone()
         if by_service is not None:

@@ -14,8 +14,8 @@
 | PostgreSQL | Generic reference adapter, majors 16–18 | Database/role provisioning, hosted tenancy |
 | Administration | Read-only inspection, lifecycle, logical export/import, deliberate purge | Raw SQL, arbitrary migration/repair |
 | Portability | Strict logical cross-backend artifact and dry run | Physical database backup, replication, best-effort import |
-| Distribution | Wheel, sdist, `aipcs` entry point, isolated `uvx` verification | Package-index publication and GA version |
-| Support | Pre-release compatibility envelope | Release/support/security-fix/deprecation windows |
+| Distribution | Published PyPI wheel/sdist, `aipcs` entry point, isolated `uvx` verification | GA version |
+| Support | Pre-1.0 compatibility envelope | Release/support/security-fix/deprecation windows |
 
 See [compatibility](compatibility.md), [security](security.md), and
 [design evolution](design-evolution.md) for the normative boundaries.

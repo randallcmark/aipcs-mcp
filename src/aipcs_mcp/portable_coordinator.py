@@ -428,7 +428,8 @@ class PortableCoordinator:
             return _result(PortableResultCategory.INTERNAL_FAILURE)
         intent = admitted.intent
         if content.service.design_state == "materialised":
-            assert content.export_fence is not None
+            if content.export_fence is None:
+                return _result(PortableResultCategory.INTERNAL_FAILURE)
             try:
                 staged = self._store.stage(
                     content.service, content.members, content.export_fence

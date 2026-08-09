@@ -153,7 +153,8 @@ def portable_member_sort_key(member: PortableStoreMember) -> tuple[object, ...]:
         return section, value.entity_name, value.record_id.hex, value.record_version
     if type(value) is BranchValue:
         return section, value.branch_id.hex
-    assert type(value) is BranchMembership
+    if type(value) is not BranchMembership:
+        raise PortableStoreContractError()
     return section, value.branch_id.hex, value.entity_name, value.record_id.hex, value.role
 
 
@@ -197,7 +198,8 @@ def validate_portable_members(
             elif type(value) is BranchValue:
                 branches[value.branch_id] = value
             else:
-                assert type(value) is BranchMembership
+                if type(value) is not BranchMembership:
+                    raise PortableStoreContractError()
                 memberships.append(value)
 
         for identity, events in histories.items():

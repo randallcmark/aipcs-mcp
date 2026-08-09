@@ -1,10 +1,8 @@
 # Compatibility and release boundary
 
-The `aipcs` distribution is preparing its first public release (`0.1.0`). The
-source tree implements the public-v1 contract below
-and its wheel, sdist, and isolated `uvx` invocation are release-verified.
-GitHub visibility and PyPI publication are separately authorised release
-actions.
+The `aipcs` distribution released its first public version (`0.1.0`). The
+source tree implements the public-v1 contract below, and its wheel, sdist, and
+isolated `uvx` invocation are release-verified.
 
 ## Pre-1.0 policy
 

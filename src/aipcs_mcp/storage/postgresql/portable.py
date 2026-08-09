@@ -416,7 +416,8 @@ class _PostgreSQLSnapshotReader:
     def _members(self) -> Iterator[PortableStoreMember]:
         connection = self._connection
         specification = self._specification
-        assert connection is not None
+        if connection is None:
+            raise StorageContractError()
         for entity in specification.entities:  # type: ignore[attr-defined]
             rows = _rows(
                 _execute(
@@ -517,7 +518,8 @@ def _insert_members(connection, namespace, service, specification, members) -> N
         elif type(value) is BranchValue:
             branches.append(value)
         else:
-            assert type(value) is BranchMembership
+            if type(value) is not BranchMembership:
+                raise StorageContractError()
             memberships.append(value)
     for branch in _parent_first(branches):
         _execute(

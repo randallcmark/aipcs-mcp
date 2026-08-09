@@ -51,7 +51,7 @@ contract.
 
 ## Still deferred
 
-The current implementation remains local-first and pre-release. PostgreSQL is
+The current implementation remains local-first. PostgreSQL is
 a supported generic public-v1 reference backend when installed with its
 `[postgresql]` extra. A bounded administration CLI exposes backend-neutral
 operational lifecycle and portable data seams. Streamable HTTP enables trusted

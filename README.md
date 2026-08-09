@@ -37,17 +37,11 @@ Copyright 2026 Mark Randall. Licensed under [Apache-2.0](LICENSE).
 
 ## Installation and isolated invocation
 
-After package-index publication, run the packaged command in an isolated
-environment:
+Run the packaged command in an isolated environment:
 
 ```text
 uvx --from aipcs aipcs --help
 ```
-
-The current pre-release is not package-index published. Until publication,
-replace `aipcs` after `--from` with a supplied wheel, source archive, or
-Git URL. The release gate verifies those artifact forms without falling back
-to the checkout.
 
 The PostgreSQL adapter is an explicit optional dependency:
 

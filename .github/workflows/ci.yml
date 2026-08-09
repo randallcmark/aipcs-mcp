@@ -17,6 +17,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - run: python scripts/check_public_hygiene.py --history
 
   linux:
@@ -28,6 +29,8 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
@@ -56,6 +59,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
@@ -70,6 +75,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
@@ -80,11 +87,22 @@ jobs:
       - run: uv run --python 3.14 pytest -q
 
   docker:
-    name: Docker PostgreSQL service image
+    name: Docker local SQLite image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - run: docker build --tag aipcs-mcp:ci .
+      - name: Validate the custom SQLite runtime
+        run: >-
+          docker run --rm --entrypoint python aipcs-mcp:ci
+          -c "import sqlite3, sys; print(sqlite3.sqlite_version); sys.exit(0 if sqlite3.sqlite_version_info >= (3, 51, 3) else 1)"
+      - name: Smoke the default stdio MCP server
+        run: >-
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'
+          | docker run --rm -i aipcs-mcp:ci
+          | grep -q '"serverInfo":{"name":"aipcs"'
       - run: >-
           docker run --rm --entrypoint aipcs aipcs-mcp:ci
           config validate --profile postgresql --principal-id container-smoke

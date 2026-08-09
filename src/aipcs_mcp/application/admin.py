@@ -136,7 +136,8 @@ class AdminInspectionApplication:
             return AdminStatusResult(
                 self._profile, self._backend, registry, (), (), (), False, overall
             )
-        assert self._data is not None
+        if self._data is None:
+            raise ValueError("Persistent administration composition is incomplete.")
         topology = self._data.bootstrap(context)
         if type(topology) is DataFailure:
             return AdminStatusResult(
@@ -185,7 +186,8 @@ class AdminInspectionApplication:
             return self.registry_status()
         service = self.service_inspect(context, service_id)
         if service.storage is None:
-            assert self._backend is not None
+            if self._backend is None:
+                raise ValueError("Persistent administration composition is incomplete.")
             return SafeMigrationState(
                 "service_store",
                 self._backend,
@@ -199,7 +201,8 @@ class AdminInspectionApplication:
         storage = MaterialisationStorage(
             service.storage.backend, service.storage.namespace
         )
-        assert self._storage is not None and self._backend is not None
+        if self._storage is None or self._backend is None:
+            raise ValueError("Persistent administration composition is incomplete.")
         return _inspect_migration(
             self._backend,
             "service_store",
@@ -291,7 +294,8 @@ class AdminInspectionApplication:
                 storage = MaterialisationStorage(
                     service.storage.backend, service.storage.namespace
                 )
-                assert self._storage is not None
+                if self._storage is None:
+                    raise ValueError("Persistent administration composition is incomplete.")
                 domain_status = self._storage.inspect_domain(storage, service.schema_)
                 status: CheckStatus = "pass" if domain_status == "ready" else "fail"
                 issue = None if status == "pass" else f"domain_schema_{domain_status}"
