@@ -32,6 +32,19 @@ distinct items, pages to 100, branch assignment targets to 100, bootstrap to
 100 services, summary facets to 20 values, summary branches to 100, samples to
 three records per entity, and maintenance to 100 candidates.
 
+## SQL construction boundary
+
+Record values, filter values, cursors, revisions, and pagination values are
+always passed to the SQLite or PostgreSQL driver as bound parameters. AIPCS
+never accepts caller SQL. Relation, column, index, and schema identifiers
+cannot be bound by database drivers; the adapters therefore compose only
+manifest-derived identifiers that have passed the closed
+`^[a-z][a-z0-9_]{0,62}$` validation rule, quote them for the target dialect,
+and use finite server-owned predicate fragments. Hostile identifier input is
+rejected before storage composition. Static analysis that flags this necessary
+identifier composition must be reviewed against those two conditions rather
+than rewritten into unsafe or invalid parameter use.
+
 ## Principal and provenance
 
 The configured SQLite principal is an opaque process-local ownership boundary,

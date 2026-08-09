@@ -69,6 +69,16 @@ def test_manifest_requires_exact_server_managed_declarations() -> None:
         ManifestV2.model_validate(manifest)
 
 
+@pytest.mark.parametrize("identifier", ["project;drop_table", 'project"drop', "project--comment"])
+def test_manifest_rejects_sql_like_identifier_input(identifier: str) -> None:
+    """Manifest identifiers are the sole dynamic SQL identifiers in adapters."""
+
+    manifest = valid_manifest()
+    manifest["entities"][0]["name"] = identifier
+    with pytest.raises(ValidationError):
+        ManifestV2.model_validate(manifest)
+
+
 @pytest.mark.parametrize(
     "relationship",
     [

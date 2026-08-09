@@ -559,8 +559,8 @@ def _run_purge(
                 ErrorCode.INVALID_STATE,
                 "The purge operation was not confirmed.",
             )
-    assert completed.expected_revision is not None
-    assert completed.operation_id is not None
+    if completed.expected_revision is None or completed.operation_id is None:
+        raise AipcsContractError(ErrorCode.INTERNAL_ERROR, "The purge invocation is incomplete.")
     authority = (
         PurgeAuthority(PurgeAuthorityKind.EXPLICIT_OVERRIDE)
         if completed.explicit_override
@@ -623,8 +623,8 @@ def _run_export(runtime: object, invocation: ExportInvocation) -> dict[str, obje
                 ErrorCode.INVALID_STATE,
                 "The export operation was not confirmed.",
             )
-    assert completed.expected_revision is not None
-    assert completed.operation_id is not None
+    if completed.expected_revision is None or completed.operation_id is None:
+        raise AipcsContractError(ErrorCode.INTERNAL_ERROR, "The export invocation is incomplete.")
     command = ExportCommand(
         context.principal_id,
         "cli",
@@ -825,7 +825,8 @@ def _confirm_import(
     backend: StorageBackend,
     operation_id: UUID,
 ) -> bool:
-    assert validated.service is not None and validated.summary is not None
+    if validated.service is None or validated.summary is None:
+        raise AipcsContractError(ErrorCode.INTERNAL_ERROR, "The import validation result is incomplete.")
     return _terminal_confirmation(
         "AIPCS import confirmation\n"
         f"service_id: {validated.service.service_id}\n"
@@ -949,8 +950,8 @@ def _run_lifecycle(runtime: object, invocation: ServiceLifecycleInvocation) -> d
         raise AipcsContractError(code, "The registry is not ready for lifecycle work.")
 
     completed = _complete_lifecycle_invocation(invocation, inspection, context)
-    assert completed.expected_revision is not None
-    assert completed.operation_id is not None
+    if completed.expected_revision is None or completed.operation_id is None:
+        raise AipcsContractError(ErrorCode.INTERNAL_ERROR, "The lifecycle invocation is incomplete.")
     command_type = {
         CliLifecycleAction.SUSPEND: SuspendCommand,
         CliLifecycleAction.RESUME: ResumeCommand,

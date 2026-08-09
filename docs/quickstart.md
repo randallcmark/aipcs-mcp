@@ -23,11 +23,8 @@ Use `--python 3.14` with `uvx` below when your default Python does not meet
 that SQLite requirement. PostgreSQL does not have this SQLite-specific
 constraint.
 
-The package is pre-release and is not yet published to a package index. The
-examples show the intended post-publication name. Until publication, replace
-the `aipcs` value after `--from` with a wheel, source archive, or Git URL
-supplied by the project. Do the same for `aipcs[postgresql]`, retaining the
-`postgresql` extra on the selected source form where the installer supports it.
+The `aipcs` package is published on PyPI. Use the distribution name shown in
+the examples, retaining the `postgresql` extra where required.
 
 ## Configure the MCP process
 

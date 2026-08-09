@@ -316,7 +316,8 @@ class _SQLiteSnapshotReader:
     def _members(self) -> Iterator[PortableStoreMember]:
         connection = self._connection
         specification = self._specification
-        assert connection is not None
+        if connection is None:
+            raise StorageContractError()
         for entity in specification.entities:  # type: ignore[attr-defined]
             rows = connection.execute(
                 f"SELECT * FROM {_quote(entity.name)} WHERE owner_id=? ORDER BY id",
@@ -398,7 +399,8 @@ def _insert_members(connection, service, specification, members) -> None:  # typ
         elif type(value) is BranchValue:
             branches.append(value)
         else:
-            assert type(value) is BranchMembership
+            if type(value) is not BranchMembership:
+                raise StorageContractError()
             memberships.append(value)
     for branch in _parent_first(branches):
         connection.execute(

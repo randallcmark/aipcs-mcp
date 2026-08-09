@@ -3,9 +3,7 @@
 The `aipcs` command operates one resolved profile per invocation. JSON is the
 stable default output; add `--format human` for interactive reading.
 
-Examples using `uvx --from aipcs` show the intended post-publication package
-name. Before publication, replace `aipcs` with a supplied wheel,
-source archive, or Git URL as described in the [quickstart](quickstart.md).
+Examples use the published `aipcs` package through `uvx --from aipcs`.
 
 Every command accepts the same explicit configuration selectors documented in
 [configuration](configuration.md). Examples below use SQLite; substitute a

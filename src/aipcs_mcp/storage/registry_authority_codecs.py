@@ -311,8 +311,12 @@ def _portable_intent_payload(value: PortableIntent) -> dict[str, object]:
         "fingerprint": value.fingerprint,
     }
     if value.kind is PortableOperationKind.IMPORT:
-        assert value.identity is not None and value.bundle_root_sha256 is not None
-        assert value.destination_backend is not None
+        if (
+            value.identity is None
+            or value.bundle_root_sha256 is None
+            or value.destination_backend is None
+        ):
+            raise StorageMigrationError()
         payload.update(
             {
                 "identity": _identity_payload(value.identity),
@@ -323,7 +327,8 @@ def _portable_intent_payload(value: PortableIntent) -> dict[str, object]:
     else:
         payload["expected_service_revision"] = value.expected_service_revision
         if value.kind is PortableOperationKind.PURGE:
-            assert value.purge_authority is not None
+            if value.purge_authority is None:
+                raise StorageMigrationError()
             payload["purge_authority"] = _authority_payload(value.purge_authority)
     return payload
 

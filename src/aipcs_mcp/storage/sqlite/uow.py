@@ -608,7 +608,8 @@ class SQLiteRegistryUnitOfWork:
             if collision is not None:
                 return collision
             self._insert_authority_prepared(intent)
-            assert intent.identity is not None
+            if intent.identity is None:
+                raise StorageMigrationError()
             self._connection.execute(
                 'INSERT INTO "aipcs_registry_identity"('
                 '"service_id","principal_id","identity_state","domain_name",'
@@ -778,7 +779,8 @@ class SQLiteRegistryUnitOfWork:
             or not self._purge_receipt_is_valid(prepared)
         ):
             return self._mark_authority_recovery(prepared, at)
-        assert prepared.purge_authority is not None
+        if prepared.purge_authority is None:
+            return self._mark_authority_recovery(prepared, at)
         tombstone = PurgeTombstone(
             service.principal_id, service.service_id, f"svc_{service.service_id.hex}", prepared.created_via,
             at, prepared.purge_authority, prepared.purge_authority.receipt_id,
@@ -987,7 +989,8 @@ class SQLiteRegistryUnitOfWork:
         )
 
     def _import_collision(self, intent: PortableIntent) -> RegistryIdentityCollision | None:
-        assert intent.identity is not None
+        if intent.identity is None:
+            raise StorageMigrationError()
         by_service = self._connection.execute(
             'SELECT "identity_state" FROM "aipcs_registry_identity" WHERE "service_id"=?',
             (str(intent.service_id),),

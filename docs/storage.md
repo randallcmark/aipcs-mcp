@@ -4,9 +4,7 @@ AIPCS is local-first. One running process uses one configured backend and one
 fixed principal. `stdio` is the default local transport; Streamable HTTP is a
 supported trusted-service transport.
 
-Examples using the `aipcs` distribution name are post-publication forms.
-Before publication, replace the value after `uvx --from` with a supplied wheel,
-source archive, or Git URL as described in the [quickstart](quickstart.md).
+Examples use the published `aipcs` distribution.
 
 ## SQLite
 
@@ -82,23 +80,36 @@ and do not expose the AIPCS port directly to an untrusted LAN or the Internet.
 
 ## Container service example
 
-The supplied `Dockerfile` builds the PostgreSQL reference-service image. Its
-pinned base currently supplies SQLite 3.46.1, below AIPCS's SQLite 3.51.3
-safety floor, so SQLite is intentionally unavailable inside this container.
-Use `profile = "postgresql"`; run a supported managed Python locally for the
-SQLite reference backend. The image does not create a database, store a DSN,
-publish a port, or provide a reverse proxy. Supply an operator-owned
-configuration file and secret reference at runtime.
-
-When using CLI options instead of a configuration file, explicitly select the
-DSN reference with `--postgres-dsn-env AIPCS_DATABASE_DSN`; providing that
-environment variable alone does not select it.
+The supplied `Dockerfile` builds a non-root, local-SQLite-first MCP image. It
+builds CPython against SQLite 3.53.4, above AIPCS's SQLite 3.51.3 safety floor.
+Its default command starts the SQLite profile over stdio for principal `aipcs`;
+the declared Docker volume holds the default private data root.
 
 Build a local image:
 
 ```text
 docker build --tag aipcs:local .
 ```
+
+For the default local stdio server, create a named volume once and attach it
+on every invocation:
+
+```text
+docker volume create aipcs-data
+docker run --rm -i \
+  --mount type=volume,source=aipcs-data,target=/app/.local/share/aipcs \
+  aipcs:local
+```
+
+Do not bind-mount a host directory unless every path component and the data
+root meet AIPCS's private ownership and mode requirements for container UID
+`10001`.
+
+PostgreSQL remains an explicit alternate profile. The image does not create a
+database, store a DSN, publish a port, or provide a reverse proxy. When using
+CLI options, explicitly select the DSN reference with
+`--postgres-dsn-env AIPCS_DATABASE_DSN`; providing that environment variable
+alone does not select it.
 
 For a service behind a host-local reverse proxy, the container must bind its
 own network interface while Docker publishes the port only to the host's
@@ -134,7 +145,7 @@ docker run --rm \
   --publish 127.0.0.1:8000:8000 \
   --env AIPCS_DATABASE_DSN \
   --volume /absolute/operator/config.toml:/etc/aipcs/config.toml:ro \
-  aipcs:local
+  aipcs:local serve --config /etc/aipcs/config.toml
 ```
 
 An upstream proxy may terminate TLS and authenticate clients before forwarding
