@@ -1,8 +1,8 @@
 # Contributing
 
-The project is preparing for its first public release. Contributors retain
-copyright in their work; by submitting a contribution, they license it under
-[Apache-2.0](LICENSE). The maintainer welcomes legitimate issues and pull
+Contributors retain copyright in their work. By submitting a contribution,
+they license it under [Apache-2.0](LICENSE). The maintainer welcomes legitimate
+issues and pull
 requests, but cannot promise a review, response, or merge time. Maintainers
 may close work that is out of scope or cannot be sustained.
 

@@ -4,7 +4,7 @@ All notable user-visible changes are recorded here. AIPCS is pre-1.0, so
 minor releases may include breaking changes; those changes will be called out
 explicitly.
 
-## Unreleased — next version
+## 0.1.2 — 2026-10-30
 
 ### Added
 
@@ -18,7 +18,7 @@ explicitly.
 - Explicit object roots on MCP output schemas so strict clients can discover
   every tool while retaining the success/failure envelope alternatives.
 
-## 0.1.1 — unreleased
+## 0.1.1 — released 2026-08-09
 
 ### Added
 
