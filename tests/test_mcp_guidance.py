@@ -19,6 +19,8 @@ from aipcs_mcp.application.data import DataApplication
 from aipcs_mcp.application.services import ServiceApplication
 from aipcs_mcp.mcp_server import create_server
 
+ROOT = Path(__file__).resolve().parents[1]
+
 # Independently specified public effects: updates include metadata replacement
 # and membership removal/moves, not only record deletion.
 READS = {
@@ -126,7 +128,12 @@ def test_stdio_client_receives_profile_guidance(tmp_path: Path, persistent: bool
         parameters = StdioServerParameters(
             command=sys.executable,
             args=["-m", "aipcs_mcp", "serve"],
-            env={"PYTHONDONTWRITEBYTECODE": "1"},
+            cwd=ROOT,
+            env={
+                "PYTHONPATH": str(ROOT / "src"),
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
         )
 
     async def exercise() -> None:
