@@ -434,6 +434,9 @@ def _tool(
     output_schema = TypeAdapter(_TypedSuccessEnvelope[result] | FailureEnvelope).json_schema(
         by_alias=True
     )
+    # MCP requires an explicitly object-typed output root, even when each
+    # alternative in the generated success/failure union is already an object.
+    output_schema["type"] = "object"
     effect = _TOOL_EFFECTS[name]
     if effect != "read":
         description += " Retry uncertain outcomes with the exact same request and idempotency key."

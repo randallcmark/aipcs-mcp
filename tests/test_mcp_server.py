@@ -111,6 +111,7 @@ def test_low_level_catalogue_is_exact_and_flat() -> None:
         assert tool.inputSchema["required"] == _REQUIRED[tool.name]
         assert "request" not in tool.inputSchema["properties"]
         assert tool.outputSchema is not None
+        assert tool.outputSchema.get("type") == "object"
         success_name = f"_TypedSuccessEnvelope_{_RESULT_MODELS[tool.name]}_"
         assert tool.outputSchema["anyOf"] == [
             {"$ref": f"#/$defs/{success_name}"},

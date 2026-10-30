@@ -74,6 +74,12 @@ def assert_client_guidance(
         assert "not evidence authority" in instructions
         assert "adjacent additive manifest" in instructions
     for name, tool in tools.items():
+        assert tool.outputSchema is not None
+        assert tool.outputSchema.get("type") == "object"
+        assert len(tool.outputSchema["anyOf"]) == 2
+        for alternative in tool.outputSchema["anyOf"]:
+            definition = alternative["$ref"].removeprefix("#/$defs/")
+            assert tool.outputSchema["$defs"][definition]["type"] == "object"
         assert tool.annotations is not None
         assert tool.annotations.readOnlyHint is (name in READS)
         assert tool.annotations.destructiveHint is (name in CHANGES)

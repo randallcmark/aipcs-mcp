@@ -13,6 +13,11 @@ explicitly.
 - Stdio and Streamable HTTP checks for client-visible orientation and tool
   discovery in stateless and SQLite profiles.
 
+### Fixed
+
+- Explicit object roots on MCP output schemas so strict clients can discover
+  every tool while retaining the success/failure envelope alternatives.
+
 ## 0.1.1 — unreleased
 
 ### Added
