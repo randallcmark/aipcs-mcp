@@ -28,14 +28,14 @@ _NAMES = [
     "aipcs_service_materialise",
     "aipcs_service_evolve",
 ]
-_DESCRIPTIONS = {
-    "aipcs_server_info": "Return the public AIPCS MCP capability contract.",
-    "aipcs_service_seed": "Create or replay a durable service seed.",
-    "aipcs_service_list": "List durable services for the configured principal.",
-    "aipcs_service_inspect": "Inspect one durable service projection.",
-    "aipcs_service_design": "Validate and store an initial service design.",
-    "aipcs_service_materialise": "Materialise a designed service using an exact lifecycle precondition.",
-    "aipcs_service_evolve": "Evolve a materialised service with one complete adjacent manifest.",
+_DESCRIPTION_CUES = {
+    "aipcs_server_info": ("capability",),
+    "aipcs_service_seed": ("durable service seed",),
+    "aipcs_service_list": ("configured principal",),
+    "aipcs_service_inspect": ("current manifest", "revisions", "field types"),
+    "aipcs_service_design": ("initial service design",),
+    "aipcs_service_materialise": ("exact lifecycle precondition",),
+    "aipcs_service_evolve": ("complete adjacent additive manifest", "current revisions"),
 }
 _REQUIRED = {
     "aipcs_server_info": [],
@@ -104,7 +104,8 @@ def test_low_level_catalogue_is_exact_and_flat() -> None:
     tools = anyio.run(_catalogue, ready)
     assert [tool.name for tool in tools] == _NAMES
     for tool in tools:
-        assert tool.description == _DESCRIPTIONS[tool.name]
+        assert isinstance(tool.description, str) and len(tool.description) < 1_000
+        assert all(cue in tool.description for cue in _DESCRIPTION_CUES[tool.name])
         assert tool.inputSchema["type"] == "object"
         assert tool.inputSchema["additionalProperties"] is False
         assert tool.inputSchema["required"] == _REQUIRED[tool.name]

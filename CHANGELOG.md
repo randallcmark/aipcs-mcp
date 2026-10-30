@@ -4,6 +4,15 @@ All notable user-visible changes are recorded here. AIPCS is pre-1.0, so
 minor releases may include breaking changes; those changes will be called out
 explicitly.
 
+## Unreleased — next version
+
+### Added
+
+- Capability-aware MCP initialization guidance and tool-effect hints for
+  selective persistence, exact recall and unchanged-request retries.
+- Stdio and Streamable HTTP checks for client-visible orientation and tool
+  discovery in stateless and SQLite profiles.
+
 ## 0.1.1 — unreleased
 
 ### Added
