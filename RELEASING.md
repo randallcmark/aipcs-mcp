@@ -2,15 +2,17 @@
 
 ## Versioning
 
-The first public release is planned as `0.1.0`. Until `1.0.0`, minor releases
+The package is published on PyPI as `aipcs`. Until `1.0.0`, minor releases
 may make breaking changes with explicit release notes. Additive evolution is
 preferred, especially for MCP tools, CLI commands, configuration, and storage
 migrations.
 
-GitHub is the source of truth. A GitHub release and PyPI publication are
-separate maintainer approvals. PyPI publication is intentionally deferred until
-the maintainer has completed a dedicated Trusted Publishing setup and release
-rehearsal.
+GitHub is the source of truth. Publishing a GitHub release triggers the existing
+[Publish to PyPI workflow](.github/workflows/publish-pypi.yml). It checks that the
+release tag matches the package version, builds and attests the distributions,
+then publishes through PyPI Trusted Publishing using the `pypi` environment.
+Complete the release gates before publishing the GitHub release: package
+publication follows automatically through that workflow.
 
 ## Before a GitHub release
 
@@ -28,19 +30,21 @@ rehearsal.
    and confirm that `SECURITY.md` is current.
 6. Run the manual **Package candidate** workflow. It builds distributions and
    records GitHub build provenance attestations for them.
-7. Create and annotate the `v0.1.0` tag and GitHub release, including known
-   limitations and migration notes.
+7. Create an annotated `v<VERSION>` tag for the verified candidate and publish
+   the GitHub release, including known limitations and migration notes. Monitor
+   the triggered **Publish to PyPI** workflow through successful completion.
 
 Normal CI automatically scans reachable Git history for public-hygiene
 violations. The manual release rehearsal repeats that scan alongside the
 artifact, SQLite, and PostgreSQL checks on the exact candidate commit.
 
-## Later PyPI publication
+## PyPI publication
 
-PyPI publication requires a separate approval. Configure a PyPI Trusted
-Publisher for a dedicated publishing workflow before publishing; do not add a
-long-lived PyPI token to repository secrets. Publish only artefacts built and
-attested by GitHub Actions, then test the normal package-name invocation:
+Keep the PyPI Trusted Publisher configured for the existing publishing workflow
+and `pypi` environment; do not add a long-lived PyPI token to repository secrets.
+The workflow publishes only distributions built and attested by GitHub Actions.
+After it succeeds, verify the expected version on PyPI and test the normal
+package-name invocation:
 
 ```text
 uvx --from aipcs aipcs --help

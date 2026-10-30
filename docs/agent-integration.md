@@ -44,10 +44,18 @@ session identifier are not client credentials.
 
 ## Recommended agent protocol
 
+MCP initialization supplies a short orientation matched to the available tools.
+Tool descriptions reinforce exact recall, schema inspection and unchanged-request
+retry. This helps clients that have no workspace instruction file; clients may
+display or use this metadata differently, so the copyable instruction below
+remains useful. Neither route prescribes a domain or task schema.
+
 1. Call `aipcs_bootstrap` at the beginning of a session. If it shows a
    guidance service, retrieve only the help needed for the current task.
 2. Select a relevant service, then call `aipcs_service_summary`.
-3. Follow the returned filter modes and retrieval guidance.
+3. Follow the returned filter modes and retrieval guidance. Use
+   `aipcs_service_inspect` for the complete manifest when field types, allowed
+   values or other constraints are needed.
 4. Persist durable information when it becomes useful; do not wait for
    context exhaustion.
 5. Before compaction or handoff, persist decisions, state, evidence, and the
@@ -57,6 +65,19 @@ session identifier are not client credentials.
    information cleanly.
 8. Treat maintenance candidates as prompts for judgment, never automatic
    deletion instructions.
+
+The tool catalogue includes MCP effect hints: reads are read-only, every tool
+operates within the configured memory service, and unchanged mutation requests
+are idempotent. Updates, deletion, schema evolution and membership changes are
+conservatively marked as potentially destructive because they can replace
+metadata or remove state. These hints are not authorization; a new idempotency
+key is a new intent, not a retry.
+
+Choose domain fields that preserve useful sources, observations and uncertainty.
+Server-managed `created_via` identifies creation provenance; it does not establish
+the authority or truth of a remembered claim. Reconsider the model when exact
+recall becomes awkward, while retaining evidence and using supported additive
+evolution. Successful storage alone does not establish useful recall.
 
 ## Bootstrap and retrieval
 

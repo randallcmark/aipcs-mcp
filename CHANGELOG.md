@@ -4,7 +4,23 @@ All notable user-visible changes are recorded here. AIPCS is pre-1.0, so
 minor releases may include breaking changes; those changes will be called out
 explicitly.
 
-## 0.1.1 — unreleased
+## 0.1.2 — 2026-10-30
+
+### Added
+
+- Capability-aware MCP initialization guidance and tool-effect hints for
+  selective persistence, exact recall and unchanged-request retries.
+- Stdio and Streamable HTTP checks for client-visible orientation and tool
+  discovery in stateless and SQLite profiles.
+
+### Fixed
+
+- Explicit object roots on MCP output schemas so strict clients can discover
+  every tool while retaining the success/failure envelope alternatives.
+- Raised MCP, PyJWT and certifi dependency floors and refreshed their locked
+  versions to include published security fixes in packaged installations.
+
+## 0.1.1 — released 2026-08-09
 
 ### Added
 

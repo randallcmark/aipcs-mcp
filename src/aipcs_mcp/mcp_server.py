@@ -188,6 +188,31 @@ _DATA_TOOL_NAMES = frozenset(
         "aipcs_maintenance_scan",
     }
 )
+# Every advertised tool has an explicit effect classification. These are client
+# hints, not authorization; adding a tool requires reviewing its actual effects.
+_TOOL_EFFECTS = {
+    "aipcs_server_info": "read",
+    "aipcs_service_seed": "add",
+    "aipcs_service_list": "read",
+    "aipcs_service_inspect": "read",
+    "aipcs_service_design": "add",
+    "aipcs_service_materialise": "add",
+    "aipcs_service_evolve": "change",
+    "aipcs_record_create": "add",
+    "aipcs_record_get": "read",
+    "aipcs_record_list": "read",
+    "aipcs_record_search": "read",
+    "aipcs_record_update": "change",
+    "aipcs_record_delete": "change",
+    "aipcs_record_history": "read",
+    "aipcs_bootstrap": "read",
+    "aipcs_service_summary": "read",
+    "aipcs_branch_create": "add",
+    "aipcs_branch_list": "read",
+    "aipcs_branch_update": "change",
+    "aipcs_branch_assign_records": "change",
+    "aipcs_maintenance_scan": "read",
+}
 _INTERNAL_RESULT = types.CallToolResult(
     content=[
         types.TextContent(
@@ -231,7 +256,13 @@ def create_server(
     if data_application is not None and (not registry_lifecycle or not materialisation_lifecycle):
         raise ValueError("Incomplete data runtime binding.")
     data_runtime = data_application is not None
-    server = Server("aipcs", version=__version__)
+    server = Server(
+        "aipcs",
+        version=__version__,
+        instructions=_server_instructions(
+            registry_lifecycle, materialisation_lifecycle, data_runtime
+        ),
+    )
     tools = _tools(registry_lifecycle, materialisation_lifecycle, data_runtime)
 
     @server.list_tools()
@@ -265,6 +296,51 @@ async def run_stdio(server: Server) -> None:
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
+def _server_instructions(
+    registry_lifecycle: bool, materialisation_lifecycle: bool, data_runtime: bool
+) -> str:
+    parts = [
+        "AIPCS provides agent-managed structured memory. "
+        "Use aipcs_server_info for capabilities; tools/list is authoritative."
+    ]
+    if not registry_lifecycle:
+        return " ".join(parts + ["This profile exposes capability information only."])
+    if data_runtime:
+        parts.append(
+            "Start with aipcs_bootstrap, select relevant services, then use "
+            "aipcs_service_summary for declared filters and bounded discovery. "
+            "Recall with aipcs_record_search using exact scalar equality or one declared "
+            "list member; return opaque cursors unchanged with the same query. "
+            "Persist selectively when information will help beyond the current context, "
+            "including useful evidence, uncertainty and a resume point before handoff. "
+            "Choose the domain model; no task schema is prescribed."
+        )
+    else:
+        parts.append("Use aipcs_service_list to find relevant services.")
+    parts.append(
+        "Use aipcs_service_inspect for the complete current manifest, field types and "
+        "constraints before designing or changing a model. New services use "
+        "aipcs_service_seed then aipcs_service_design."
+    )
+    if materialisation_lifecycle:
+        parts.append(
+            "Use aipcs_service_materialise before storing records. Reconsider the model "
+            "when recall becomes awkward; aipcs_service_evolve accepts a complete "
+            "adjacent additive manifest with current revisions."
+        )
+    parts.append(
+        "Retain each mutation's exact request and idempotency key for uncertain retries; "
+        "use current revisions for new changes."
+    )
+    if data_runtime:
+        parts.append(
+            "Managed creation provenance is not evidence authority. "
+            "aipcs_maintenance_scan returns advisory candidates, never automatic truth "
+            "decisions or permission to delete."
+        )
+    return " ".join(parts)
+
+
 def _tools(
     registry_lifecycle: bool,
     materialisation_lifecycle: bool = False,
@@ -295,7 +371,7 @@ def _tools(
                 ),
                 _tool(
                     "aipcs_service_inspect",
-                    "Inspect one durable service projection.",
+                    "Inspect a service's complete current manifest and revisions, including field types and constraints needed for valid records, filters and schema evolution.",
                     ServiceInspectRequest,
                     ServiceMetadata,
                 ),
@@ -318,7 +394,7 @@ def _tools(
                 ),
                 _tool(
                     "aipcs_service_evolve",
-                    "Evolve a materialised service with one complete adjacent manifest.",
+                    "Evolve a materialised service when its model no longer supports useful persistence or recall. Inspect first; supply a complete adjacent additive manifest and current revisions, never SQL or a partial delta.",
                     ServiceEvolveRequest,
                     ServiceMetadata,
                 ),
@@ -330,12 +406,12 @@ def _tools(
                 _tool("aipcs_record_create", "Create one record in a materialised service.", RecordCreateRequest, PublicRecordMutationResult),
                 _tool("aipcs_record_get", "Get one record by entity and identifier.", RecordGetRequest, RecordDocument),
                 _tool("aipcs_record_list", "List records with bounded exact branch scope.", RecordListRequest, PublicRecordPageResult),
-                _tool("aipcs_record_search", "Search records using declared exact filters.", RecordSearchRequest, PublicRecordPageResult),
+                _tool("aipcs_record_search", "Recall records using exact scalar equality or one string member of a declared membership field. Use service summary for filter modes and service inspect for types/constraints; annotation fields are not searchable. Return cursors unchanged with the same query.", RecordSearchRequest, PublicRecordPageResult),
                 _tool("aipcs_record_update", "Update one record with an exact version precondition.", RecordUpdateRequest, PublicRecordMutationResult),
                 _tool("aipcs_record_delete", "Delete one record with an exact version precondition.", RecordDeleteRequest, PublicRecordDeleteResult),
                 _tool("aipcs_record_history", "List bounded record history.", RecordHistoryRequest, PublicRecordHistoryResult),
-                _tool("aipcs_bootstrap", "Orient to service topology without reading service stores.", BootstrapRequest, PublicBootstrapResult),
-                _tool("aipcs_service_summary", "Summarise one materialised service with bounded discovery facts.", ServiceSummaryRequest, PublicServiceSummaryResult),
+                _tool("aipcs_bootstrap", "Start session orientation with bounded service shapes, without reading record values or opening service stores. Select relevant services, then use service summary before bounded recall.", BootstrapRequest, PublicBootstrapResult),
+                _tool("aipcs_service_summary", "Discover a selected service's declared filter modes, query guidance, authority fields and bounded counts/facets/optional samples. Use service inspect for full field types and constraints; observed values do not rank relevance or truth.", ServiceSummaryRequest, PublicServiceSummaryResult),
                 _tool("aipcs_branch_create", "Create one durable memory branch.", BranchCreateRequest, PublicBranchMutationResult),
                 _tool("aipcs_branch_list", "List direct memory branches with bounded pagination.", BranchListRequest, PublicBranchPageResult),
                 _tool("aipcs_branch_update", "Update one memory branch with an exact revision precondition.", BranchUpdateRequest, PublicBranchMutationResult),
@@ -358,8 +434,23 @@ def _tool(
     output_schema = TypeAdapter(_TypedSuccessEnvelope[result] | FailureEnvelope).json_schema(
         by_alias=True
     )
+    # MCP requires an explicitly object-typed output root, even when each
+    # alternative in the generated success/failure union is already an object.
+    output_schema["type"] = "object"
+    effect = _TOOL_EFFECTS[name]
+    if effect != "read":
+        description += " Retry uncertain outcomes with the exact same request and idempotency key."
     return types.Tool(
-        name=name, description=description, inputSchema=schema, outputSchema=output_schema
+        name=name,
+        description=description,
+        inputSchema=schema,
+        outputSchema=output_schema,
+        annotations=types.ToolAnnotations(
+            readOnlyHint=effect == "read",
+            destructiveHint=effect == "change",
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
     )
 
 
