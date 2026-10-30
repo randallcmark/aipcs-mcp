@@ -20,7 +20,11 @@ classifiers = [
 ]
 
 dependencies = [
-  "mcp>=1.28.1,<2",
+  "mcp>=1.30.0,<2",
+  # Security floors for transitive SDK JWT and HTTP client CA dependencies.
+  # Keep published installations from retaining known-vulnerable versions.
+  "PyJWT>=2.15.1",
+  "certifi>=2026.10.23",
   "packaging>=24",
   "pydantic>=2.11,<3",
   "starlette>=0.45,<2",

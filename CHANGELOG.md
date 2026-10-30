@@ -17,6 +17,8 @@ explicitly.
 
 - Explicit object roots on MCP output schemas so strict clients can discover
   every tool while retaining the success/failure envelope alternatives.
+- Raised MCP, PyJWT and certifi dependency floors and refreshed their locked
+  versions to include published security fixes in packaged installations.
 
 ## 0.1.1 — released 2026-08-09
 
